@@ -54,7 +54,7 @@ Wrappers of Paho/gmqtt (`fastapi-mqtt`, `jmqtt`, …) are intentionally excluded
 |---|---|---|
 | Publisher capacity / QoS0–1 | stable clients with matching caps | QoS2 excluded for gmqtt |
 | `pub_qos1_inflight` | paho, aiomqtt | requires `max_inflight` |
-| Application RTT | stable clients with RTT calibration | same lib on both ends; fractions of `rtt_capacity_qos1` |
+| Application RTT | stable clients with RTT calibration | same lib on both ends; fractions of `rtt_capacity_qos1`; awscrt refused (no `TCP_NODELAY`) |
 | `sub_callback_matching` | **paho only** | native `message_callback_add` |
 | Fleet idle | sync clients only | async_bridged refused (1 loop/thread per conn) |
 | MQTT v5 properties | paho, gmqtt, aiomqtt, awscrt, zmqtt | amqtt / aiomqtt3 constraints apply |
@@ -139,6 +139,13 @@ Open-loop RTT fractions are sized from `rtt_capacity_qos1` (closed-loop max
 completed pairs/s for that client), **not** from publisher-only capacity. A
 publish QoS1 baseline understates the RTT ceiling (two publishes + two
 deliveries per sample) and would mark high fractions inconclusive.
+
+RTT scenarios require `TCP_NODELAY` end to end: without it, ping-pong traffic
+measures a deterministic Nagle+delayed-ACK plateau (~40 ms/hop ≈ 84 ms/pair on
+loopback), not the client. The broker sets `set_tcp_nodelay true`; paho and
+aiomqtt set it on their sockets; asyncio clients get it from the runtime.
+`awscrt` (aws-c-io) exposes no such knob, so its RTT points are refused with
+`not_implemented:tcp_nodelay` rather than published as a TCP artifact.
 
 ### Publish completion contract
 
@@ -241,4 +248,6 @@ PYTHONPATH=src python tests/test_unit.py
 - `aiomqtt` v2 and v3 cannot cohabit in one environment.
 - `amqtt` has no MQTT v5 client path in this bench (`mqtt_v5=false`).
 - `gmqtt` QoS2 completion is at PUBREC in 0.7 (`qos2=false`).
+- `awscrt` cannot set `TCP_NODELAY` (aws-c-io hides the fd) → RTT scenarios
+  refused; its publish/ingress numbers are unaffected (pipelined writes).
 - Sync facade overhead for asyncio clients is intentional and documented.

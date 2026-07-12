@@ -442,6 +442,20 @@ class ScenarioTests(unittest.TestCase):
         session = SCENARIO_BY_NAME["session_resume_qos1"]
         self.assertIn("planned", session.tags)
 
+    def test_rtt_requires_tcp_nodelay(self):
+        # Without TCP_NODELAY the RTT loop measures a ~40 ms/hop Nagle plateau.
+        from mqtt_client_bench.adapters.awscrt import AwscrtAdapter
+        from mqtt_client_bench.adapters.paho import PahoAdapter
+
+        point = {"topology": "application_rtt", "qos_publish": 1, "qos_subscribe": 1}
+        self.assertIn("tcp_nodelay", AwscrtAdapter.capabilities().missing_for_point(point))
+        self.assertNotIn("tcp_nodelay", PahoAdapter.capabilities().missing_for_point(point))
+        # Non-RTT topologies stay unaffected for awscrt.
+        self.assertNotIn(
+            "tcp_nodelay",
+            AwscrtAdapter.capabilities().missing_for_point({"topology": "publisher_only"}),
+        )
+
     def test_niche_scenarios_are_planned(self):
         # Harness-level gaps: kept in the catalogue, excluded from suite
         # execution instead of burning campaign time on refused points.
