@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mqtt-client-bench"
+version = "0.1.0"
+description = "Comparative end-to-end benchmark for popular Python MQTT client libraries"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "EPL-2.0 OR EDL-1.0" }
+authors = [{ name = "MQTT client bench contributors" }]
+dependencies = []
+
+[project.optional-dependencies]
+paho = ["paho-mqtt>=2.1.0"]
+gmqtt = ["gmqtt>=0.7.0"]
+aiomqtt = ["aiomqtt>=2.3.0,<3"]
+amqtt = ["amqtt>=0.11.0"]
+all = [
+  "mqtt-client-bench[paho]",
+  "mqtt-client-bench[gmqtt]",
+  "mqtt-client-bench[aiomqtt]",
+  "mqtt-client-bench[amqtt]",
+]
+dev = ["pytest>=7"]
+
+[project.scripts]
+mqtt-client-bench = "mqtt_client_bench.run:main"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/mosquitto",
+  "/certs",
+  "/fixtures",
+  "/tests",
+  "/docker-compose.yml",
+  "/README.md",
+  "/pyproject.toml",
+  "/LICENSE",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mqtt_client_bench"]
