@@ -9,14 +9,15 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install package
-        run: pip install -e ".[dev,all]"
+        # zmqtt is experimental (outside [all]) but unit tests cover its adapter.
+        run: pip install -e ".[dev,all,zmqtt]"
 
       - name: Run unit tests
         run: PYTHONPATH=src python -m unittest tests.test_unit -v
