@@ -15,7 +15,7 @@ from mqtt_client_bench.control import write_json
 from mqtt_client_bench.harness import calibrate, compare_clients, run_scenario, run_suite
 from mqtt_client_bench.network import PROFILES
 from mqtt_client_bench.report import build_site
-from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, estimate_suite, list_scenarios
+from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, default_runs, estimate_suite, list_scenarios
 
 
 def cmd_broker(args: argparse.Namespace) -> int:
@@ -37,7 +37,7 @@ def cmd_list(args: argparse.Namespace) -> int:
         tags = ",".join(scenario.tags)
         print(f"{scenario.name:<28} suite={scenario.suite:<4} tags={tags:<28} {scenario.description}")
     if args.suite:
-        est = estimate_suite(args.suite, args.profile, 7 if args.profile == "standard" else 1)
+        est = estimate_suite(args.suite, args.profile, default_runs(args.profile))
         print(
             f"\nEstimate ({args.profile}): {est['points']} points, "
             f"{est['runs_per_point']} runs/point, ~{est['estimated_minutes']} min"

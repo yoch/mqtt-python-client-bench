@@ -46,7 +46,13 @@ from mqtt_client_bench.metrics import (
 from mqtt_client_bench.network import PROFILES as NETWORK_PROFILES
 from mqtt_client_bench.network import apply_profile, clear_profile, qdisc_stats
 from mqtt_client_bench.paths import PROJECT_ROOT
-from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario, list_scenarios, estimate_suite
+from mqtt_client_bench.scenarios import (
+    SCENARIO_BY_NAME,
+    default_runs,
+    estimate_suite,
+    expand_scenario,
+    list_scenarios,
+)
 from mqtt_client_bench.telemetry import TelemetrySampler, allocate_cpuset, environment_metadata
 from mqtt_client_bench.workloads import (
     PAYLOAD_SPECS,
@@ -305,9 +311,9 @@ def run_point(
             ("inflight", 20),
             ("max_queued", 200),
             ("outstanding", 64),
-            ("duration_s", 3.0 if profile == "smoke" else 60.0),
-            ("warmup_s", 1.0 if profile == "smoke" else 15.0),
-            ("drain_s", 2.0 if profile == "smoke" else 30.0),
+            ("duration_s", 3.0 if profile == "smoke" else 20.0),
+            ("warmup_s", 1.0 if profile == "smoke" else 5.0),
+            ("drain_s", 2.0 if profile == "smoke" else 10.0),
             ("protocol", "MQTTv311"),
             ("force_header", False),
         ):
@@ -792,7 +798,7 @@ def run_scenario(
 ) -> dict:
     scenario = SCENARIO_BY_NAME[name]
     if runs is None:
-        runs = 1 if profile == "smoke" else 7
+        runs = default_runs(profile)
     points = expand_scenario(scenario, profile)
     if network:
         for p in points:
@@ -901,7 +907,7 @@ def run_suite(suite: str, **kwargs) -> dict:
     # Exclude planned/non-executable scenarios from suite execution.
     scenarios = [s for s in scenarios if "planned" not in s.tags]
     profile = kwargs.get("profile", "standard")
-    runs = kwargs.get("runs") or (1 if profile == "smoke" else 7)
+    runs = kwargs.get("runs") or default_runs(profile)
     estimate = estimate_suite(suite, profile, runs)
     print(
         f"Suite {suite}: {estimate['scenarios']} scenarios, "
@@ -954,7 +960,7 @@ def calibrate(
         client=client,
         client_path=client_path,
         profile=profile,
-        runs=7 if profile == "standard" else 1,
+        runs=default_runs(profile),
     )
     capacity = capacity_from_qos_sweep(result)
     identity = adapter_identity(client, client_path)
