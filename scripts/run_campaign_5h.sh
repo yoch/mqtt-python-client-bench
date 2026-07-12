@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Bounded campaign: calibrate + representative core (3 runs) + 2 ABBA + report.
+# Bounded campaign: calibrate (publish + RTT capacity) + representative core
+# (3 runs) + 2 ABBA + report.
 # Fail closed: any step error aborts the rest.
 set -euo pipefail
 cd "$(dirname "$0")/.."

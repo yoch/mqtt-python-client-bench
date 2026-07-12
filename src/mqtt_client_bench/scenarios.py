@@ -287,15 +287,37 @@ SCENARIOS: List[Scenario] = [
         estimated_minutes=6.0,
     ),
     Scenario(
+        name="rtt_capacity_qos1",
+        suite="core",
+        tags=("diagnostic",),
+        topology="application_rtt",
+        description=(
+            "Closed-loop application RTT capacity (same client as initiator and "
+            "responder). Used as the baseline for application_rtt_qos1 load fractions."
+        ),
+        qos_publish=1,
+        qos_subscribe=1,
+        payload="telemetry256",
+        cadence="capacity",
+        outstanding=32,
+        subscribers=1,
+        estimated_minutes=3.0,
+    ),
+    Scenario(
         name="application_rtt_qos1",
         suite="core",
         tags=("representative",),
         topology="application_rtt",
-        description="Application request/response RTT with responder process.",
+        description=(
+            "Open-loop application RTT latency at fractions of that client's "
+            "RTT capacity. Same library drives initiator and responder "
+            "(homogeneous product loop)."
+        ),
         qos_publish=1,
         qos_subscribe=1,
         payload="telemetry256",
         cadence="loaded75",
+        outstanding=32,
         subscribers=1,
         variants=tuple({"load_fraction": f} for f in (0.25, 0.50, 0.75, 0.90)),
         estimated_minutes=6.0,
@@ -420,9 +442,9 @@ SCENARIOS: List[Scenario] = [
     Scenario(
         name="mqttv5_flow_control",
         suite="full",
-        tags=("diagnostic",),
+        tags=("diagnostic", "planned"),
         topology="publisher_only",
-        description="Receive Maximum vs client inflight interaction.",
+        description="Receive Maximum vs client inflight interaction (planned — not executable yet).",
         protocol="MQTTv5",
         qos_publish=1,
         variants=(
@@ -449,9 +471,9 @@ SCENARIOS: List[Scenario] = [
     Scenario(
         name="queue_rejection",
         suite="full",
-        tags=("functional",),
+        tags=("functional", "planned"),
         topology="publisher_only",
-        description="Queue rejection accounting under controlled pressure.",
+        description="Queue rejection accounting under controlled pressure (planned — not executable yet).",
         qos_publish=1,
         inflight=1,
         max_queued=100,
@@ -462,9 +484,9 @@ SCENARIOS: List[Scenario] = [
     Scenario(
         name="retained_bootstrap",
         suite="full",
-        tags=("stress", "functional"),
+        tags=("stress", "functional", "planned"),
         topology="subscriber_ingress",
-        description="Retained message bootstrap snapshot (broker-sensitive).",
+        description="Retained message bootstrap snapshot (broker-sensitive; planned — not executable yet).",
         subscribers=1,
         variants=tuple({"retained_count": n} for n in (10_000, 100_000)),
         estimated_minutes=6.0,

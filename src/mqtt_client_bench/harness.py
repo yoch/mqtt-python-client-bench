@@ -262,12 +262,19 @@ def run_point(
         }
 
     if load_profile and point.get("load_fraction") is not None:
-        capacity = load_profile.get("capacity_msgs_per_s")
+        if point.get("topology") == "application_rtt":
+            capacity = load_profile.get("rtt_capacity_msgs_per_s")
+            capacity_kind = "rtt"
+        else:
+            capacity = load_profile.get("capacity_msgs_per_s")
+            capacity_kind = "publish"
         if capacity:
             point["target_rate"] = float(capacity) * float(point["load_fraction"])
+            point["calibration_kind"] = capacity_kind
     if point.get("load_fraction") is not None and not point.get("target_rate"):
         # Without a calibrated capacity the workers would silently fall back to
         # an arbitrary absolute rate, breaking cross-client comparability.
+        kind = "rtt" if point.get("topology") == "application_rtt" else "publish"
         return {
             "schema_version": 1,
             "run_id": run_id,
@@ -275,7 +282,7 @@ def run_point(
             "client": client,
             "client_path": client_path,
             "status": "inconclusive",
-            "reasons": ["load_fraction_without_calibration"],
+            "reasons": [f"load_fraction_without_{kind}_calibration"],
             "workers": [],
         }
 
@@ -972,6 +979,32 @@ def capacity_from_qos_sweep(result: dict) -> Optional[float]:
     return median(rates)
 
 
+def capacity_from_scenario(result: dict) -> Optional[float]:
+    """Median primary rate across valid (or smoke) runs of a single-point scenario."""
+    rates: List[float] = []
+    for block in result.get("results") or []:
+        summary = block.get("summary") or {}
+        if summary.get("median") is not None:
+            rates.append(float(summary["median"]))
+            continue
+        for run in block.get("runs") or []:
+            if run.get("status") != "valid":
+                continue
+            rate = run.get("primary_msgs_per_s")
+            if rate is not None:
+                rates.append(float(rate))
+    return median(rates)
+
+
+def _fraction_map(capacity: Optional[float]) -> dict:
+    return {
+        "0.25": None if capacity is None else capacity * 0.25,
+        "0.50": None if capacity is None else capacity * 0.50,
+        "0.75": None if capacity is None else capacity * 0.75,
+        "0.90": None if capacity is None else capacity * 0.90,
+    }
+
+
 def calibrate(
     output: str,
     *,
@@ -979,15 +1012,28 @@ def calibrate(
     client_path: Optional[str] = None,
     profile: str = "standard",
 ) -> dict:
-    """Measure publisher capacity on telemetry QoS1 and emit open-loop fractions."""
-    result = run_scenario(
+    """Measure publish + RTT closed-loop capacities and emit open-loop fractions.
+
+    Publish capacity sizes ``puback_latency_qos1``. RTT capacity sizes
+    ``application_rtt_qos1`` — the two regimes are not interchangeable: an RTT
+    loop pays two publishes and two deliveries per completed sample.
+    """
+    pub_result = run_scenario(
         "pub_qos_sweep_telemetry",
         client=client,
         client_path=client_path,
         profile=profile,
         runs=default_runs(profile),
     )
-    capacity = capacity_from_qos_sweep(result)
+    capacity = capacity_from_qos_sweep(pub_result)
+    rtt_result = run_scenario(
+        "rtt_capacity_qos1",
+        client=client,
+        client_path=client_path,
+        profile=profile,
+        runs=default_runs(profile),
+    )
+    rtt_capacity = capacity_from_scenario(rtt_result)
     identity = adapter_identity(client, client_path)
     payload = {
         "schema_version": 1,
@@ -996,16 +1042,14 @@ def calibrate(
         "client_identity": identity,
         "profile": profile,
         "capacity_msgs_per_s": capacity,
-        "broker": result.get("broker"),
-        "environment": result.get("environment"),
+        "rtt_capacity_msgs_per_s": rtt_capacity,
+        "broker": pub_result.get("broker"),
+        "environment": pub_result.get("environment"),
         "scenario": "pub_qos_sweep_telemetry",
-        "fractions": {
-            "0.25": None if capacity is None else capacity * 0.25,
-            "0.50": None if capacity is None else capacity * 0.50,
-            "0.75": None if capacity is None else capacity * 0.75,
-            "0.90": None if capacity is None else capacity * 0.90,
-        },
-        "raw": result,
+        "rtt_scenario": "rtt_capacity_qos1",
+        "fractions": _fraction_map(capacity),
+        "rtt_fractions": _fraction_map(rtt_capacity),
+        "raw": {"publish": pub_result, "rtt": rtt_result},
     }
     write_json(output, payload)
     return payload
@@ -1115,6 +1159,7 @@ def compare_clients(
                     "calibrations": {
                         k: {
                             "capacity_msgs_per_s": v.get("capacity_msgs_per_s"),
+                            "rtt_capacity_msgs_per_s": v.get("rtt_capacity_msgs_per_s"),
                             "client": v.get("client"),
                             "client_identity": v.get("client_identity"),
                         }

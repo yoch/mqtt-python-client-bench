@@ -243,7 +243,11 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
             environment=data.get("environment") or {},
             broker=data.get("broker") or {},
             verdict=None,
-            raw_meta={"fractions": data.get("fractions")},
+            raw_meta={
+                "fractions": data.get("fractions"),
+                "rtt_capacity_msgs_per_s": data.get("rtt_capacity_msgs_per_s"),
+                "rtt_fractions": data.get("rtt_fractions"),
+            },
         )
 
     points: List[PointRow] = []
@@ -554,11 +558,17 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
     calibrate_block = ""
     if doc.kind == "calibrate":
         fractions = doc.raw_meta.get("fractions")
+        rtt_fractions = doc.raw_meta.get("rtt_fractions")
+        rtt_capacity = doc.raw_meta.get("rtt_capacity_msgs_per_s")
         calibrate_block = f"""
       <section class="panel">
         <h2>Calibration</h2>
-        <p>Baseline capacity: <strong>{_esc(_fmt_num(doc.median_msgs_per_s))}</strong> msg/s</p>
+        <p>Publish capacity: <strong>{_esc(_fmt_num(doc.median_msgs_per_s))}</strong> msg/s</p>
+        <p>RTT capacity: <strong>{_esc(_fmt_num(rtt_capacity))}</strong> pairs/s</p>
+        <h3>Publish fractions</h3>
         <pre class="code-block">{_esc(json.dumps(fractions, indent=2))}</pre>
+        <h3>RTT fractions</h3>
+        <pre class="code-block">{_esc(json.dumps(rtt_fractions, indent=2))}</pre>
       </section>
 """
 
