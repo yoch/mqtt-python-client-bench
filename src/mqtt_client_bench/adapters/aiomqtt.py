@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Optional
 
@@ -111,6 +112,15 @@ class AiomqttAdapter(BridgedAdapterBase):
         if self._tls_ca_certs:
             tls_params = aiomqtt.TLSParameters(ca_certs=self._tls_ca_certs)
 
+        # aiomqtt logs a WARNING per publish once pending calls exceed its
+        # threshold (default 10) — at bench outstanding windows that floods
+        # stderr with per-message I/O and biases throughput. Keep it quiet.
+        quiet_logger = logging.getLogger("mqtt_client_bench.aiomqtt")
+        quiet_logger.setLevel(logging.ERROR)
+        quiet_logger.propagate = False
+        if not quiet_logger.handlers:
+            quiet_logger.addHandler(logging.NullHandler())
+
         kwargs: dict[str, Any] = {
             "hostname": host,
             "port": port,
@@ -121,10 +131,13 @@ class AiomqttAdapter(BridgedAdapterBase):
             "tls_params": tls_params,
             "max_inflight_messages": self._max_inflight,
             "max_queued_outgoing_messages": self._max_queued,
+            "logger": quiet_logger,
         }
 
         async def _connect():
             self._client = aiomqtt.Client(**kwargs)
+            # Skip the per-publish pending-calls warning branch entirely.
+            self._client.pending_calls_threshold = 1 << 30
             await self._client.__aenter__()
             self._connected = True
             self._fire_on_connect(flags={}, reason_code=0, properties=None)

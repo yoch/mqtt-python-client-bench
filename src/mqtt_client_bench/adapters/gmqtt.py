@@ -25,6 +25,10 @@ class GmqttAdapter(BridgedAdapterBase):
         self._clean_session = True
         self._tls_ca_certs: Optional[str] = None
         self._ssl_context: Any = None
+        # Real gmqtt packet id -> synthetic mid returned by publish().
+        # Only touched on the bridge loop thread (publish coroutine + PUBACK
+        # handler both run there), so no extra locking is needed.
+        self._real_to_synth: dict[int, int] = {}
 
     @classmethod
     def capabilities(cls) -> AdapterCapabilities:
@@ -45,7 +49,8 @@ class GmqttAdapter(BridgedAdapterBase):
             stability="stable",
             io_model="asyncio_bridged",
             implementation_language="python",
-            # QoS0 publish returns mid=None from the connection layer; we allocate synthetics.
+            # publish() returns synthetic mids; PUBACKs are translated back
+            # from real packet ids via an on-loop mapping.
             synthetic_mids=True,
             notes=cls._NOTES,
             unimplemented=[],
@@ -123,7 +128,8 @@ class GmqttAdapter(BridgedAdapterBase):
 
         def _remove_and_ack(mid):
             orig(mid)
-            self._fire_on_publish(int(mid), reason_code=0)
+            synth = self._real_to_synth.pop(int(mid), None)
+            self._fire_on_publish(int(mid) if synth is None else synth, reason_code=0)
 
         client._remove_message_from_query = _remove_and_ack
 
@@ -176,31 +182,34 @@ class GmqttAdapter(BridgedAdapterBase):
             kwargs.update(properties)
         message = Message(topic, payload, qos=qos, retain=retain, **kwargs)
         client = self._client
+        # Same submission discipline as the other bridged adapters: allocate a
+        # synthetic mid, schedule the publish on the loop, return immediately.
+        # A blocking bridge round-trip per publish would forbid pipelining the
+        # outstanding window and structurally bias gmqtt against its peers.
+        synth_mid = self.alloc_mid()
 
-        async def _publish(qos0_mid: Optional[int] = None):
-            mid, package = client._connection.publish(message)
-            if mid is None:
-                mid = qos0_mid if qos0_mid is not None else self.alloc_mid()
-            else:
-                mid = int(mid)
-            if qos > 0:
-                push = getattr(client._persistent_storage, "push_message_nowait", None)
-                if push is not None:
-                    push(mid, package)
+        async def _publish():
+            real_mid = None
+            try:
+                real_mid, package = client._connection.publish(message)
+                if qos > 0 and real_mid is not None:
+                    # Register before storing so the PUBACK hook (same loop
+                    # thread) can translate the real packet id back.
+                    self._real_to_synth[int(real_mid)] = synth_mid
+                    push = getattr(client._persistent_storage, "push_message_nowait", None)
+                    if push is not None:
+                        push(int(real_mid), package)
+                    else:
+                        await client._persistent_storage.push_message(int(real_mid), package)
                 else:
-                    client._persistent_storage.push_message(mid, package)
-            else:
-                self._fire_on_publish(mid, reason_code=0)
-            return mid
+                    self._fire_on_publish(synth_mid, reason_code=0)
+            except Exception:  # noqa: BLE001
+                if real_mid is not None:
+                    self._real_to_synth.pop(int(real_mid), None)
+                self._fire_on_publish(synth_mid, reason_code=128)
 
-        # Responder on_message runs on the bridge loop — schedule, don't re-enter run().
-        # Pre-allocate the QoS0 mid so the returned value matches on_publish.
-        if self._bridge.on_loop_thread():
-            mid = self.alloc_mid()
-            self._bridge.create_task(_publish(qos0_mid=mid))
-            return PublishResult(rc=0, mid=mid)
-        mid = self._bridge.run(_publish())
-        return PublishResult(rc=0, mid=mid)
+        self._bridge.create_task(_publish())
+        return PublishResult(rc=0, mid=synth_mid)
 
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
         self._ensure_bridge()

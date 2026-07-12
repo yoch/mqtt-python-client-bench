@@ -70,7 +70,9 @@ def ensure_certs(force: bool = False) -> dict:
     server_crt = CERT_DIR / "server.crt"
     openssl_cfg = CERT_DIR / "openssl.cnf"
 
-    if server_crt.exists() and ca_crt.exists() and not force:
+    # Keys are gitignored: a fresh checkout can have the .crt files without
+    # their private keys, which crashes the broker's TLS listener.
+    if server_crt.exists() and ca_crt.exists() and server_key.exists() and not force:
         return {
             "ca_crt": str(ca_crt),
             "server_crt": str(server_crt),
@@ -173,6 +175,8 @@ IP.1 = 127.0.0.1
             "server_ext",
         ]
     )
+    # The container runs as uid 1883; throwaway bench key must be world-readable.
+    os.chmod(server_key, 0o644)
     return {
         "ca_crt": str(ca_crt),
         "server_crt": str(server_crt),
@@ -190,11 +194,68 @@ def compose_cmd(*args: str) -> list:
     return ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
 
 
+_BROKER_CONTAINER_CACHE: Optional[str] = None
+
+
+def broker_container_name() -> str:
+    """Resolve the actual container name for the compose 'mosquitto' service.
+
+    Compose prefixes the project name (e.g. 'client-mosquitto-1'); targeting a
+    bare 'mosquitto' silently breaks cpuset pinning and docker stats sampling.
+    """
+    global _BROKER_CONTAINER_CACHE
+    if _BROKER_CONTAINER_CACHE is not None:
+        return _BROKER_CONTAINER_CACHE
+    # -a also matches a crash-looping (exited) container so failures are attributed.
+    for args in (("ps", "-a", "--format", "{{.Name}}", "mosquitto"), ("ps", "-a", "-q", "mosquitto")):
+        try:
+            proc = _run(compose_cmd(*args), check=False)
+        except FileNotFoundError:
+            break
+        lines = [ln.strip() for ln in (proc.stdout or "").strip().splitlines() if ln.strip()]
+        if proc.returncode == 0 and lines:
+            _BROKER_CONTAINER_CACHE = lines[0]
+            return lines[0]
+    return "mosquitto"
+
+
+def _container_state(name: str) -> Optional[str]:
+    try:
+        proc = _run(["docker", "inspect", "--format", "{{.State.Status}}", name], check=False)
+    except FileNotFoundError:
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "").strip() or None
+
+
 def broker_up(wait: bool = True, timeout_s: float = 30.0, cpuset: Optional[str] = None) -> dict:
     ensure_certs()
     _run(compose_cmd("up", "-d", "mosquitto"))
+    container = broker_container_name()
+    # With network_mode=host, a stale mosquitto from another checkout can hold
+    # the ports: our container then crash-loops on "Address in use" while the
+    # foreign broker answers the health check. Fail closed instead of silently
+    # benchmarking against an unmanaged, unpinned broker.
+    deadline = time.time() + 10.0
+    state = _container_state(container)
+    while state != "running" and time.time() < deadline:
+        time.sleep(0.5)
+        state = _container_state(container)
+    if state == "running":
+        # Guard against an immediate "Address in use" crash (restart=no).
+        time.sleep(1.5)
+        state = _container_state(container)
+    if state != "running":
+        logs = _run(["docker", "logs", "--tail", "5", container], check=False)
+        raise RuntimeError(
+            f"managed mosquitto container {container!r} is {state or 'absent'} after compose up; "
+            f"another broker may hold ports {DEFAULT_PORT}/{DEFAULT_TLS_PORT} "
+            f"(e.g. a stale container from another checkout). Last logs: "
+            f"{(logs.stdout or logs.stderr or '').strip()!r}"
+        )
     if cpuset:
-        _run(["docker", "update", "--cpuset-cpus", cpuset, "mosquitto"], check=False)
+        _run(["docker", "update", "--cpuset-cpus", cpuset, container], check=False)
     meta = {
         "managed_broker": True,
         "image": MOSQUITTO_IMAGE,
@@ -205,12 +266,13 @@ def broker_up(wait: bool = True, timeout_s: float = 30.0, cpuset: Optional[str] 
         "tls_port": DEFAULT_TLS_PORT,
         "certs": ensure_certs(),
         "cpuset": cpuset,
+        "container_name": container,
     }
     if wait:
         wait_for_broker(DEFAULT_HOST, DEFAULT_PORT, timeout_s=timeout_s)
         wait_for_broker(DEFAULT_HOST, DEFAULT_TLS_PORT, timeout_s=timeout_s, tls=True, ca_certs=meta["certs"]["ca_crt"])
     if cpuset:
-        meta["cpuset_observed"] = _container_cpuset("mosquitto")
+        meta["cpuset_observed"] = _container_cpuset(container)
     return meta
 
 

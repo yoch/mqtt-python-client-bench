@@ -36,6 +36,20 @@ class AwscrtAdapter:
         self._connected = threading.Event()
         self._topic_callbacks: dict[str, Any] = {}
         self._userdata = None
+        self._mid_lock = threading.Lock()
+        self._next_mid = 1
+
+    def _alloc_mid(self) -> int:
+        """Unique synthetic mid for paths where CRT exposes no packet id.
+
+        mqtt3 QoS0 publishes all report packet_id=0 and the mqtt5 client hides
+        packet ids entirely; hash-based or constant mids would collide inside
+        the publisher's outstanding window and be miscounted as failures.
+        """
+        with self._mid_lock:
+            mid = self._next_mid
+            self._next_mid = 1 if self._next_mid >= 65535 else self._next_mid + 1
+            return mid
 
     @classmethod
     def capabilities(cls) -> AdapterCapabilities:
@@ -55,6 +69,8 @@ class AwscrtAdapter:
             stability="stable",
             io_model="crt_event_loop",
             implementation_language="native",
+            # mqtt3 QoS0 and all mqtt5 publishes use counter-allocated mids.
+            synthetic_mids=True,
             notes=(
                 "AWS Common Runtime mqtt/mqtt5 clients (aws-c-mqtt). "
                 "Native engine — not pure Python."
@@ -229,7 +245,8 @@ class AwscrtAdapter:
 
         assert self._conn is not None
         future, packet_id = self._conn.publish(topic, payload or b"", mqtt.QoS(qos), retain)
-        mid = int(packet_id)
+        # QoS0 has no packet id (CRT reports 0 for every message).
+        mid = int(packet_id) if packet_id else self._alloc_mid()
 
         def _done(fut: Future):
             try:
@@ -270,26 +287,23 @@ class AwscrtAdapter:
             if properties.get("payload_format_indicator"):
                 kwargs["payload_format_indicator"] = mqtt5.PayloadFormatIndicator.UTF8
         packet = mqtt5.PublishPacket(**kwargs)
+        # The mqtt5 client does not expose packet ids up front; correlate the
+        # completion with a unique synthetic mid allocated before publish.
+        mid = self._alloc_mid()
         future = self._mqtt5.publish(packet)
-        # CRT mqtt5 future result includes packet_id when available.
-        mid_box = {"mid": None}
 
         def _done(fut: Future):
             try:
-                result = fut.result()
-                mid = int(getattr(result, "packet_id", None) or mid_box["mid"] or 0)
+                fut.result()
                 rc = 0
             except Exception:  # noqa: BLE001
-                mid = int(mid_box["mid"] or 0)
                 rc = 128
             cb = self.on_publish
             if cb:
                 cb(self, self._userdata, mid, rc, None)
 
-        # Allocate a synthetic mid for correlation if CRT does not expose one up front.
-        mid_box["mid"] = abs(hash((topic, id(future)))) % 65535 + 1
         future.add_done_callback(_done)
-        return PublishResult(rc=0, mid=mid_box["mid"])
+        return PublishResult(rc=0, mid=mid)
 
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
         if self._mqtt5 is not None:
@@ -299,7 +313,7 @@ class AwscrtAdapter:
                 subscriptions=[mqtt5.Subscription(topic_filter=topic, qos=mqtt5.QoS(qos))]
             )
             future = self._mqtt5.subscribe(packet)
-            mid = abs(hash(topic)) % 65535 + 1
+            mid = self._alloc_mid()
 
             def _done(fut: Future):
                 try:

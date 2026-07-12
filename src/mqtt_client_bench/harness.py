@@ -24,6 +24,7 @@ from mqtt_client_bench.broker import (
     DEFAULT_PORT,
     DEFAULT_TLS_PORT,
     EMQTT_BENCH_IMAGE,
+    broker_container_name,
     broker_down,
     broker_up,
     ensure_certs,
@@ -197,6 +198,17 @@ def validate_run(point: dict, worker_results: List[dict], loadgen_stats: Optiona
         for name, stats in (sample.get("containers") or {}).items():
             if stats and stats.get("cpu_pct") is not None and stats["cpu_pct"] >= 85.0:
                 reasons.append(f"container_cpu_high:{name}")
+    # Managed-broker runs must observe the broker; a silently dead stats probe
+    # would mislabel broker-limited runs as sut_limited.
+    watched_any = False
+    watched_ok = False
+    for sample in telemetry_samples:
+        for stats in (sample.get("containers") or {}).values():
+            watched_any = True
+            if stats is not None:
+                watched_ok = True
+    if watched_any and not watched_ok:
+        reasons.append("broker_telemetry_missing")
 
     if loadgen_stats and loadgen_stats.get("parsed") and point.get("cadence") not in ("burst", "microburst"):
         parsed = loadgen_stats["parsed"]
@@ -208,7 +220,7 @@ def validate_run(point: dict, worker_results: List[dict], loadgen_stats: Optiona
 
     status = "valid" if not reasons else "inconclusive"
     bottleneck = "bottleneck_unattributed"
-    if any(r.startswith("container_cpu_high:mosquitto") for r in reasons):
+    if any(r.startswith("container_cpu_high:") and "mosquitto" in r for r in reasons):
         bottleneck = "broker_limited"
     elif any(r.startswith("loadgen_") for r in reasons):
         bottleneck = "loadgen_limited"
@@ -253,6 +265,19 @@ def run_point(
         capacity = load_profile.get("capacity_msgs_per_s")
         if capacity:
             point["target_rate"] = float(capacity) * float(point["load_fraction"])
+    if point.get("load_fraction") is not None and not point.get("target_rate"):
+        # Without a calibrated capacity the workers would silently fall back to
+        # an arbitrary absolute rate, breaking cross-client comparability.
+        return {
+            "schema_version": 1,
+            "run_id": run_id,
+            "point": point,
+            "client": client,
+            "client_path": client_path,
+            "status": "inconclusive",
+            "reasons": ["load_fraction_without_calibration"],
+            "workers": [],
+        }
 
     network = point.get("network", "localhost")
     net_result = apply_profile(network)
@@ -552,7 +577,7 @@ def run_point(
         barrier.accept_n(expected_workers, timeout_s=60.0)
         sampler = TelemetrySampler(
             pids={f"w{i}": w.pid for i, w in enumerate(workers) if w.pid},
-            containers=["mosquitto"] if managed_broker else [],
+            containers=[broker_container_name()] if managed_broker else [],
         )
         sampler.start()
 
