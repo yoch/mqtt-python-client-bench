@@ -49,9 +49,11 @@ def cmd_clients(args: argparse.Namespace) -> int:
     for row in list_clients():
         pending = ",".join(row["unimplemented"]) if row["unimplemented"] else "-"
         print(
-            f"{row['name']:<10} async_bridged={row['async_bridged']!s:<5} "
-            f"mqtt_v5={row['mqtt_v5']!s:<5} callback_add={row['message_callback_add']!s:<5} "
-            f"pending={pending}"
+            f"{row['name']:<10} stability={row['stability']:<12} "
+            f"async_bridged={row['async_bridged']!s:<5} "
+            f"mqtt_v5={row['mqtt_v5']!s:<5} qos2={row['qos2']!s:<5} "
+            f"native_cb={row['native_message_callback_add']!s:<5} "
+            f"lang={row['implementation_language']:<8} pending={pending}"
         )
         if args.verbose and row.get("notes"):
             print(f"  {row['notes']}")
@@ -140,8 +142,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
         profile=args.profile,
         output=args.output,
         load_profile_path=args.load_profile,
+        variant_index=args.variant_index,
     )
-    print(json.dumps({"verdict": payload.get("verdict"), "order": payload.get("order")}, indent=2))
+    print(json.dumps({"verdict": payload.get("verdict"), "order": payload.get("order"), "points": len(payload.get("points") or [])}, indent=2))
     return 0
 
 
@@ -163,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     broker_p.set_defaults(func=cmd_broker)
 
     list_p = sub.add_parser("list", help="List scenarios")
-    list_p.add_argument("--suite", choices=["core", "full"])
+    list_p.add_argument("--suite", choices=["core", "full", "experimental"])
     list_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
     list_p.set_defaults(func=cmd_list)
 
@@ -173,8 +176,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_p = sub.add_parser("run", help="Run a scenario or suite")
     run_p.add_argument("--scenario")
-    run_p.add_argument("--suite", choices=["core", "full"])
-    run_p.add_argument("--profile", choices=["standard", "smoke"], default="smoke")
+    run_p.add_argument("--suite", choices=["core", "full", "experimental"])
+    run_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
     run_p.add_argument("--runs", type=int)
     run_p.add_argument("--client", choices=list(CLIENT_NAMES), default="paho", help="SUT MQTT client library")
     run_p.add_argument("--client-path", help="Optional checkout root for the selected client (A/B worktrees)")
@@ -189,14 +192,15 @@ def build_parser() -> argparse.ArgumentParser:
     cal_p.add_argument("--client", choices=list(CLIENT_NAMES), default="paho")
     cal_p.add_argument("--client-path")
     cal_p.add_argument("--output", required=True)
-    cal_p.add_argument("--profile", choices=["standard", "smoke"], default="smoke")
+    cal_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
     cal_p.set_defaults(func=cmd_calibrate)
 
     cmp_p = sub.add_parser("compare", help="ABBA compare two client adapters")
     cmp_p.add_argument("--clients", required=True, help="Comma-separated pair, e.g. paho,gmqtt")
     cmp_p.add_argument("--scenario", required=True)
     cmp_p.add_argument("--blocks", type=int, default=4)
-    cmp_p.add_argument("--profile", choices=["standard", "smoke"], default="smoke")
+    cmp_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
+    cmp_p.add_argument("--variant-index", type=int, default=None, help="Compare a single variant index (default: all)")
     cmp_p.add_argument("--load-profile")
     cmp_p.add_argument("--output")
     cmp_p.set_defaults(func=cmd_compare)

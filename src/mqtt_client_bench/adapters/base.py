@@ -36,7 +36,14 @@ class AdapterCapabilities:
     max_inflight: bool = False
     max_queued: bool = False
     message_callback_add: bool = False
+    # Native broker-side filter matching (Paho). Emulated matching must not enter
+    # inter-client rankings for sub_callback_matching.
+    native_message_callback_add: bool = False
     v5_publish_properties: bool = False
+    stability: str = "stable"  # stable | experimental
+    io_model: str = "sync"  # sync | asyncio_bridged | crt_event_loop
+    implementation_language: str = "python"  # python | native
+    synthetic_mids: bool = False
     notes: str = ""
     unimplemented: List[str] = field(default_factory=list)
 
@@ -53,11 +60,14 @@ class AdapterCapabilities:
             missing.append("qos2")
         if point.get("tls") and not self.tls:
             missing.append("tls")
-        if point.get("inflight") is not None and not self.max_inflight:
-            # Inflight knobs are advisory for adapters that cannot tune them.
-            pass
-        if int(point.get("callback_filters", 0) or 0) > 0 and not self.message_callback_add:
-            missing.append("message_callback_add")
+        if point.get("require_max_inflight") and not self.max_inflight:
+            missing.append("max_inflight")
+        if point.get("require_max_queued") and not self.max_queued:
+            missing.append("max_queued")
+        if int(point.get("callback_filters", 0) or 0) > 0 and not self.native_message_callback_add:
+            missing.append("native_message_callback_add")
+        if point.get("topology") == "fleet" and self.async_bridged:
+            missing.append("fleet_async_bridged")
         profile = point.get("properties_profile", "none")
         if protocol == "MQTTv5" and profile not in (None, "none") and not self.v5_publish_properties:
             missing.append(f"properties_profile:{profile}")
@@ -71,7 +81,15 @@ MessageCallback = Callable[..., Any]
 
 @runtime_checkable
 class MqttClientAdapter(Protocol):
-    """Sync facade used by role workers (async libs bridge via a private loop)."""
+    """Sync facade used by role workers (async libs bridge via a private loop).
+
+    Publish completion contract (primary metric boundary):
+      - QoS 0: on_publish fires when the packet has been handed to the transport
+      - QoS 1: on_publish fires on PUBACK
+      - QoS 2: on_publish fires on PUBCOMP (not PUBREC)
+    Adapters that cannot honour a boundary must set the matching capability False
+    (e.g. qos2=False) so scenarios requiring it are refused, not approximated.
+    """
 
     MQTT_ERR_SUCCESS: int
 

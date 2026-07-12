@@ -51,11 +51,26 @@ def process_stats(pid: int) -> dict:
             voluntary = int(line.split()[1])
         elif line.startswith("nonvoluntary_ctxt_switches:"):
             nonvoluntary = int(line.split()[1])
+    utime = None
+    stime = None
+    stat = _read_text(f"/proc/{pid}/stat") or ""
+    if stat:
+        # After comm (parentheses), fields: ... utime stime are 14th/15th overall.
+        try:
+            close = stat.rfind(")")
+            fields = stat[close + 2 :].split()
+            utime = int(fields[11])
+            stime = int(fields[12])
+        except (IndexError, ValueError):
+            pass
     return {
         "pid": pid,
         "rss_kb": rss_kb,
         "voluntary_ctxt_switches": voluntary,
         "nonvoluntary_ctxt_switches": nonvoluntary,
+        "utime_ticks": utime,
+        "stime_ticks": stime,
+        "cpu_ticks": (utime + stime) if utime is not None and stime is not None else None,
     }
 
 
@@ -172,7 +187,41 @@ class TelemetrySampler:
 
 
 def environment_metadata() -> dict:
+    import socket
+
+    installed: dict = {}
+    for pkg in ("paho", "gmqtt", "aiomqtt", "amqtt", "awscrt", "zmqtt"):
+        try:
+            mod = __import__(pkg if pkg != "paho" else "paho.mqtt.client")
+            if pkg == "paho":
+                import paho
+
+                installed[pkg] = getattr(paho, "__version__", None) or getattr(mod, "__version__", None)
+            else:
+                ver = getattr(mod, "__version__", None)
+                if ver is None:
+                    try:
+                        from importlib.metadata import version as pkg_version
+
+                        ver = pkg_version(pkg)
+                    except Exception:  # noqa: BLE001
+                        ver = None
+                installed[pkg] = ver
+        except Exception:  # noqa: BLE001
+            installed[pkg] = None
+    # aiomqtt3 shares the import name with aiomqtt v2; record only when major >= 3.
+    installed["aiomqtt3"] = None
+    if installed.get("aiomqtt"):
+        try:
+            major = int(str(installed["aiomqtt"]).split(".")[0].split("a")[0].split("b")[0])
+            if major >= 3:
+                installed["aiomqtt3"] = installed["aiomqtt"]
+                # Avoid presenting a v3 install as the stable aiomqtt v2 slot.
+                installed["aiomqtt"] = None
+        except ValueError:
+            pass
     return {
+        "hostname": socket.gethostname(),
         "python": platform.python_version(),
         "platform": platform.platform(),
         "machine": platform.machine(),
@@ -181,4 +230,5 @@ def environment_metadata() -> dict:
         "physical_cpu_groups": physical_cpu_groups(),
         "scaling_governor": scaling_governor(),
         "loadavg": loadavg(),
+        "client_versions": installed,
     }

@@ -1,4 +1,8 @@
-"""aiomqtt adapter — idiomatic asyncio MQTT client (v2.x) via AsyncioBridge."""
+"""aiomqtt v3 adapter — pure asyncio + mqtt5 sans-io (experimental, MQTT 5 only).
+
+aiomqtt v2 and v3 publish the same import name and cannot share an environment.
+Install via: pip install 'mqtt-client-bench[aiomqtt3]'
+"""
 
 from __future__ import annotations
 
@@ -7,57 +11,69 @@ from typing import Any, Optional
 
 from mqtt_client_bench.adapters.async_bridge import BridgedAdapterBase, IncomingMessage
 from mqtt_client_bench.adapters.base import AdapterCapabilities, PublishResult, SubscribeResult
-from mqtt_client_bench.adapters.paho import build_paho_publish_properties
 
 
-class AiomqttAdapter(BridgedAdapterBase):
-    _NAME = "aiomqtt"
+def _require_aiomqtt_v3():
+    import aiomqtt
+
+    version = getattr(aiomqtt, "__version__", "") or ""
+    major = 0
+    try:
+        major = int(str(version).split(".")[0].split("a")[0].split("b")[0])
+    except ValueError:
+        major = 0
+    if major < 3:
+        raise ImportError(
+            f"aiomqtt3 adapter requires aiomqtt>=3 (found {version!r}). "
+            "Use a separate environment: pip install 'mqtt-client-bench[aiomqtt3]'"
+        )
+    return aiomqtt
+
+
+class Aiomqtt3Adapter(BridgedAdapterBase):
+    _NAME = "aiomqtt3"
     _NOTES = (
-        "aiomqtt — idiomatic asyncio MQTT client. Bench targets v2.x (paho backend). "
-        "v3 (mqtt5 sans-io) is the separate experimental client id `aiomqtt3`."
+        "aiomqtt v3 alpha — pure asyncio on mqtt5 (Rust sans-io). MQTT 5 only. "
+        "Experimental; must not share an env with aiomqtt v2."
     )
 
     def __init__(self) -> None:
         super().__init__()
         self._client: Any = None
         self._client_id = ""
-        self._protocol = "MQTTv311"
+        self._protocol = "MQTTv5"
         self._clean_session = True
         self._tls_ca_certs: Optional[str] = None
-        self._max_inflight = 20
-        self._max_queued = 200
 
     @classmethod
     def capabilities(cls) -> AdapterCapabilities:
         return AdapterCapabilities(
-            name="aiomqtt",
+            name="aiomqtt3",
             sync_api=False,
             async_bridged=True,
-            mqtt_v311=True,
+            mqtt_v311=False,
             mqtt_v5=True,
             qos2=True,
             tls=True,
-            max_inflight=True,
-            max_queued=True,
+            max_inflight=False,
+            max_queued=False,
             message_callback_add=True,
             native_message_callback_add=False,
-            v5_publish_properties=True,
-            stability="stable",
+            v5_publish_properties=False,
+            stability="experimental",
             io_model="asyncio_bridged",
             implementation_language="python",
             synthetic_mids=True,
             notes=cls._NOTES,
-            unimplemented=[],
         )
 
     @classmethod
     def identity(cls) -> dict:
-        import aiomqtt
-
+        aiomqtt = _require_aiomqtt_v3()
         caps = cls.capabilities()
         return {
-            "client": "aiomqtt",
-            "adapter": "aiomqtt",
+            "client": "aiomqtt3",
+            "adapter": "aiomqtt3",
             "client_module": str(Path(aiomqtt.__file__).resolve()),
             "client_version": getattr(aiomqtt, "__version__", None),
             "stability": caps.stability,
@@ -71,57 +87,39 @@ class AiomqttAdapter(BridgedAdapterBase):
         cls,
         *,
         client_id: str,
-        protocol: str = "MQTTv311",
+        protocol: str = "MQTTv5",
         clean_session: bool = True,
         max_inflight: int = 20,
         max_queued: int = 200,
         tls_ca_certs: Optional[str] = None,
-    ) -> "AiomqttAdapter":
+    ) -> "Aiomqtt3Adapter":
         try:
-            import aiomqtt  # noqa: F401
+            _require_aiomqtt_v3()
         except ImportError as exc:
-            raise ImportError(
-                "aiomqtt is not installed. Install with: pip install 'mqtt-client-bench[aiomqtt]'"
-            ) from exc
-
+            raise ImportError(str(exc)) from exc
+        if protocol != "MQTTv5":
+            raise ValueError("aiomqtt3 only supports MQTTv5")
         adapter = cls()
         adapter._client_id = client_id
         adapter._protocol = protocol
         adapter._clean_session = clean_session
         adapter._tls_ca_certs = tls_ca_certs
-        adapter._max_inflight = max_inflight
-        adapter._max_queued = max_queued
         return adapter
 
-    def _protocol_enum(self):
-        import aiomqtt
-
-        if self._protocol == "MQTTv5":
-            return aiomqtt.ProtocolVersion.V5
-        if self._protocol == "MQTTv31":
-            return aiomqtt.ProtocolVersion.V31
-        return aiomqtt.ProtocolVersion.V311
-
     def connect(self, host: str, port: int, keepalive: int = 60) -> None:
-        import aiomqtt
-
+        aiomqtt = _require_aiomqtt_v3()
         self._ensure_bridge()
         self._stopping = False
-        tls_params = None
-        if self._tls_ca_certs:
-            tls_params = aiomqtt.TLSParameters(ca_certs=self._tls_ca_certs)
-
         kwargs: dict[str, Any] = {
             "hostname": host,
             "port": port,
             "identifier": self._client_id,
-            "protocol": self._protocol_enum(),
-            "clean_session": self._clean_session,
             "keepalive": keepalive,
-            "tls_params": tls_params,
-            "max_inflight_messages": self._max_inflight,
-            "max_queued_outgoing_messages": self._max_queued,
         }
+        if self._tls_ca_certs:
+            import ssl
+
+            kwargs["ssl_context"] = ssl.create_default_context(cafile=self._tls_ca_certs)
 
         async def _connect():
             self._client = aiomqtt.Client(**kwargs)
@@ -135,16 +133,20 @@ class AiomqttAdapter(BridgedAdapterBase):
     async def _message_pump(self) -> None:
         assert self._client is not None
         try:
-            async for message in self._client.messages:
+            messages = self._client.messages
+            if callable(messages):
+                messages = messages()
+            async for message in messages:
                 if self._stopping:
                     break
-                msg = IncomingMessage(
-                    topic=str(message.topic),
-                    payload=message.payload,
-                    qos=int(getattr(message, "qos", 0) or 0),
-                    retain=bool(getattr(message, "retain", False)),
+                topic = getattr(message, "topic", None)
+                topic_s = str(topic) if topic is not None else ""
+                payload = getattr(message, "payload", b"")
+                qos = int(getattr(message, "qos", 0) or 0)
+                retain = bool(getattr(message, "retain", False))
+                self._dispatch_message(
+                    IncomingMessage(topic=topic_s, payload=payload, qos=qos, retain=retain)
                 )
-                self._dispatch_message(msg)
         except Exception:  # noqa: BLE001
             if not self._stopping:
                 raise
@@ -182,10 +184,11 @@ class AiomqttAdapter(BridgedAdapterBase):
 
         async def _publish():
             try:
-                kwargs: dict[str, Any] = {"payload": payload, "qos": qos, "retain": retain}
-                if properties is not None:
-                    kwargs["properties"] = properties
-                await client.publish(topic, **kwargs)
+                data = b"" if payload is None else payload
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                # v3 uses positional bytes payload.
+                await client.publish(topic, data, qos=qos, retain=retain)
                 self._fire_on_publish(mid, reason_code=0)
             except Exception:  # noqa: BLE001
                 self._fire_on_publish(mid, reason_code=128)
@@ -201,9 +204,12 @@ class AiomqttAdapter(BridgedAdapterBase):
 
         async def _subscribe():
             try:
-                result = await client.subscribe(topic, qos=qos)
-                grants = list(result) if isinstance(result, (list, tuple)) else [0]
-                self._fire_on_subscribe(mid, grants, None)
+                # v3 renamed qos -> max_qos
+                try:
+                    await client.subscribe(topic, max_qos=qos)
+                except TypeError:
+                    await client.subscribe(topic, qos=qos)
+                self._fire_on_subscribe(mid, [qos], None)
             except Exception:  # noqa: BLE001
                 self._fire_on_subscribe(mid, [128], None)
 
@@ -211,4 +217,7 @@ class AiomqttAdapter(BridgedAdapterBase):
         return SubscribeResult(rc=0, mid=mid)
 
     def build_publish_properties(self, profile: str) -> Any:
-        return build_paho_publish_properties(profile)
+        # v3 exposes properties as packet attributes; bench profiles are advisory for now.
+        if profile in (None, "none"):
+            return None
+        return {"profile": profile}

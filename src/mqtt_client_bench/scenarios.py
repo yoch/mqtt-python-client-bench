@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 @dataclass(frozen=True)
 class Scenario:
     name: str
-    suite: str  # core | full
+    suite: str  # core | full | experimental (virtual alias of core)
     tags: Tuple[str, ...]
     topology: str
     description: str
@@ -150,10 +150,8 @@ SCENARIOS: List[Scenario] = [
         variants=(
             {"topic_topology": "fleet4k_uniform", "subscription": "plus"},
             {"topic_topology": "fleet4k_uniform", "subscription": "hash"},
-            {"topic_topology": "fleet4k_zipf", "subscription": "plus"},
-            {"topic_topology": "fleet4k_zipf", "subscription": "hash"},
         ),
-        estimated_minutes=6.0,
+        estimated_minutes=4.0,
     ),
     Scenario(
         name="sub_callback_matching",
@@ -263,7 +261,6 @@ SCENARIOS: List[Scenario] = [
         loadgen_clients=16,
         subscribers=1,
         variants=(
-            {"topic_topology": "fleet100k", "subscription": "hash"},
             {"topic_topology": "deep32", "subscription": "exact"},
             {"topic_topology": "long_topic_256", "subscription": "exact"},
             {"topic_topology": "long_topic_1024", "subscription": "exact"},
@@ -271,7 +268,7 @@ SCENARIOS: List[Scenario] = [
             {"topic_topology": "fleet4k_uniform", "subscription": "hash", "callback_filters": 4096},
             {"topic_topology": "fleet4k_uniform", "subscription": "hash", "callback_filters": 8, "overlapping_callbacks": True},
         ),
-        estimated_minutes=10.0,
+        estimated_minutes=8.0,
     ),
     Scenario(
         name="sub_multi_subscribe",
@@ -412,9 +409,9 @@ SCENARIOS: List[Scenario] = [
     Scenario(
         name="session_resume_qos1",
         suite="full",
-        tags=("functional",),
+        tags=("functional", "planned"),
         topology="publisher_with_oracle",
-        description="Persistent session resume after short outage.",
+        description="Persistent session resume after short outage (planned — not executable yet).",
         qos_publish=1,
         qos_subscribe=1,
         cadence="steady50",
@@ -435,16 +432,15 @@ SCENARIOS: List[Scenario] = [
             {"network": "lan", "cadence": "loaded75"},
             {"network": "wan", "cadence": "loaded75"},
             {"network": "edge", "cadence": "steady50", "integrity": True},
-            {"network": "wan_cut", "cadence": "steady50", "session_persistent": True},
         ),
-        estimated_minutes=10.0,
+        estimated_minutes=8.0,
     ),
     Scenario(
         name="tls_steady_state",
         suite="full",
         tags=("representative",),
         topology="publisher_only",
-        description="Steady-state publish capacity over established TLS 1.3.",
+        description="Steady-state publish capacity over established TLS.",
         qos_publish=1,
         payload="telemetry256",
         tls=True,
@@ -483,6 +479,9 @@ SCENARIO_BY_NAME = {s.name: s for s in SCENARIOS}
 def list_scenarios(suite: Optional[str] = None) -> List[Scenario]:
     if suite is None:
         return list(SCENARIOS)
+    # Experimental suite reuses core measurement contracts; rankings stay separate.
+    if suite == "experimental":
+        return [s for s in SCENARIOS if s.suite == "core"]
     return [s for s in SCENARIOS if s.suite == suite]
 
 
@@ -492,6 +491,10 @@ def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[
     points = []
     for variant in base_variants:
         resolved = scenario.resolved(variant)
+        if "inflight" in variant:
+            resolved["require_max_inflight"] = True
+        if "max_queued" in variant:
+            resolved["require_max_queued"] = True
         if profile == "smoke":
             resolved["duration_s"] = min(float(resolved.get("duration_s", 60.0)), 3.0)
             resolved["warmup_s"] = min(float(resolved.get("warmup_s", 15.0)), 1.0)
@@ -499,9 +502,19 @@ def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[
             resolved["non_comparable"] = True
         else:
             resolved["non_comparable"] = False
+        # Loopback netem is diagnostic only — not comparable across hosts/kernels.
+        if str(resolved.get("network", "localhost")) not in ("localhost", ""):
+            resolved["non_comparable"] = True
+            tags = list(resolved.get("tags") or scenario.tags)
+            if "diagnostic" not in tags:
+                tags.append("diagnostic")
+            resolved["tags"] = tags
+        # Planned / incomplete scenarios stay in the catalogue but are non-executable.
+        if "planned" in scenario.tags:
+            resolved["non_comparable"] = True
         resolved["scenario"] = scenario.name
         resolved["suite"] = scenario.suite
-        resolved["tags"] = list(scenario.tags)
+        resolved["tags"] = list(resolved.get("tags") or scenario.tags)
         resolved["description"] = scenario.description
         points.append(resolved)
     return points

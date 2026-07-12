@@ -9,7 +9,7 @@ import threading
 import time
 
 from mqtt_client_bench.adapters.registry import adapter_identity, create_adapter
-from mqtt_client_bench.control import barrier_client_wait, touch, write_json
+from mqtt_client_bench.control import barrier_client_session, touch, write_json
 from mqtt_client_bench.workloads import HEADER_SIZE, decode_header, encode_header
 
 
@@ -95,19 +95,46 @@ def main(argv=None) -> int:
         return 1
 
     touch(cfg["ready_path"], {"role": "rtt_initiator", "pid": os.getpid(), **identity})
-    barrier_client_wait(cfg["barrier_path"], "T0", timeout_s=float(cfg.get("barrier_timeout_s", 120)))
+    barrier = barrier_client_session(cfg["barrier_path"], timeout_s=float(cfg.get("barrier_timeout_s", 120)))
+    barrier.wait("T0")
 
+    import gc
+
+    gc.collect()
     state["phase"] = "warmup"
-    _send_loop(adapter, state, request_topic, qos, run_id, outstanding, target_rate, time.perf_counter() + warmup_s)
+    # Warmup correlations live in a disjoint high range so late responses cannot
+    # collide with measure-window correlations.
+    _send_loop(
+        adapter,
+        state,
+        request_topic,
+        qos,
+        run_id,
+        outstanding,
+        target_rate,
+        time.perf_counter() + warmup_s,
+        sequence_start=1 << 40,
+    )
+    drain_deadline = time.perf_counter() + min(drain_s, 5.0)
+    while time.perf_counter() < drain_deadline:
+        with state["lock"]:
+            if not state["inflight"]:
+                break
+        time.sleep(0.01)
     with state["lock"]:
+        state["inflight"].clear()
         state["latencies_ns"].clear()
         state["sent_in_window"] = 0
         state["completed_in_window"] = 0
         state["timeouts"] = 0
 
+    barrier.ack("WARMUP_DRAINED")
+    barrier.wait("T_MEASURE")
+    barrier.close()
+
     state["phase"] = "measure"
     t0 = time.perf_counter()
-    _send_loop(adapter, state, request_topic, qos, run_id, outstanding, target_rate, t0 + duration_s)
+    _send_loop(adapter, state, request_topic, qos, run_id, outstanding, target_rate, t0 + duration_s, sequence_start=0)
     t1 = time.perf_counter()
     state["phase"] = "drain"
     deadline = time.perf_counter() + drain_s
@@ -143,10 +170,10 @@ def main(argv=None) -> int:
     return 0
 
 
-def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, until):
+def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, until, sequence_start=0):
     interval = 1.0 / target_rate if target_rate > 0 else 0.0
     next_send = time.perf_counter()
-    seq = 0
+    seq = sequence_start
     while time.perf_counter() < until:
         with state["lock"]:
             inflight = len(state["inflight"])

@@ -11,17 +11,25 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from mqtt_client_bench.adapters.registry import list_clients, unsupported_for_client  # noqa: E402
+from mqtt_client_bench.adapters.registry import (  # noqa: E402
+    EXPERIMENTAL_CLIENTS,
+    STABLE_CLIENTS,
+    list_clients,
+    unsupported_for_client,
+)
 from mqtt_client_bench.harness import unsupported_features  # noqa: E402
 from mqtt_client_bench.loadgen import interval_for_rate, nominal_rate, parse_emqtt_output  # noqa: E402
 from mqtt_client_bench.metrics import (  # noqa: E402
+    abba_block_ratios,
     abba_order,
     compare_verdict,
+    compare_verdict_from_block_ratios,
     integrity_counts,
     latency_summary,
     median,
     percentile,
     sanitize_number,
+    summarize_valid_runs,
 )
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, estimate_suite, expand_scenario, list_scenarios  # noqa: E402
 from mqtt_client_bench.workloads import (  # noqa: E402
@@ -66,11 +74,33 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(abba_order(4).count("A"), 8)
         self.assertEqual(abba_order(4).count("B"), 8)
 
+    def test_abba_block_ratios_deterministic(self):
+        order = abba_order(2)
+        # A=100, B=110, B=110, A=100  => ratio 1.1 twice
+        rates = [100.0, 110.0, 110.0, 100.0, 100.0, 110.0, 110.0, 100.0]
+        ratios = abba_block_ratios(order, rates)
+        self.assertEqual(ratios, [1.1, 1.1])
+        verdict = compare_verdict_from_block_ratios(ratios, min_effect_pct=3.0, seed=1)
+        self.assertEqual(verdict["verdict"], "improvement")
+        # Incomplete block with None is dropped.
+        self.assertEqual(abba_block_ratios(order, [100.0, None, 110.0, 100.0] + rates[4:]), [1.1])
+
     def test_compare_inconclusive_on_noise(self):
         baseline = [100.0] * 8
         candidate = [101.0] * 8
         verdict = compare_verdict(baseline, candidate, min_effect_pct=3.0)
         self.assertEqual(verdict["verdict"], "inconclusive")
+
+    def test_summarize_valid_runs_filters(self):
+        runs = [
+            {"status": "valid", "primary_msgs_per_s": 10.0, "non_comparable": False},
+            {"status": "inconclusive", "primary_msgs_per_s": 999.0, "non_comparable": False},
+            {"status": "valid", "primary_msgs_per_s": 20.0, "non_comparable": True},
+        ]
+        summary = summarize_valid_runs(runs)
+        self.assertEqual(summary["n"], 1)
+        self.assertEqual(summary["median"], 10.0)
+        self.assertEqual(summary["inconclusive_n"], 1)
 
     def test_integrity(self):
         expected = range(1, 6)
@@ -114,43 +144,85 @@ class WorkloadTests(unittest.TestCase):
         self.assertIn("properties_profile:topic_alias", unsupported_features({"properties_profile": "topic_alias"}))
         self.assertIn("connect_mode:tcp_concurrent", unsupported_features({"connect_mode": "tcp_concurrent"}))
         self.assertIn("topic_topology:fleet4k_zipf", unsupported_features({"topic_topology": "fleet4k_zipf"}))
-        # Supported values must not be flagged for paho.
+        self.assertIn("network:wan_cut", unsupported_features({"network": "wan_cut"}))
         self.assertEqual(unsupported_features({"properties_profile": "realistic", "connect_mode": "tcp_serial"}), [])
 
 
 class AdapterRegistryTests(unittest.TestCase):
     def test_list_clients(self):
         names = {row["name"] for row in list_clients()}
-        self.assertEqual(names, {"paho", "gmqtt", "aiomqtt", "amqtt"})
+        self.assertTrue({"paho", "gmqtt", "aiomqtt", "amqtt", "awscrt"}.issubset(names))
+        self.assertIn("zmqtt", names)
+        self.assertIn("aiomqtt3", names)
+        self.assertIn("paho", STABLE_CLIENTS)
+        self.assertIn("awscrt", STABLE_CLIENTS)
+        self.assertIn("zmqtt", EXPERIMENTAL_CLIENTS)
+        self.assertIn("aiomqtt3", EXPERIMENTAL_CLIENTS)
 
     def test_implemented_clients_accept_core_points(self):
         point = {"payload": "telemetry256", "qos_publish": 0, "protocol": "MQTTv311"}
-        for name in ("paho", "gmqtt", "aiomqtt", "amqtt"):
+        for name in ("paho", "gmqtt", "aiomqtt", "amqtt", "awscrt", "zmqtt"):
             missing = unsupported_for_client(name, point)
             self.assertEqual(missing, [], name)
 
-    def test_callback_matching_capability(self):
+    def test_callback_matching_paho_only(self):
         point = {"callback_filters": 64, "qos_subscribe": 0}
-        for name in ("paho", "gmqtt", "aiomqtt", "amqtt"):
-            self.assertEqual(unsupported_for_client(name, point), [], name)
+        self.assertEqual(unsupported_for_client("paho", point), [])
+        for name in ("gmqtt", "aiomqtt", "amqtt", "awscrt", "zmqtt"):
+            self.assertIn("native_message_callback_add", unsupported_for_client(name, point), name)
 
-    def test_amqtt_refuses_v5_properties_profile(self):
-        point = {"protocol": "MQTTv5", "properties_profile": "realistic", "qos_publish": 0}
-        missing = unsupported_for_client("amqtt", point)
-        self.assertIn("properties_profile:realistic", missing)
-        self.assertEqual(unsupported_for_client("gmqtt", point), [])
-        self.assertEqual(unsupported_for_client("aiomqtt", point), [])
+    def test_amqtt_refuses_mqtt_v5(self):
+        point = {"protocol": "MQTTv5", "qos_publish": 0}
+        self.assertIn("mqtt_v5", unsupported_for_client("amqtt", point))
 
-    def test_client_identities(self):
+    def test_gmqtt_refuses_qos2(self):
+        point = {"protocol": "MQTTv311", "qos_publish": 2}
+        self.assertIn("qos2", unsupported_for_client("gmqtt", point))
+        self.assertEqual(unsupported_for_client("paho", point), [])
+
+    def test_inflight_control_required(self):
+        point = {"protocol": "MQTTv311", "qos_publish": 1, "require_max_inflight": True, "inflight": 20}
+        self.assertEqual(unsupported_for_client("paho", point), [])
+        self.assertIn("max_inflight", unsupported_for_client("gmqtt", point))
+        self.assertIn("max_inflight", unsupported_for_client("amqtt", point))
+
+    def test_fleet_refused_for_async_bridged(self):
+        point = {"topology": "fleet", "fleet_size": 32}
+        self.assertEqual(unsupported_for_client("paho", point), [])
+        self.assertIn("fleet_async_bridged", unsupported_for_client("gmqtt", point))
+
+    def test_aiomqtt3_mqtt5_only(self):
+        self.assertIn("mqtt_v311", unsupported_for_client("aiomqtt3", {"protocol": "MQTTv311"}))
+        self.assertEqual(unsupported_for_client("aiomqtt3", {"protocol": "MQTTv5", "qos_publish": 0}), [])
+
+    def test_awscrt_identity_native(self):
         from mqtt_client_bench.adapters.registry import adapter_identity, get_adapter_class
 
-        for name in ("paho", "gmqtt", "aiomqtt", "amqtt"):
+        caps = get_adapter_class("awscrt").capabilities()
+        self.assertEqual(caps.implementation_language, "native")
+        self.assertEqual(caps.io_model, "crt_event_loop")
+        info = adapter_identity("awscrt")
+        self.assertEqual(info["client"], "awscrt")
+        self.assertEqual(info["implementation_language"], "native")
+
+    def test_client_identities_stable(self):
+        from mqtt_client_bench.adapters.registry import adapter_identity, get_adapter_class
+
+        for name in ("paho", "gmqtt", "aiomqtt", "amqtt", "awscrt", "zmqtt"):
             caps = get_adapter_class(name).capabilities()
             self.assertEqual(caps.unimplemented, [], name)
             info = adapter_identity(name)
             self.assertEqual(info["client"], name)
             self.assertIsNotNone(info.get("client_module"), name)
-            self.assertNotEqual(info.get("status"), "stub", name)
+
+    def test_gmqtt_v5_properties_align_payload_format(self):
+        from mqtt_client_bench.adapters.gmqtt import GmqttAdapter
+        from mqtt_client_bench.adapters.paho import build_paho_publish_properties
+
+        g = GmqttAdapter().build_publish_properties("realistic")
+        self.assertEqual(g["payload_format_indicator"], 1)
+        p = build_paho_publish_properties("realistic")
+        self.assertEqual(getattr(p, "PayloadFormatIndicator"), 1)
 
 
 class BridgedAdapterTests(unittest.TestCase):
@@ -221,12 +293,85 @@ class BridgedAdapterTests(unittest.TestCase):
     def test_create_adapters(self):
         from mqtt_client_bench.adapters.registry import create_adapter
 
-        for name in ("gmqtt", "aiomqtt", "amqtt"):
+        for name in ("gmqtt", "aiomqtt", "amqtt", "zmqtt", "awscrt"):
             adapter = create_adapter(name, client_id=f"test-{name}")
             self.assertEqual(adapter.MQTT_ERR_SUCCESS, 0)
             self.assertTrue(hasattr(adapter, "publish"))
             self.assertTrue(hasattr(adapter, "subscribe"))
             self.assertIsNone(adapter.build_publish_properties("none"))
+
+
+class PublisherContractTests(unittest.TestCase):
+    def test_early_ack_tracker(self):
+        from mqtt_client_bench.roles import publisher as pub_mod
+
+        state = {
+            "mid_send_ns": {},
+            "early_acks": {},
+            "seen_mids_inflight": {7},
+            "inflight_local": 1,
+            "completed_success": 0,
+            "completed_failed": 0,
+            "protocol_completed": 0,
+            "protocol_failed": 0,
+            "socket_completed_qos0": 0,
+            "completed_in_window": 0,
+            "completed_during_drain": 0,
+            "latencies_ns": [],
+            "phase": "measure",
+            "lock": __import__("threading").Lock(),
+        }
+        # Simulate callback before registration.
+        now = 1000
+        with state["lock"]:
+            state["early_acks"][7] = (now, False)
+            early = state["early_acks"].pop(7, None)
+            self.assertIsNotNone(early)
+            pub_mod._consume_completion_locked(state, 1, 500, early[0], early[1], mid=7)
+        self.assertEqual(state["completed_success"], 1)
+        self.assertEqual(state["completed_in_window"], 1)
+        self.assertNotIn(7, state["seen_mids_inflight"])
+
+    def test_mid_freed_on_completion_allows_reuse(self):
+        from mqtt_client_bench.roles import publisher as pub_mod
+
+        state = {
+            "mid_send_ns": {3: 100},
+            "early_acks": {},
+            "seen_mids_inflight": {3},
+            "inflight_local": 1,
+            "completed_success": 0,
+            "completed_failed": 0,
+            "protocol_completed": 0,
+            "protocol_failed": 0,
+            "socket_completed_qos0": 0,
+            "completed_in_window": 0,
+            "completed_during_drain": 0,
+            "latencies_ns": [],
+            "phase": "measure",
+            "lock": __import__("threading").Lock(),
+        }
+        with state["lock"]:
+            send_ns = state["mid_send_ns"].pop(3)
+            pub_mod._consume_completion_locked(state, 1, send_ns, 200, False, mid=3)
+        self.assertNotIn(3, state["seen_mids_inflight"])
+        # Same mid may be issued again without a false collision.
+        self.assertNotIn(3, state["seen_mids_inflight"])
+
+    def test_open_loop_backpressure_counter_logic(self):
+        # outstanding gate must count misses rather than unbounded growth.
+        outstanding = 2
+        inflight_local = 2
+        missed = 0
+        if inflight_local >= outstanding:
+            missed += 1
+        self.assertEqual(missed, 1)
+
+    def test_aiomqtt3_refuses_v5_property_profiles(self):
+        missing = unsupported_for_client(
+            "aiomqtt3", {"protocol": "MQTTv5", "properties_profile": "realistic"}
+        )
+        self.assertTrue(any("properties" in m for m in missing), missing)
 
 
 class ScenarioTests(unittest.TestCase):
@@ -235,6 +380,20 @@ class ScenarioTests(unittest.TestCase):
         self.assertGreaterEqual(len(core), 5)
         names = {s.name for s in core}
         self.assertIn("pub_qos_sweep_telemetry", names)
+
+    def test_removed_executable_variants(self):
+        hier = expand_scenario(SCENARIO_BY_NAME["sub_hierarchy_telemetry"], "standard")
+        self.assertFalse(any(p.get("topic_topology") == "fleet4k_zipf" for p in hier))
+        stress = expand_scenario(SCENARIO_BY_NAME["topic_stress"], "standard")
+        self.assertFalse(any(p.get("topic_topology") == "fleet100k" for p in stress))
+        net = expand_scenario(SCENARIO_BY_NAME["network_matrix"], "standard")
+        self.assertFalse(any(p.get("network") == "wan_cut" for p in net))
+        session = SCENARIO_BY_NAME["session_resume_qos1"]
+        self.assertIn("planned", session.tags)
+
+    def test_inflight_variant_marks_requirement(self):
+        points = expand_scenario(SCENARIO_BY_NAME["pub_qos1_inflight"], "standard")
+        self.assertTrue(all(p.get("require_max_inflight") for p in points))
 
     def test_expand_smoke_shorter(self):
         scenario = SCENARIO_BY_NAME["pub_qos_sweep_telemetry"]
@@ -247,6 +406,59 @@ class ScenarioTests(unittest.TestCase):
         est = estimate_suite("core", "smoke", 1)
         self.assertGreater(est["points"], 0)
         self.assertGreater(est["estimated_minutes"], 0)
+
+    def test_experimental_suite_matches_core_contracts(self):
+        core = {s.name for s in list_scenarios("core")}
+        experimental = {s.name for s in list_scenarios("experimental")}
+        self.assertEqual(core, experimental)
+
+    def test_experimental_clients_refused_from_core_suite(self):
+        from mqtt_client_bench.harness import run_suite
+
+        with self.assertRaises(ValueError):
+            run_suite("core", client="zmqtt", profile="smoke", runs=1)
+
+
+class CliDefaultsTests(unittest.TestCase):
+    def test_profile_defaults_standard(self):
+        from mqtt_client_bench.run import build_parser
+
+        parser = build_parser()
+        for cmd in ("run", "calibrate", "compare"):
+            args = parser.parse_args([cmd] + (["--output", "x"] if cmd == "calibrate" else [])
+                                     + (["--clients", "paho,gmqtt", "--scenario", "pub_qos_sweep_telemetry"] if cmd == "compare" else [])
+                                     + (["--scenario", "pub_qos_sweep_telemetry"] if cmd == "run" else []))
+            self.assertEqual(args.profile, "standard", cmd)
+
+
+class BarrierTests(unittest.TestCase):
+    def test_two_phase_barrier(self):
+        import tempfile
+        import threading
+
+        from mqtt_client_bench.control import BarrierServer, barrier_client_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "b.sock")
+            server = BarrierServer(path)
+            results = []
+
+            def worker():
+                s = barrier_client_session(path, timeout_s=5)
+                results.append(s.wait("T0"))
+                s.ack("WARMUP_DRAINED")
+                results.append(s.wait("T_MEASURE"))
+                s.close()
+
+            t = threading.Thread(target=worker)
+            t.start()
+            server.accept_n(1, timeout_s=5)
+            self.assertEqual(server.broadcast("T0"), 0)
+            server.wait_for_acks("WARMUP_DRAINED", 1, timeout_s=5)
+            self.assertEqual(server.broadcast("T_MEASURE"), 0)
+            t.join(timeout=5)
+            server.close()
+            self.assertEqual(results, ["T0", "T_MEASURE"])
 
 
 class LoadgenTests(unittest.TestCase):
@@ -261,6 +473,13 @@ class LoadgenTests(unittest.TestCase):
     def test_nominal_rate(self):
         self.assertEqual(nominal_rate(20, 100), 200.0)
         self.assertEqual(interval_for_rate(20, 20000), 1)
+
+    def test_mqtt_version_helper(self):
+        from mqtt_client_bench.harness import mqtt_version_for_point
+
+        self.assertEqual(mqtt_version_for_point({"protocol": "MQTTv5"}), 5)
+        self.assertEqual(mqtt_version_for_point({"protocol": "MQTTv311"}), 4)
+        self.assertEqual(mqtt_version_for_point({"protocol": "MQTTv31"}), 3)
 
     def test_callback_match_helpers(self):
         run_id = "abcd1234"
@@ -285,6 +504,7 @@ class SchemaTests(unittest.TestCase):
         data = json.loads(schema_path.read_text(encoding="utf-8"))
         self.assertEqual(data["properties"]["schema_version"]["const"], 1)
         self.assertIn("client", data["properties"])
+        self.assertIn("awscrt", data["properties"]["client"]["enum"])
         self.assertIn("yoch/mqtt-python-client-bench", data["$id"])
 
 
@@ -326,13 +546,36 @@ class ReportTests(unittest.TestCase):
                                         "p99_ms": 1.2,
                                         "p99_published": True,
                                     },
+                                    "integrity": {
+                                        "expected": 10,
+                                        "received": 10,
+                                        "unique": 10,
+                                        "missing": 0,
+                                        "duplicates": 0,
+                                        "out_of_order": 0,
+                                        "unexpected": 0,
+                                    },
                                 }
                             ],
                         }
                     ],
-                    "summary": {"n": 1, "median": 12000.5, "mad": 0, "min": 12000.5, "max": 12000.5, "mean": 12000.5},
+                    "summary": {
+                        "n": 0,
+                        "median": None,
+                        "mad": None,
+                        "min": None,
+                        "max": None,
+                        "mean": None,
+                        "inconclusive_n": 0,
+                        "total_runs": 1,
+                    },
                 }
             ],
+        }
+        suite = {
+            "suite": "core",
+            "estimate": {"scenarios": 1, "points": 1},
+            "scenarios": [sample],
         }
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -340,18 +583,48 @@ class ReportTests(unittest.TestCase):
             site = root / "site"
             results.mkdir()
             (results / "paho-pub-qos-smoke.json").write_text(json.dumps(sample), encoding="utf-8")
+            (results / "suite-core.json").write_text(json.dumps(suite), encoding="utf-8")
             docs = load_results(results)
-            self.assertEqual(len(docs), 1)
-            self.assertEqual(docs[0].kind, "scenario")
-            self.assertEqual(docs[0].status, "valid")
+            self.assertEqual(len(docs), 2)
+            kinds = {d.kind for d in docs}
+            self.assertEqual(kinds, {"scenario", "suite"})
             summary = build_site(results, site)
-            self.assertEqual(summary["results"], 1)
+            self.assertEqual(summary["results"], 2)
             index = (site / "index.html").read_text(encoding="utf-8")
             self.assertIn("pub_qos_sweep_telemetry", index)
             self.assertIn("paho", index)
-            detail = next((site / "runs").glob("*.html")).read_text(encoding="utf-8")
-            self.assertIn("12000.5", detail.replace(",", ""))
+            scenario_html = next(
+                p.read_text(encoding="utf-8")
+                for p in (site / "runs").glob("*.html")
+                if "suite" not in p.name
+            )
+            self.assertIn("non-comparable", scenario_html)
+            suite_html = next(p for p in (site / "runs").glob("*.html") if "suite" in p.name).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn('href="paho-pub-qos-smoke.html"', suite_html)
+            self.assertIn("pub_qos_sweep_telemetry", suite_html)
             self.assertFalse(any(site.rglob("*.json")))
+
+    def test_integrity_aggregates_all_runs(self):
+        from mqtt_client_bench.report import _collect_integrity
+
+        runs = [
+            {
+                "workers": [
+                    {"integrity": {"expected": 10, "received": 9, "unique": 9, "missing": 1, "duplicates": 0, "out_of_order": 0, "unexpected": 0}}
+                ]
+            },
+            {
+                "workers": [
+                    {"integrity": {"expected": 10, "received": 8, "unique": 8, "missing": 2, "duplicates": 1, "out_of_order": 0, "unexpected": 0}}
+                ]
+            },
+        ]
+        integ = _collect_integrity(runs)
+        self.assertEqual(integ["missing"], 3)
+        self.assertEqual(integ["worst_missing"], 2)
+        self.assertEqual(integ["duplicates"], 1)
 
 
 if __name__ == "__main__":

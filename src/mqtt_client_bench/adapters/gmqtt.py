@@ -34,12 +34,17 @@ class GmqttAdapter(BridgedAdapterBase):
             async_bridged=True,
             mqtt_v311=True,
             mqtt_v5=True,
-            qos2=True,
+            # gmqtt 0.7 fires completion at PUBREC, not PUBCOMP — refuse QoS2 points.
+            qos2=False,
             tls=True,
             max_inflight=False,
             max_queued=False,
             message_callback_add=True,
+            native_message_callback_add=False,
             v5_publish_properties=True,
+            stability="stable",
+            io_model="asyncio_bridged",
+            implementation_language="python",
             notes=cls._NOTES,
             unimplemented=[],
         )
@@ -48,11 +53,16 @@ class GmqttAdapter(BridgedAdapterBase):
     def identity(cls) -> dict:
         import gmqtt
 
+        caps = cls.capabilities()
         return {
             "client": "gmqtt",
             "adapter": "gmqtt",
             "client_module": str(Path(gmqtt.__file__).resolve()),
             "client_version": getattr(gmqtt, "__version__", None),
+            "stability": caps.stability,
+            "io_model": caps.io_model,
+            "implementation_language": caps.implementation_language,
+            "synthetic_mids": caps.synthetic_mids,
         }
 
     @classmethod
@@ -158,36 +168,51 @@ class GmqttAdapter(BridgedAdapterBase):
     ) -> PublishResult:
         from gmqtt import Message
 
+        self._ensure_bridge()
         kwargs: dict[str, Any] = {}
         if isinstance(properties, dict):
             kwargs.update(properties)
         message = Message(topic, payload, qos=qos, retain=retain, **kwargs)
-        mid, package = self._client._connection.publish(message)
-        if qos > 0:
-            push = getattr(self._client._persistent_storage, "push_message_nowait", None)
-            if push is not None:
-                push(mid, package)
+        client = self._client
+
+        async def _publish():
+            mid, package = client._connection.publish(message)
+            if qos > 0:
+                push = getattr(client._persistent_storage, "push_message_nowait", None)
+                if push is not None:
+                    push(mid, package)
+                else:
+                    client._persistent_storage.push_message(mid, package)
             else:
-                self._client._persistent_storage.push_message(mid, package)
-        else:
-            self._fire_on_publish(int(mid), reason_code=0)
-        return PublishResult(rc=0, mid=int(mid))
+                self._fire_on_publish(int(mid), reason_code=0)
+            return int(mid)
+
+        mid = self._bridge.run(_publish())
+        return PublishResult(rc=0, mid=mid)
 
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
-        mid = self._client.subscribe(topic, qos=qos)
+        self._ensure_bridge()
+
+        async def _subscribe():
+            return self._client.subscribe(topic, qos=qos)
+
+        mid = self._bridge.run(_subscribe())
         return SubscribeResult(rc=0, mid=int(mid) if mid is not None else None)
 
     def build_publish_properties(self, profile: str) -> Any:
+        # Align field set with Paho/aiomqtt (incl. payload_format_indicator).
         if profile in (None, "none"):
             return None
         if profile == "realistic":
             return {
+                "payload_format_indicator": 1,
                 "content_type": "application/json",
                 "message_expiry_interval": 60,
                 "user_property": [("schema", "telemetry.v1"), ("region", "eu-west-1")],
             }
         if profile == "rich":
             return {
+                "payload_format_indicator": 1,
                 "content_type": "application/json",
                 "message_expiry_interval": 60,
                 "correlation_data": b"c" * 32,
