@@ -427,8 +427,10 @@ def run_point(
             clients = int(point.get("loadgen_clients", 32) or 32)
             payload = point.get("payload", "telemetry256")
             size = PAYLOAD_SPECS.get(payload, {"size": 256})["size"]
-            # Target an aggressive interval; for smoke keep mild.
-            target = 5000.0 if profile == "smoke" else 20000.0
+            # Capacity points must exceed the historical ~5k delivery ceiling
+            # even in smoke runs, otherwise A/B ingress optimisations are hidden
+            # behind the offered rate and incorrectly labelled SUT-limited.
+            target = 40000.0
             if point.get("fanin_mode") == "per_publisher":
                 target = clients * 1000.0
             if cadence == "periodic10":
@@ -446,7 +448,7 @@ def run_point(
                     # which also records the delivery. Cap avoids a connection storm.
                     clients = max(clients, min(callback_filters, 256))
                 # Keep aggregate offered load stable when client count grows with filters.
-                target = 5000.0 if profile == "smoke" else 20000.0
+                target = 40000.0
             elif point.get("subscription") in ("plus", "hash") or str(point.get("topic_topology", "")).startswith("fleet"):
                 lg_topic = f"bench/{run_id}/org/acme/site/s0000/device/d0000/telemetry/temperature"
             else:
