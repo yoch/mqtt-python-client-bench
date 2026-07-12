@@ -32,13 +32,19 @@ class AmqttAdapter(BridgedAdapterBase):
             sync_api=False,
             async_bridged=True,
             mqtt_v311=True,
-            mqtt_v5=True,
+            # amqtt client path used here is MQTT 3.1.1 only.
+            mqtt_v5=False,
             qos2=True,
             tls=True,
             max_inflight=False,
             max_queued=False,
             message_callback_add=True,
+            native_message_callback_add=False,
             v5_publish_properties=False,
+            stability="stable",
+            io_model="asyncio_bridged",
+            implementation_language="python",
+            synthetic_mids=True,
             notes=cls._NOTES,
             unimplemented=[],
         )
@@ -47,11 +53,16 @@ class AmqttAdapter(BridgedAdapterBase):
     def identity(cls) -> dict:
         import amqtt
 
+        caps = cls.capabilities()
         return {
             "client": "amqtt",
             "adapter": "amqtt",
             "client_module": str(Path(amqtt.__file__).resolve()),
             "client_version": getattr(amqtt, "__version__", None),
+            "stability": caps.stability,
+            "io_model": caps.io_model,
+            "implementation_language": caps.implementation_language,
+            "synthetic_mids": caps.synthetic_mids,
         }
 
     @classmethod

@@ -3,6 +3,13 @@ Publisher worker process.
 
 Usage:
   python -m mqtt_client_bench.roles.publisher --config /path/config.json
+
+Publish completion contract (must match adapter capabilities):
+  QoS0 — on_publish when the packet is handed to the transport
+  QoS1 — on_publish on PUBACK
+  QoS2 — on_publish on PUBCOMP
+
+Primary throughput uses completed_success in the measure window only.
 """
 
 from __future__ import annotations
@@ -15,7 +22,7 @@ import threading
 import time
 
 from mqtt_client_bench.adapters.registry import adapter_identity, create_adapter
-from mqtt_client_bench.control import barrier_client_wait, touch, write_json
+from mqtt_client_bench.control import barrier_client_session, touch, write_json
 from mqtt_client_bench.workloads import (
     HEADER_SIZE,
     build_payload,
@@ -73,6 +80,13 @@ def main(argv=None) -> int:
 
     state = {
         "connected": threading.Event(),
+        "offered": 0,
+        "submitted": 0,
+        "sync_rejected": 0,
+        "completed_success": 0,
+        "completed_failed": 0,
+        "missed_due_to_backpressure": 0,
+        # Legacy aliases kept for older report consumers.
         "publish_calls": 0,
         "publish_accepted": 0,
         "publish_rejected": 0,
@@ -87,6 +101,10 @@ def main(argv=None) -> int:
         "inflight_local": 0,
         "phase": "init",
         "mid_send_ns": {},
+        # Callbacks that arrive before mid_send_ns registration land here.
+        "early_acks": {},
+        "warmup_drain_ok": True,
+        "seen_mids_inflight": set(),
     }
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
@@ -102,22 +120,12 @@ def main(argv=None) -> int:
                 rc = int(getattr(reason_code, "value", reason_code))
                 if rc >= 128:
                     failed = True
-            # Always release the mid slot; a failure still ends the outstanding operation.
             send_ns = state["mid_send_ns"].pop(mid, None)
-            if failed:
-                state["protocol_failed"] += 1
-            else:
-                if qos == 0:
-                    state["socket_completed_qos0"] += 1
-                else:
-                    state["protocol_completed"] += 1
-                if send_ns is not None:
-                    state["latencies_ns"].append(now - send_ns)
-                if state["phase"] == "measure":
-                    state["completed_in_window"] += 1
-                elif state["phase"] == "drain":
-                    state["completed_during_drain"] += 1
-            state["inflight_local"] = max(0, state["inflight_local"] - 1)
+            if send_ns is None:
+                # Callback raced ahead of publish() return — stash until registered.
+                state["early_acks"][mid] = (now, failed)
+                return
+            _consume_completion_locked(state, qos, send_ns, now, failed, mid=mid)
 
     adapter = create_adapter(
         client_name,
@@ -143,15 +151,14 @@ def main(argv=None) -> int:
 
     touch(cfg["ready_path"], {"role": "publisher", "pid": os.getpid(), **identity})
 
-    # Wait for T0 barrier.
-    barrier_client_wait(cfg["barrier_path"], "T0", timeout_s=float(cfg.get("barrier_timeout_s", 120)))
+    barrier = barrier_client_session(cfg["barrier_path"], timeout_s=float(cfg.get("barrier_timeout_s", 120)))
+    barrier.wait("T0")
 
     open_loop_rate = None
     if cadence in ("steady50", "loaded75", "loaded90", "periodic10") or cfg.get("load_fraction"):
         if target_rate:
             open_loop_rate = float(target_rate)
         else:
-            # Fallback rate if calibration missing.
             open_loop_rate = 1000.0 * load_fraction
         if cadence == "steady50":
             open_loop_rate = (target_rate or 2000.0) * 0.50
@@ -162,10 +169,6 @@ def main(argv=None) -> int:
     gc_start = gc.get_count()
     state["phase"] = "warmup"
     warmup_end = time.perf_counter() + warmup_s
-    # Warm up at the measure cadence: a capacity warmup before an open-loop
-    # measure floods broker/subscriber queues and corrupts integrity windows.
-    # Warmup sequences live in a disjoint range so late deliveries can never
-    # collide with measure-window sequence numbers.
     _run_publish_loop(
         adapter,
         state,
@@ -183,28 +186,57 @@ def main(argv=None) -> int:
         sequence_start=1 << 40,
     )
 
-    # Reset window counters after warmup and wait for outstanding to drain
-    # so measure-phase sequence numbers stay contiguous for integrity checks.
+    # Drain warmup outstanding; fail closed if still active when the deadline hits.
     drain_warmup = time.perf_counter() + min(drain_s, 5.0)
     while time.perf_counter() < drain_warmup:
         with state["lock"]:
-            if state["inflight_local"] == 0 and not state["mid_send_ns"]:
+            if state["inflight_local"] == 0 and not state["mid_send_ns"] and not state["early_acks"]:
                 break
         time.sleep(0.01)
-
     with state["lock"]:
-        state["completed_in_window"] = 0
-        state["completed_during_drain"] = 0
-        state["latencies_ns"].clear()
-        state["scheduler_lags_ns"].clear()
-        state["publish_calls"] = 0
-        state["publish_accepted"] = 0
-        state["publish_rejected"] = 0
-        state["protocol_completed"] = 0
-        state["protocol_failed"] = 0
-        state["socket_completed_qos0"] = 0
-        state["mid_send_ns"].clear()
-        state["inflight_local"] = 0
+        if state["inflight_local"] or state["mid_send_ns"] or state["early_acks"]:
+            state["warmup_drain_ok"] = False
+        # Do not clear mid_send_ns while ACKs may still be in flight — mark inconclusive.
+        if state["warmup_drain_ok"]:
+            state["completed_in_window"] = 0
+            state["completed_during_drain"] = 0
+            state["latencies_ns"].clear()
+            state["scheduler_lags_ns"].clear()
+            state["offered"] = 0
+            state["submitted"] = 0
+            state["sync_rejected"] = 0
+            state["completed_success"] = 0
+            state["completed_failed"] = 0
+            state["missed_due_to_backpressure"] = 0
+            state["publish_calls"] = 0
+            state["publish_accepted"] = 0
+            state["publish_rejected"] = 0
+            state["protocol_completed"] = 0
+            state["protocol_failed"] = 0
+            state["socket_completed_qos0"] = 0
+            state["mid_send_ns"].clear()
+            state["early_acks"].clear()
+            state["inflight_local"] = 0
+            state["seen_mids_inflight"].clear()
+
+    barrier.ack("WARMUP_DRAINED")
+    # Second barrier: all roles start measure together.
+    barrier.wait("T_MEASURE")
+    barrier.close()
+
+    if not state["warmup_drain_ok"]:
+        write_json(
+            cfg["result_path"],
+            {
+                "ok": False,
+                "error": "warmup_drain_timeout",
+                "role": "publisher",
+                **identity,
+            },
+        )
+        adapter.disconnect()
+        adapter.loop_stop()
+        return 1
 
     state["phase"] = "measure"
     t0 = time.perf_counter()
@@ -240,21 +272,26 @@ def main(argv=None) -> int:
 
     with state["lock"]:
         backlog = state["inflight_local"]
-        # QoS0 message ids are recycled aggressively; mid map leftovers are not a reliable
-        # incomplete signal. Prefer the outstanding counter.
         timed_out = backlog if qos == 0 else len(state["mid_send_ns"])
         completed_in_window = state["completed_in_window"]
         completed_during_drain = state["completed_during_drain"]
         latencies = list(state["latencies_ns"])
         lags = list(state["scheduler_lags_ns"])
         counters = {
-            "publish_calls": state["publish_calls"],
-            "publish_accepted": state["publish_accepted"],
-            "publish_rejected": state["publish_rejected"],
+            "offered": state["offered"],
+            "submitted": state["submitted"],
+            "sync_rejected": state["sync_rejected"],
+            "completed_success": state["completed_success"],
+            "completed_failed": state["completed_failed"],
+            "missed_due_to_backpressure": state["missed_due_to_backpressure"],
+            "publish_calls": state["offered"],
+            "publish_accepted": state["submitted"],
+            "publish_rejected": state["sync_rejected"],
             "socket_completed_qos0": state["socket_completed_qos0"],
             "protocol_completed": state["protocol_completed"],
-            "protocol_failed": state["protocol_failed"],
+            "protocol_failed": state["completed_failed"],
             "mid_map_remaining": len(state["mid_send_ns"]),
+            "warmup_drain_ok": state["warmup_drain_ok"],
         }
 
     adapter.disconnect()
@@ -262,6 +299,7 @@ def main(argv=None) -> int:
 
     window = max(t1 - t0, 1e-9)
     payload_len = 0 if body is None else len(body if isinstance(body, (bytes, bytearray)) else str(body).encode())
+    # Primary rate uses completed_success in the measure window.
     result = {
         "ok": True,
         "role": "publisher",
@@ -293,6 +331,26 @@ def main(argv=None) -> int:
     }
     write_json(cfg["result_path"], result)
     return 0
+
+
+def _consume_completion_locked(state, qos, send_ns, now, failed: bool, *, mid) -> None:
+    state["seen_mids_inflight"].discard(mid)
+    if failed:
+        state["completed_failed"] += 1
+        state["protocol_failed"] += 1
+    else:
+        state["completed_success"] += 1
+        if qos == 0:
+            state["socket_completed_qos0"] += 1
+        else:
+            state["protocol_completed"] += 1
+        if send_ns is not None:
+            state["latencies_ns"].append(now - send_ns)
+        if state["phase"] == "measure":
+            state["completed_in_window"] += 1
+        elif state["phase"] == "drain":
+            state["completed_during_drain"] += 1
+    state["inflight_local"] = max(0, state["inflight_local"] - 1)
 
 
 def _properties_builder(cfg, adapter):
@@ -331,24 +389,17 @@ def _run_publish_loop(
     next_send = loop_start
     interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0
     corpus_i = 0
-    # reset_sequence currently means "start measure sequences at 1"; always local counter.
+    open_loop = target_rate is not None and cadence not in ("capacity", "burst", "microburst", "batch64")
 
     while time.perf_counter() < until:
         if cadence in ("burst", "microburst"):
-            # Duty-cycled capacity: 100ms burst per 1s (burst) or 10ms per 100ms (microburst).
             period, duty = (1.0, 0.1) if cadence == "burst" else (0.1, 0.01)
             phase = (time.perf_counter() - loop_start) % period
             if phase > duty:
                 time.sleep(min(0.001, period - phase))
                 continue
-        # Closed-loop outstanding gate.
-        with state["lock"]:
-            inflight_local = state["inflight_local"]
-        if cadence == "capacity" or target_rate is None:
-            if inflight_local >= outstanding:
-                time.sleep(0.0001)
-                continue
-        else:
+
+        if open_loop:
             now = time.perf_counter()
             if now < next_send:
                 time.sleep(min(0.001, next_send - now))
@@ -357,15 +408,26 @@ def _run_publish_loop(
             with state["lock"]:
                 state["scheduler_lags_ns"].append(lag_ns)
             next_send += interval
-            # Do not skip slots (no coordinated omission).
 
         n = batch_size if cadence == "batch64" else 1
         for _ in range(n):
             if time.perf_counter() >= until:
                 break
+
             with state["lock"]:
-                if state["inflight_local"] >= outstanding and (cadence == "capacity" or target_rate is None):
-                    break
+                saturated = state["inflight_local"] >= outstanding
+            if saturated:
+                # Outstanding gate applies to ALL cadences. Open-loop counts a miss
+                # instead of spawning unbounded work.
+                if open_loop:
+                    with state["lock"]:
+                        state["offered"] += 1
+                        state["missed_due_to_backpressure"] += 1
+                        state["publish_calls"] += 1
+                    continue
+                time.sleep(0.0001)
+                break
+
             sequence += 1
             send_ns = time.perf_counter_ns()
             header = encode_header(run_id, 1, sequence, sequence, send_ns)
@@ -375,7 +437,6 @@ def _run_publish_loop(
             else:
                 payload_body = body
             if isinstance(payload_body, str):
-                # Keep str path for telemetry256_str unless integrity header is required.
                 if force_header:
                     raw = payload_body.encode("utf-8")
                     payload = wrap_with_header(raw if len(raw) >= HEADER_SIZE else header + raw, header)
@@ -392,16 +453,36 @@ def _run_publish_loop(
                     payload = payload_body
 
             props = properties_builder()
-            state["publish_calls"] += 1
+            with state["lock"]:
+                state["offered"] += 1
+                state["publish_calls"] += 1
             info = adapter.publish(topic, payload=payload, qos=qos, retain=False, properties=props)
-            if info.rc == 0:
-                state["publish_accepted"] += 1
-                sent_sequences.append(sequence)
+            if info.rc == 0 and info.mid is not None:
                 with state["lock"]:
+                    mid = info.mid
+                    if mid in state["seen_mids_inflight"]:
+                        # Synthetic MID collision while still inflight — treat as failure signal.
+                        state["completed_failed"] += 1
+                        state["protocol_failed"] += 1
+                    early = state["early_acks"].pop(mid, None)
+                    state["submitted"] += 1
+                    state["publish_accepted"] += 1
                     state["inflight_local"] += 1
-                    state["mid_send_ns"][info.mid] = send_ns
+                    state["seen_mids_inflight"].add(mid)
+                    if early is not None:
+                        early_now, early_failed = early
+                        state["mid_send_ns"].pop(mid, None)
+                        _consume_completion_locked(state, qos, send_ns, early_now, early_failed, mid=mid)
+                    else:
+                        state["mid_send_ns"][mid] = send_ns
+                    sent_sequences.append(sequence)
             else:
-                state["publish_rejected"] += 1
+                with state["lock"]:
+                    state["sync_rejected"] += 1
+                    state["publish_rejected"] += 1
+            # Keep uniqueness tracker aligned with still-open inflight / early ACKs.
+            with state["lock"]:
+                state["seen_mids_inflight"] = set(state["mid_send_ns"]) | set(state["early_acks"])
     return sent_sequences
 
 

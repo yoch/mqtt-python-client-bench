@@ -63,7 +63,10 @@ def _collect_latency(runs: Sequence[Dict[str, Any]]) -> Dict[str, Optional[float
     p50: List[float] = []
     p95: List[float] = []
     p99: List[float] = []
+    p99_gated = False
     for run in runs:
+        if run.get("status") != "valid" or run.get("non_comparable"):
+            continue
         for worker in run.get("workers") or []:
             summary = worker.get("latency_summary") or {}
             if summary.get("p50_ms") is not None:
@@ -72,21 +75,46 @@ def _collect_latency(runs: Sequence[Dict[str, Any]]) -> Dict[str, Optional[float
                 p95.append(float(summary["p95_ms"]))
             if summary.get("p99_ms") is not None and summary.get("p99_published"):
                 p99.append(float(summary["p99_ms"]))
+                p99_gated = True
     def median(values: List[float]) -> Optional[float]:
         if not values:
             return None
         ordered = sorted(values)
         return ordered[len(ordered) // 2]
 
-    return {"p50_ms": median(p50), "p95_ms": median(p95), "p99_ms": median(p99)}
+    return {
+        "p50_ms": median(p50),
+        "p95_ms": median(p95),
+        "p99_ms": median(p99),
+        "p99_gated": p99_gated and bool(p99),
+    }
 
 
 def _collect_integrity(runs: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    totals = {
+        "expected": 0,
+        "received": 0,
+        "unique": 0,
+        "missing": 0,
+        "duplicates": 0,
+        "out_of_order": 0,
+        "unexpected": 0,
+    }
+    worst_missing = 0
+    found = False
     for run in runs:
         for worker in run.get("workers") or []:
-            if worker.get("integrity"):
-                return worker["integrity"]
-    return None
+            integ = worker.get("integrity")
+            if not integ:
+                continue
+            found = True
+            for key in totals:
+                totals[key] += int(integ.get(key) or 0)
+            worst_missing = max(worst_missing, int(integ.get("missing") or 0))
+    if not found:
+        return None
+    totals["worst_missing"] = worst_missing
+    return totals
 
 
 def _run_status_counts(runs: Sequence[Dict[str, Any]]) -> Dict[str, int]:
@@ -129,8 +157,25 @@ class ResultDoc:
 def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
     slug = _slug(Path(source_name).stem)
     if "scenarios" in data and "suite" in data:
-        scenario_names = [s.get("scenario", "?") for s in data.get("scenarios") or []]
-        clients = sorted({s.get("client") for s in data.get("scenarios") or [] if s.get("client")})
+        nested = data.get("scenarios") or []
+        scenario_names = [s.get("scenario", "?") for s in nested]
+        clients = sorted({s.get("client") for s in nested if s.get("client")})
+        scenario_entries = []
+        for s in nested:
+            medians = []
+            for block in s.get("results") or []:
+                median = (block.get("summary") or {}).get("median")
+                if median is not None:
+                    medians.append(float(median))
+            scenario_entries.append(
+                {
+                    "scenario": s.get("scenario"),
+                    "client": s.get("client"),
+                    "profile": s.get("profile"),
+                    "median_msgs_per_s": (sorted(medians)[len(medians) // 2] if medians else None),
+                    "source_hint": f"{s.get('client')}-{s.get('scenario')}",
+                }
+            )
         return ResultDoc(
             source_name=source_name,
             slug=slug,
@@ -146,7 +191,13 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
             environment={},
             broker={},
             verdict=None,
-            raw_meta={"suite": data.get("suite"), "estimate": data.get("estimate"), "scenario_count": len(scenario_names)},
+            raw_meta={
+                "suite": data.get("suite"),
+                "estimate": data.get("estimate"),
+                "scenario_count": len(scenario_names),
+                "scenario_names": scenario_names,
+                "scenario_entries": scenario_entries,
+            },
         )
 
     if data.get("verdict") is not None and data.get("order") is not None:
@@ -166,7 +217,14 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
             environment=data.get("environment") or {},
             broker=data.get("broker") or {},
             verdict=verdict if isinstance(verdict, dict) else {"verdict": verdict},
-            raw_meta={"order": data.get("order")},
+            raw_meta={
+                "order": data.get("order"),
+                "cooldown_s": data.get("cooldown_s"),
+                "baseline_identity": data.get("baseline_identity"),
+                "candidate_identity": data.get("candidate_identity"),
+                "loadgen": data.get("loadgen"),
+                "points": data.get("points"),
+            },
         )
 
     if "capacity_msgs_per_s" in data and "fractions" in data:
@@ -202,12 +260,21 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
         overall_total += counts["total"]
         non_comparable = any(bool(r.get("non_comparable")) for r in runs) or bool(point.get("non_comparable"))
         any_non_comparable = any_non_comparable or non_comparable
+        # Prefer summary computed from valid runs only.
         median_rate = summary.get("median")
-        if median_rate is not None:
+        if non_comparable or (point.get("profile") == "smoke"):
+            # Keep value for display but mark non-comparable.
+            pass
+        if median_rate is not None and not non_comparable:
             medians.append(float(median_rate))
         status = "valid" if counts["valid"] == counts["total"] and counts["total"] else (
             "partial" if counts["valid"] else "inconclusive"
         )
+        chart_rates = [
+            r.get("primary_msgs_per_s")
+            for r in runs
+            if r.get("status") == "valid" and not r.get("non_comparable")
+        ]
         points.append(
             PointRow(
                 label=_point_label(point),
@@ -218,7 +285,7 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
                 non_comparable=non_comparable,
                 latency=_collect_latency(runs),
                 integrity=_collect_integrity(runs),
-                chart_rates=[r.get("primary_msgs_per_s") for r in runs],
+                chart_rates=chart_rates,
             )
         )
 
@@ -343,9 +410,21 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
 </tr>"""
         )
 
-    chart_labels = [doc.title for doc in docs if doc.kind == "scenario" and doc.median_msgs_per_s is not None]
-    chart_values = [doc.median_msgs_per_s for doc in docs if doc.kind == "scenario" and doc.median_msgs_per_s is not None]
-    chart_clients = [doc.client or "?" for doc in docs if doc.kind == "scenario" and doc.median_msgs_per_s is not None]
+    chart_labels = [
+        doc.title
+        for doc in docs
+        if doc.kind == "scenario" and doc.median_msgs_per_s is not None and not doc.non_comparable
+    ]
+    chart_values = [
+        doc.median_msgs_per_s
+        for doc in docs
+        if doc.kind == "scenario" and doc.median_msgs_per_s is not None and not doc.non_comparable
+    ]
+    chart_clients = [
+        doc.client or "?"
+        for doc in docs
+        if doc.kind == "scenario" and doc.median_msgs_per_s is not None and not doc.non_comparable
+    ]
 
     body = f"""
     <main>
@@ -389,11 +468,19 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
     return _page_shell("Benchmark reports", body)
 
 
-def render_detail(doc: ResultDoc, generated_at: str) -> str:
+def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str, str]] = None) -> str:
+    related = related or {}
     env_bits = []
     for key in ("hostname", "platform", "python", "cpu_count"):
         if doc.environment.get(key) is not None:
             env_bits.append(f"<li><strong>{_esc(key)}</strong> {_esc(doc.environment[key])}</li>")
+    versions = (doc.environment.get("client_versions") or {}) if isinstance(doc.environment, dict) else {}
+    if versions:
+        env_bits.append(
+            "<li><strong>client_versions</strong> "
+            + _esc(", ".join(f"{k}={v}" for k, v in sorted(versions.items()) if v))
+            + "</li>"
+        )
 
     broker_bits = []
     for key, value in (doc.broker or {}).items():
@@ -409,8 +496,8 @@ def render_detail(doc: ResultDoc, generated_at: str) -> str:
   <td>{_status_badge(point.status, point.non_comparable)}</td>
   <td class="num">{_esc(_fmt_num(point.median_msgs_per_s))}</td>
   <td class="num">{_esc(_fmt_num(lat.get('p50_ms'), digits=2))}</td>
-  <td class="num">{_esc(_fmt_num(lat.get('p99_ms'), digits=2))}</td>
-  <td class="num">{_esc(integ.get('missing', '—'))} / {_esc(integ.get('duplicates', '—'))}</td>
+  <td class="num">{_esc(_fmt_num(lat.get('p99_ms'), digits=2))}{' *' if lat.get('p99_gated') else ''}</td>
+  <td class="num">{_esc(integ.get('missing', '—'))} / {_esc(integ.get('duplicates', '—'))} (worst {_esc(integ.get('worst_missing', '—'))})</td>
   <td>{_esc(point.valid_runs)}/{_esc(point.total_runs)}</td>
 </tr>"""
         )
@@ -430,15 +517,37 @@ def render_detail(doc: ResultDoc, generated_at: str) -> str:
 
     compare_block = ""
     if doc.kind == "compare" and doc.verdict:
+        identity_bits = []
+        for label, key in (("baseline", "baseline_identity"), ("candidate", "candidate_identity")):
+            ident = doc.raw_meta.get(key) or {}
+            identity_bits.append(
+                f"<li><strong>{label}</strong> {_esc(ident.get('client'))} "
+                f"v{_esc(ident.get('client_version'))} "
+                f"({_esc(ident.get('stability'))}/{_esc(ident.get('implementation_language'))})</li>"
+            )
+        point_cal = []
+        for point in doc.raw_meta.get("points") or []:
+            cals = point.get("calibrations") or {}
+            if cals:
+                point_cal.append(
+                    f"<li>point {_esc(point.get('point_index'))}: {_esc(json.dumps(cals))}</li>"
+                )
+        loadgen = doc.raw_meta.get("loadgen") or {}
         compare_block = f"""
       <section class="panel">
         <h2>A/B verdict</h2>
         <p>{_status_badge(str(doc.verdict.get('verdict', 'inconclusive')))}</p>
         <ul class="kv">
+          <li><strong>profile</strong> {_esc(doc.profile)}</li>
+          <li><strong>cooldown_s</strong> {_esc(doc.raw_meta.get('cooldown_s'))}</li>
+          <li><strong>order</strong> {_esc(doc.raw_meta.get('order'))}</li>
           <li><strong>median ratio</strong> {_esc(_fmt_num(doc.verdict.get('median_ratio'), digits=3))}</li>
           <li><strong>effect %</strong> {_esc(_fmt_num(doc.verdict.get('absolute_effect_pct'), digits=2))}</li>
           <li><strong>CI</strong> {_esc(_fmt_num(doc.verdict.get('ci_low'), digits=3))} … {_esc(_fmt_num(doc.verdict.get('ci_high'), digits=3))}</li>
+          <li><strong>loadgen</strong> {_esc(loadgen.get('image'))} digest={_esc(loadgen.get('image_digest'))}</li>
+          {''.join(identity_bits)}
         </ul>
+        {"<h3>Per-client calibrations</h3><ul>" + ''.join(point_cal) + "</ul>" if point_cal else ""}
       </section>
 """
 
@@ -455,6 +564,27 @@ def render_detail(doc: ResultDoc, generated_at: str) -> str:
 
     suite_block = ""
     if doc.kind == "suite":
+        scenario_links = []
+        for entry in doc.raw_meta.get("scenario_entries") or []:
+            name = entry.get("scenario") or "?"
+            client = entry.get("client") or ""
+            href = related.get(f"{client}:{name}") or related.get(name)
+            label = f"{name}" + (f" ({client})" if client else "")
+            median = entry.get("median_msgs_per_s")
+            median_txt = f" — {_fmt_num(median)} msg/s" if median is not None else ""
+            if href:
+                scenario_links.append(
+                    f'<li><a href="{_esc(href)}">{_esc(label)}</a>{_esc(median_txt)}</li>'
+                )
+            else:
+                scenario_links.append(f"<li>{_esc(label)}{_esc(median_txt)}</li>")
+        if not scenario_links:
+            for name in doc.raw_meta.get("scenario_names") or []:
+                href = related.get(name)
+                if href:
+                    scenario_links.append(f'<li><a href="{_esc(href)}">{_esc(name)}</a></li>')
+                else:
+                    scenario_links.append(f"<li>{_esc(name)}</li>")
         suite_block = f"""
       <section class="panel">
         <h2>Suite overview</h2>
@@ -462,6 +592,8 @@ def render_detail(doc: ResultDoc, generated_at: str) -> str:
           <li><strong>suite</strong> {_esc(doc.raw_meta.get('suite'))}</li>
           <li><strong>scenarios</strong> {_esc(doc.raw_meta.get('scenario_count'))}</li>
         </ul>
+        <h3>Scenario results</h3>
+        <ul>{''.join(scenario_links)}</ul>
         <pre class="code-block">{_esc(json.dumps(doc.raw_meta.get('estimate'), indent=2))}</pre>
       </section>
 """
@@ -489,6 +621,7 @@ def render_detail(doc: ResultDoc, generated_at: str) -> str:
             </tbody>
           </table>
         </div>
+        <p class="hint">* p99 marked gated when sample coverage is incomplete. Smoke / non-comparable points are excluded from global comparative charts.</p>
       </section>
 """
 
@@ -559,8 +692,17 @@ def build_site(input_dir: Path | str, output_dir: Path | str) -> Dict[str, Any]:
         shutil.copy2(ASSETS_DIR / name, assets_out / name)
 
     (output_path / "index.html").write_text(render_index(docs, generated_at), encoding="utf-8")
+    related: Dict[str, str] = {}
     for doc in docs:
-        (runs_dir / f"{doc.slug}.html").write_text(render_detail(doc, generated_at), encoding="utf-8")
+        if doc.kind == "scenario" and doc.scenario:
+            related[doc.scenario] = f"{doc.slug}.html"
+            if doc.client:
+                related[f"{doc.client}:{doc.scenario}"] = f"{doc.slug}.html"
+    for doc in docs:
+        (runs_dir / f"{doc.slug}.html").write_text(
+            render_detail(doc, generated_at, related=related),
+            encoding="utf-8",
+        )
 
     # No raw JSON copied into site/.
     return {

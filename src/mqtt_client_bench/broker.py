@@ -190,9 +190,11 @@ def compose_cmd(*args: str) -> list:
     return ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
 
 
-def broker_up(wait: bool = True, timeout_s: float = 30.0) -> dict:
+def broker_up(wait: bool = True, timeout_s: float = 30.0, cpuset: Optional[str] = None) -> dict:
     ensure_certs()
     _run(compose_cmd("up", "-d", "mosquitto"))
+    if cpuset:
+        _run(["docker", "update", "--cpuset-cpus", cpuset, "mosquitto"], check=False)
     meta = {
         "managed_broker": True,
         "image": MOSQUITTO_IMAGE,
@@ -202,11 +204,27 @@ def broker_up(wait: bool = True, timeout_s: float = 30.0) -> dict:
         "port": DEFAULT_PORT,
         "tls_port": DEFAULT_TLS_PORT,
         "certs": ensure_certs(),
+        "cpuset": cpuset,
     }
     if wait:
         wait_for_broker(DEFAULT_HOST, DEFAULT_PORT, timeout_s=timeout_s)
         wait_for_broker(DEFAULT_HOST, DEFAULT_TLS_PORT, timeout_s=timeout_s, tls=True, ca_certs=meta["certs"]["ca_crt"])
+    if cpuset:
+        meta["cpuset_observed"] = _container_cpuset("mosquitto")
     return meta
+
+
+def _container_cpuset(name: str) -> Optional[str]:
+    try:
+        proc = _run(
+            ["docker", "inspect", "--format", "{{.HostConfig.CpusetCpus}}", name],
+            check=False,
+        )
+        if proc.returncode != 0:
+            return None
+        return (proc.stdout or "").strip() or None
+    except FileNotFoundError:
+        return None
 
 
 def broker_down() -> None:

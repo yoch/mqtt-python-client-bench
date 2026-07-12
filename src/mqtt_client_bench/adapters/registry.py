@@ -7,26 +7,41 @@ from pathlib import Path
 from typing import Dict, List, Optional, Type
 
 from mqtt_client_bench.adapters.aiomqtt import AiomqttAdapter
+from mqtt_client_bench.adapters.aiomqtt3 import Aiomqtt3Adapter
 from mqtt_client_bench.adapters.amqtt import AmqttAdapter
+from mqtt_client_bench.adapters.awscrt import AwscrtAdapter
 from mqtt_client_bench.adapters.base import AdapterCapabilities, MqttClientAdapter
 from mqtt_client_bench.adapters.gmqtt import GmqttAdapter
 from mqtt_client_bench.adapters.paho import PahoAdapter
+from mqtt_client_bench.adapters.zmqtt import ZmqttAdapter
 
 _ADAPTERS: Dict[str, Type] = {
     "paho": PahoAdapter,
     "gmqtt": GmqttAdapter,
     "aiomqtt": AiomqttAdapter,
     "amqtt": AmqttAdapter,
+    "awscrt": AwscrtAdapter,
+    "zmqtt": ZmqttAdapter,
+    "aiomqtt3": Aiomqtt3Adapter,
 }
 
 CLIENT_NAMES = tuple(_ADAPTERS.keys())
+STABLE_CLIENTS = tuple(
+    name for name, cls in _ADAPTERS.items() if cls.capabilities().stability == "stable"
+)
+EXPERIMENTAL_CLIENTS = tuple(
+    name for name, cls in _ADAPTERS.items() if cls.capabilities().stability == "experimental"
+)
 
 # Module prefixes purged when injecting a client_path checkout.
 _CLIENT_MODULE_PREFIXES = {
     "paho": ("paho",),
     "gmqtt": ("gmqtt",),
     "aiomqtt": ("aiomqtt",),
+    "aiomqtt3": ("aiomqtt", "mqtt5"),
     "amqtt": ("amqtt", "hbmqtt"),
+    "awscrt": ("awscrt",),
+    "zmqtt": ("zmqtt",),
 }
 
 
@@ -39,7 +54,14 @@ def list_clients() -> List[dict]:
                 "name": name,
                 "async_bridged": caps.async_bridged,
                 "mqtt_v5": caps.mqtt_v5,
+                "qos2": caps.qos2,
+                "max_inflight": caps.max_inflight,
                 "message_callback_add": caps.message_callback_add,
+                "native_message_callback_add": caps.native_message_callback_add,
+                "stability": caps.stability,
+                "io_model": caps.io_model,
+                "implementation_language": caps.implementation_language,
+                "synthetic_mids": caps.synthetic_mids,
                 "unimplemented": list(caps.unimplemented),
                 "notes": caps.notes,
             }

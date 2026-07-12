@@ -65,6 +65,25 @@ def summarize_runs(values: Sequence[float]) -> dict:
     }
 
 
+def summarize_valid_runs(point_runs: Sequence[dict]) -> dict:
+    """Summarize primary rates from status=valid runs only; report inconclusives separately."""
+    valid_rates = [
+        float(r["primary_msgs_per_s"])
+        for r in point_runs
+        if r.get("status") == "valid"
+        and r.get("primary_msgs_per_s") is not None
+        and not bool(r.get("non_comparable"))
+    ]
+    inconclusive = [r for r in point_runs if r.get("status") != "valid"]
+    summary = summarize_runs(valid_rates)
+    summary["inconclusive_n"] = len(inconclusive)
+    summary["inconclusive_rates"] = [
+        sanitize_number(r.get("primary_msgs_per_s")) for r in inconclusive
+    ]
+    summary["total_runs"] = len(point_runs)
+    return summary
+
+
 def latency_summary(samples_ns: Sequence[int], *, min_for_p99: int = 10_000) -> dict:
     """Summarize latency samples in milliseconds with gated p99."""
     samples_ms = [s / 1_000_000.0 for s in samples_ns]
@@ -142,9 +161,8 @@ def bootstrap_median_diff(
 
 
 def abba_order(blocks: int) -> List[str]:
-    """Return ABBA repeated `blocks` times (4 blocks => 16 slots? No: 4 blocks of ABBA = 16).
+    """Return ABBA repeated `blocks` times.
 
-    Plan: four ABBA blocks give 8 runs per source.
     Each ABBA block is A,B,B,A => 2A + 2B per block.
     4 blocks => 8A + 8B.
     """
@@ -154,6 +172,77 @@ def abba_order(blocks: int) -> List[str]:
     for _ in range(blocks):
         order.extend(["A", "B", "B", "A"])
     return order
+
+
+def abba_block_ratios(order: Sequence[str], rates_by_slot: Sequence[Optional[float]]) -> List[float]:
+    """For each complete ABBA block with four valid rates, return median(B)/median(A)."""
+    ratios: List[float] = []
+    for i in range(0, len(order), 4):
+        chunk_labels = list(order[i : i + 4])
+        chunk_rates = list(rates_by_slot[i : i + 4])
+        if chunk_labels != ["A", "B", "B", "A"]:
+            continue
+        if any(r is None for r in chunk_rates):
+            continue
+        a_vals = [float(chunk_rates[0]), float(chunk_rates[3])]
+        b_vals = [float(chunk_rates[1]), float(chunk_rates[2])]
+        a_med = median(a_vals)
+        b_med = median(b_vals)
+        if a_med is None or b_med is None or a_med == 0:
+            continue
+        ratios.append(b_med / a_med)
+    return ratios
+
+
+def compare_verdict_from_block_ratios(
+    block_ratios: Sequence[float],
+    *,
+    min_effect_pct: float = 3.0,
+    seed: int = 42,
+    n_boot: int = 2000,
+    confidence: float = 0.95,
+) -> dict:
+    """Bootstrap the distribution of per-block B/A ratios."""
+    if not block_ratios:
+        return {
+            "verdict": "inconclusive",
+            "median_ratio": None,
+            "ci_low": None,
+            "ci_high": None,
+            "excludes_zero_effect": False,
+            "absolute_effect_pct": None,
+            "n_blocks": 0,
+        }
+    med = median(list(block_ratios))
+    rng = random.Random(seed)
+    diffs = []
+    for _ in range(n_boot):
+        sample = [block_ratios[rng.randrange(len(block_ratios))] for _ in range(len(block_ratios))]
+        m = median(sample)
+        if m is None:
+            continue
+        diffs.append(m - 1.0)
+    alpha = 1.0 - confidence
+    lo = percentile(diffs, 100.0 * (alpha / 2.0)) if diffs else None
+    hi = percentile(diffs, 100.0 * (1.0 - alpha / 2.0)) if diffs else None
+    excludes_zero = lo is not None and hi is not None and (lo > 0 or hi < 0)
+    effect = None if med is None else (med - 1.0) * 100.0
+    if effect is None or not excludes_zero or abs(effect) <= min_effect_pct:
+        verdict = "inconclusive"
+    elif effect > 0:
+        verdict = "improvement"
+    else:
+        verdict = "regression"
+    return {
+        "verdict": verdict,
+        "median_ratio": sanitize_number(med),
+        "ci_low": sanitize_number(lo),
+        "ci_high": sanitize_number(hi),
+        "excludes_zero_effect": excludes_zero,
+        "absolute_effect_pct": sanitize_number(effect),
+        "n_blocks": len(block_ratios),
+        "block_ratios": [sanitize_number(r) for r in block_ratios],
+    }
 
 
 def compare_verdict(

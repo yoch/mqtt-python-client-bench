@@ -10,13 +10,21 @@
     "profile": { "type": "string", "enum": ["standard", "smoke"] },
     "runs": { "type": "integer", "minimum": 1 },
     "seed": { "type": "integer" },
-    "client": { "type": "string", "enum": ["paho", "gmqtt", "aiomqtt", "amqtt"] },
+    "client": {
+      "type": "string",
+      "enum": ["paho", "gmqtt", "aiomqtt", "amqtt", "awscrt", "zmqtt", "aiomqtt3"]
+    },
     "client_path": { "type": ["string", "null"] },
     "client_identity": { "type": "object" },
     "baseline_client": { "type": "string" },
     "candidate_client": { "type": "string" },
+    "baseline_identity": { "type": "object" },
+    "candidate_identity": { "type": "object" },
+    "cooldown_s": { "type": "number" },
     "broker": { "type": "object" },
+    "loadgen": { "type": "object" },
     "environment": { "type": "object" },
+    "cpusets": { "type": "object" },
     "results": {
       "type": "array",
       "items": {
@@ -36,17 +44,46 @@
                 "reasons": { "type": "array", "items": { "type": "string" } },
                 "client": { "type": "string" },
                 "primary_msgs_per_s": { "type": ["number", "null"] },
-                "workers": { "type": "array" },
+                "secondary_msgs_per_s": { "type": "object" },
+                "workers": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "role": { "type": "string" },
+                      "ok": { "type": "boolean" },
+                      "offered": { "type": "integer" },
+                      "submitted": { "type": "integer" },
+                      "sync_rejected": { "type": "integer" },
+                      "completed_success": { "type": "integer" },
+                      "completed_failed": { "type": "integer" },
+                      "missed_due_to_backpressure": { "type": "integer" },
+                      "msgs_per_s": { "type": ["number", "null"] },
+                      "integrity": { "type": "object" },
+                      "latency_summary": { "type": "object" }
+                    }
+                  }
+                },
                 "loadgen": { "type": ["object", "null"] },
                 "telemetry": { "type": "array" },
-                "non_comparable": { "type": "boolean" }
+                "non_comparable": { "type": "boolean" },
+                "protocol_effective": { "type": "string" }
               }
             }
           },
-          "summary": { "type": "object" }
+          "summary": {
+            "type": "object",
+            "properties": {
+              "n": { "type": "integer" },
+              "median": { "type": ["number", "null"] },
+              "inconclusive_n": { "type": "integer" },
+              "total_runs": { "type": "integer" }
+            }
+          }
         }
       }
     },
+    "points": { "type": "array" },
     "verdict": { "type": "object" },
     "order": { "type": "array", "items": { "type": "string", "enum": ["A", "B"] } }
   }

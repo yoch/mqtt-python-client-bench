@@ -13,7 +13,7 @@ import threading
 import time
 
 from mqtt_client_bench.adapters.registry import adapter_identity, create_adapter
-from mqtt_client_bench.control import barrier_client_wait, touch, write_json
+from mqtt_client_bench.control import barrier_client_session, touch, write_json
 
 
 def main(argv=None) -> int:
@@ -79,9 +79,15 @@ def main(argv=None) -> int:
         return 1
 
     touch(cfg["ready_path"], {"role": "responder", "pid": os.getpid(), **identity})
-    barrier_client_wait(cfg["barrier_path"], "T0", timeout_s=float(cfg.get("barrier_timeout_s", 120)))
-    # Stay alive for warmup+measure+drain.
-    alive = float(cfg.get("warmup_s", 1)) + float(cfg.get("duration_s", 3)) + float(cfg.get("drain_s", 2)) + 2
+    barrier = barrier_client_session(cfg["barrier_path"], timeout_s=float(cfg.get("barrier_timeout_s", 120)))
+    barrier.wait("T0")
+    # Mirror initiator warmup duration, then join the measure barrier.
+    time.sleep(float(cfg.get("warmup_s", 1)))
+    barrier.ack("WARMUP_DRAINED")
+    barrier.wait("T_MEASURE")
+    barrier.close()
+    # Stay alive for measure+drain.
+    alive = float(cfg.get("duration_s", 3)) + float(cfg.get("drain_s", 2)) + 2
     time.sleep(alive)
     with state["lock"]:
         responses = state["responses"]

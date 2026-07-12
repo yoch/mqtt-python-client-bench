@@ -58,7 +58,11 @@ class PahoAdapter:
             max_inflight=True,
             max_queued=True,
             message_callback_add=True,
+            native_message_callback_add=True,
             v5_publish_properties=True,
+            stability="stable",
+            io_model="sync",
+            implementation_language="python",
             notes="Eclipse Paho MQTT Python (callback API v2).",
         )
 
@@ -67,11 +71,16 @@ class PahoAdapter:
         import paho
         import paho.mqtt.client as mqtt
 
+        caps = cls.capabilities()
         return {
             "client": "paho",
             "adapter": "paho",
             "client_module": str(Path(paho.__file__).resolve()),
             "client_version": getattr(paho, "__version__", None) or getattr(mqtt, "__version__", None),
+            "stability": caps.stability,
+            "io_model": caps.io_model,
+            "implementation_language": caps.implementation_language,
+            "synthetic_mids": caps.synthetic_mids,
         }
 
     @classmethod

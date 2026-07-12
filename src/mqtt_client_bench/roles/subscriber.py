@@ -15,7 +15,7 @@ import threading
 import time
 
 from mqtt_client_bench.adapters.registry import adapter_identity, create_adapter
-from mqtt_client_bench.control import barrier_client_wait, touch, write_json
+from mqtt_client_bench.control import barrier_client_session, touch, write_json
 from mqtt_client_bench.workloads import (
     HEADER_SIZE,
     callback_match_topics,
@@ -195,7 +195,8 @@ def main(argv=None) -> int:
             **identity,
         },
     )
-    barrier_client_wait(cfg["barrier_path"], "T0", timeout_s=float(cfg.get("barrier_timeout_s", 120)))
+    barrier = barrier_client_session(cfg["barrier_path"], timeout_s=float(cfg.get("barrier_timeout_s", 120)))
+    barrier.wait("T0")
 
     gc.collect()
     state["phase"] = "warmup"
@@ -208,6 +209,21 @@ def main(argv=None) -> int:
         state["latencies_ns"].clear()
         state["callback_invocations"] = 0
         state["subscriber_delivered"] = 0
+
+    # Drain any late warmup deliveries before measure.
+    time.sleep(min(0.5, drain_s))
+    with state["lock"]:
+        state["delivered_in_window"] = 0
+        state["delivered_during_drain"] = 0
+        state["bytes_in_window"] = 0
+        state["sequences"].clear()
+        state["latencies_ns"].clear()
+        state["callback_invocations"] = 0
+        state["subscriber_delivered"] = 0
+
+    barrier.ack("WARMUP_DRAINED")
+    barrier.wait("T_MEASURE")
+    barrier.close()
 
     state["phase"] = "measure"
     t0 = time.perf_counter()
