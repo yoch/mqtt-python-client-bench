@@ -54,6 +54,7 @@ Wrappers of Paho/gmqtt (`fastapi-mqtt`, `jmqtt`, …) are intentionally excluded
 |---|---|---|
 | Publisher capacity / QoS0–1 | stable clients with matching caps | QoS2 excluded for gmqtt |
 | `pub_qos1_inflight` | paho, aiomqtt | requires `max_inflight` |
+| Application RTT | stable clients with RTT calibration | same lib on both ends; fractions of `rtt_capacity_qos1` |
 | `sub_callback_matching` | **paho only** | native `message_callback_add` |
 | Fleet idle | sync clients only | async_bridged refused (1 loop/thread per conn) |
 | MQTT v5 properties | paho, gmqtt, aiomqtt, awscrt, zmqtt | amqtt / aiomqtt3 constraints apply |
@@ -100,7 +101,7 @@ Experimental: `.[zmqtt]` or `.[aiomqtt3]` (separate environments).
 | `list [--suite core\|full]` | Scenario catalogue |
 | `run --scenario NAME --client LIB` | Run one scenario (default `--profile standard`) |
 | `run --suite core\|full --client LIB` | Run a suite |
-| `calibrate --client LIB --output load.json` | Baseline capacity → open-loop fractions |
+| `calibrate --client LIB --output load.json` | Publish + RTT closed-loop baselines → open-loop fractions |
 | `compare --clients A,B --scenario NAME` | ABBA A/B comparison (all variants by default) |
 | `report build [--input results] [--output site]` | Build static HTML reports for GitHub Pages |
 
@@ -121,8 +122,23 @@ Three protocols are never mixed:
 
 1. **Capacity** — closed-loop bounded outstanding window; primary metric is
    `completed_success` in `[T0_measure, T1)`.
-2. **Latency** — open-loop at calibrated fractions of **that client's** baseline capacity.
+2. **Latency** — open-loop at calibrated fractions of **that client's** baseline
+   capacity *in the same regime* (publish capacity for PUBACK latency; RTT
+   capacity for application RTT).
 3. **Integrity** — bounded-rate sequence checks (missing/duplicate/out-of-order).
+
+### Application RTT
+
+`application_rtt_qos1` measures a **homogeneous product loop**: the SUT library
+drives both the initiator (`sut` cpuset) and the responder (`orch` cpuset). The
+primary sample is one completed request/response pair. That amplifies stack
+cost relative to a single-sided client benchmark — intentional for “gateway /
+peer of the same stack” questions; it is not a neutral peer RTT.
+
+Open-loop RTT fractions are sized from `rtt_capacity_qos1` (closed-loop max
+completed pairs/s for that client), **not** from publisher-only capacity. A
+publish QoS1 baseline understates the RTT ceiling (two publishes + two
+deliveries per sample) and would mark high fractions inconclusive.
 
 ### Publish completion contract
 
@@ -177,13 +193,24 @@ python -m mqtt_client_bench.run compare \
 
 ABBA blocks bootstrap per-block `median(B)/median(A)` ratios. Only fully valid
 slots enter the verdict. Load-fraction scenarios auto-calibrate each client
-against its own QoS1 capacity. Fixed 5 s cooldown between slots.
+against its own regime capacity (publish or RTT). Fixed 5 s cooldown between
+slots.
 
 ## Planned (not executable yet)
 
+Niche/functional scenarios stay in the catalogue but are tagged `planned` and
+excluded from suite execution — they probe protocol corner cases, not everyday
+client performance, so they are deliberately not implemented for now:
+
+- `session_resume_qos1` persistent-session outage drain
+- `mqttv5_flow_control` (`receive_maximum`)
+- `retained_bootstrap` (broker-sensitive snapshot)
+- `queue_rejection` accounting protocol
 - `fleet4k_zipf` / `fleet100k` topic cardinality in the loadgen
 - `wan_cut` controlled blackhole outage
-- `session_resume` persistent-session outage drain
+- `mqttv5_rich` variants `topic_alias` / `subscription_identifier` and
+  `connect_latency_and_churn` variants `tls_resume` / `tcp_concurrent` refuse
+  per-point with `not_implemented:*`; the other variants of those scenarios run.
 
 ## Layout
 
@@ -208,8 +235,9 @@ PYTHONPATH=src python tests/test_unit.py
 
 ## Known limitations
 
-- Harness-level gaps (`receive_maximum`, retained bootstrap, session outage, …)
-  still refuse with `not_implemented:*`.
+- Niche scenarios (`receive_maximum`, retained bootstrap, session outage,
+  queue rejection) are tagged `planned`: skipped by suites, refused with
+  `not_implemented:*` if forced — see “Planned”.
 - `aiomqtt` v2 and v3 cannot cohabit in one environment.
 - `amqtt` has no MQTT v5 client path in this bench (`mqtt_v5=false`).
 - `gmqtt` QoS2 completion is at PUBREC in 0.7 (`qos2=false`).

@@ -123,7 +123,12 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     )
     print(
         json.dumps(
-            {"capacity_msgs_per_s": payload.get("capacity_msgs_per_s"), "fractions": payload.get("fractions")},
+            {
+                "capacity_msgs_per_s": payload.get("capacity_msgs_per_s"),
+                "rtt_capacity_msgs_per_s": payload.get("rtt_capacity_msgs_per_s"),
+                "fractions": payload.get("fractions"),
+                "rtt_fractions": payload.get("rtt_fractions"),
+            },
             indent=2,
         )
     )

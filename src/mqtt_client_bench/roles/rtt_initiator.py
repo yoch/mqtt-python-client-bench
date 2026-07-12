@@ -31,7 +31,24 @@ def main(argv=None) -> int:
     warmup_s = float(cfg.get("warmup_s", 1))
     drain_s = float(cfg.get("drain_s", 2))
     outstanding = int(cfg.get("outstanding", 32))
-    target_rate = float(cfg.get("target_rate") or (1000.0 * float(cfg.get("load_fraction", 0.5))))
+    cadence = str(cfg.get("cadence", "capacity"))
+    # Closed-loop capacity: no pacing. Open-loop latency: require an explicit
+    # calibrated target_rate (harness refuses load_fraction without one).
+    if cadence == "capacity":
+        target_rate = None
+    elif cfg.get("target_rate") is not None:
+        target_rate = float(cfg["target_rate"])
+    else:
+        write_json(
+            cfg["result_path"],
+            {
+                "ok": False,
+                "error": "open_loop_without_target_rate",
+                "role": "rtt_initiator",
+                **identity,
+            },
+        )
+        return 1
     run_id = cfg["run_id"].encode("ascii")
     protocol = cfg.get("protocol", "MQTTv311")
 
@@ -177,7 +194,7 @@ def main(argv=None) -> int:
 
 
 def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, until, sequence_start=0):
-    interval = 1.0 / target_rate if target_rate > 0 else 0.0
+    interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0
     next_send = time.perf_counter()
     seq = sequence_start
     while time.perf_counter() < until:

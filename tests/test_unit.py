@@ -17,7 +17,7 @@ from mqtt_client_bench.adapters.registry import (  # noqa: E402
     list_clients,
     unsupported_for_client,
 )
-from mqtt_client_bench.harness import capacity_from_qos_sweep, unsupported_features  # noqa: E402
+from mqtt_client_bench.harness import capacity_from_qos_sweep, capacity_from_scenario, unsupported_features  # noqa: E402
 from mqtt_client_bench.loadgen import interval_for_rate, nominal_rate, parse_emqtt_output  # noqa: E402
 from mqtt_client_bench.metrics import (  # noqa: E402
     abba_block_ratios,
@@ -130,6 +130,28 @@ class MetricsTests(unittest.TestCase):
             ]
         }
         self.assertEqual(capacity_from_qos_sweep(result), 4000.0)
+
+    def test_capacity_from_scenario_median(self):
+        result = {
+            "results": [
+                {
+                    "point": {"cadence": "capacity"},
+                    "summary": {"median": 1200.0},
+                    "runs": [],
+                }
+            ]
+        }
+        self.assertEqual(capacity_from_scenario(result), 1200.0)
+
+    def test_rtt_capacity_scenario_is_closed_loop(self):
+        from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario
+
+        scenario = SCENARIO_BY_NAME["rtt_capacity_qos1"]
+        points = expand_scenario(scenario, "smoke")
+        self.assertEqual(len(points), 1)
+        self.assertEqual(points[0]["cadence"], "capacity")
+        self.assertNotIn("load_fraction", points[0])
+        self.assertEqual(points[0]["topology"], "application_rtt")
 
     def test_integrity(self):
         expected = range(1, 6)
@@ -419,6 +441,15 @@ class ScenarioTests(unittest.TestCase):
         self.assertFalse(any(p.get("network") == "wan_cut" for p in net))
         session = SCENARIO_BY_NAME["session_resume_qos1"]
         self.assertIn("planned", session.tags)
+
+    def test_niche_scenarios_are_planned(self):
+        # Harness-level gaps: kept in the catalogue, excluded from suite
+        # execution instead of burning campaign time on refused points.
+        for name in ("mqttv5_flow_control", "queue_rejection", "retained_bootstrap", "session_resume_qos1"):
+            scenario = SCENARIO_BY_NAME[name]
+            self.assertIn("planned", scenario.tags, name)
+            for point in expand_scenario(scenario, "standard"):
+                self.assertTrue(point.get("non_comparable"), name)
 
     def test_inflight_variant_marks_requirement(self):
         points = expand_scenario(SCENARIO_BY_NAME["pub_qos1_inflight"], "standard")
