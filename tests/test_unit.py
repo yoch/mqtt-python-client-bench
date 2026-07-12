@@ -17,7 +17,7 @@ from mqtt_client_bench.adapters.registry import (  # noqa: E402
     list_clients,
     unsupported_for_client,
 )
-from mqtt_client_bench.harness import unsupported_features  # noqa: E402
+from mqtt_client_bench.harness import capacity_from_qos_sweep, unsupported_features  # noqa: E402
 from mqtt_client_bench.loadgen import interval_for_rate, nominal_rate, parse_emqtt_output  # noqa: E402
 from mqtt_client_bench.metrics import (  # noqa: E402
     abba_block_ratios,
@@ -101,6 +101,35 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(summary["n"], 1)
         self.assertEqual(summary["median"], 10.0)
         self.assertEqual(summary["inconclusive_n"], 1)
+
+    def test_capacity_from_qos_sweep_uses_smoke_rates(self):
+        result = {
+            "results": [
+                {
+                    "point": {"qos_publish": 0},
+                    "summary": {"median": None},
+                    "runs": [
+                        {
+                            "status": "valid",
+                            "primary_msgs_per_s": 9000.0,
+                            "non_comparable": True,
+                        }
+                    ],
+                },
+                {
+                    "point": {"qos_publish": 1},
+                    "summary": {"median": None},
+                    "runs": [
+                        {
+                            "status": "valid",
+                            "primary_msgs_per_s": 4000.0,
+                            "non_comparable": True,
+                        }
+                    ],
+                },
+            ]
+        }
+        self.assertEqual(capacity_from_qos_sweep(result), 4000.0)
 
     def test_integrity(self):
         expected = range(1, 6)
@@ -475,11 +504,20 @@ class LoadgenTests(unittest.TestCase):
         self.assertEqual(interval_for_rate(20, 20000), 1)
 
     def test_mqtt_version_helper(self):
-        from mqtt_client_bench.harness import mqtt_version_for_point
+        from mqtt_client_bench.harness import effective_loadgen_mqtt_version, mqtt_version_for_point
 
         self.assertEqual(mqtt_version_for_point({"protocol": "MQTTv5"}), 5)
         self.assertEqual(mqtt_version_for_point({"protocol": "MQTTv311"}), 4)
         self.assertEqual(mqtt_version_for_point({"protocol": "MQTTv31"}), 3)
+        self.assertEqual(effective_loadgen_mqtt_version(4), 5)
+        self.assertEqual(effective_loadgen_mqtt_version(5), 5)
+
+    def test_loadgen_shortids_for_v311(self):
+        from mqtt_client_bench.loadgen import LoadgenSpec, build_pub_args
+
+        args = build_pub_args(LoadgenSpec(mqtt_version=4))
+        self.assertIn("--shortids", args)
+        self.assertNotIn("--shortids", build_pub_args(LoadgenSpec(mqtt_version=5)))
 
     def test_callback_match_helpers(self):
         run_id = "abcd1234"

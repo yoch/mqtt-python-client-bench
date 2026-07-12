@@ -52,8 +52,6 @@ def main(argv=None) -> int:
     def on_connect(client, userdata, flags, reason_code, properties=None):
         if int(getattr(reason_code, "value", reason_code)) == 0:
             state["connected"].set()
-            result = adapter.subscribe(request_topic, qos=qos)
-            state["sub_mid"] = result.mid
 
     def on_subscribe(client, userdata, mid, reason_code_list, properties=None):
         ok = True
@@ -73,7 +71,15 @@ def main(argv=None) -> int:
     adapter.on_message = on_message
     adapter.connect(cfg["host"], int(cfg["port"]), keepalive=60)
     adapter.loop_start()
-    if not state["connected"].wait(30) or not state["subscribed"].wait(30):
+    if not state["connected"].wait(30):
+        write_json(cfg["result_path"], {"ok": False, "error": "ready_timeout", **identity})
+        adapter.loop_stop()
+        return 1
+    result = adapter.subscribe(request_topic, qos=qos)
+    state["sub_mid"] = result.mid
+    if result.mid is None:
+        state["subscribed"].set()
+    if not state["subscribed"].wait(30):
         write_json(cfg["result_path"], {"ok": False, "error": "ready_timeout", **identity})
         adapter.loop_stop()
         return 1

@@ -113,10 +113,6 @@ def main(argv=None) -> int:
         if rc != 0:
             return
         state["connected"].set()
-        for filt in filters:
-            result = adapter.subscribe(filt, qos=qos)
-            if result.rc == adapter.MQTT_ERR_SUCCESS and result.mid is not None:
-                state["sub_mids"].add(result.mid)
 
     def on_subscribe(client, userdata, mid, reason_code_list, properties=None):
         # reason_code_list may be ints (v3) or ReasonCode (v5)
@@ -178,6 +174,21 @@ def main(argv=None) -> int:
         write_json(cfg["result_path"], {"ok": False, "error": "connect_timeout", **identity})
         adapter.loop_stop()
         return 1
+
+    # Subscribe from the role thread — never from on_connect.
+    # Bridged asyncio adapters deadlock if bridge.run() is re-entered from the loop thread.
+    for filt in filters:
+        result = adapter.subscribe(filt, qos=qos)
+        if result.rc == adapter.MQTT_ERR_SUCCESS and result.mid is not None:
+            with state["lock"]:
+                state["sub_mids"].add(result.mid)
+        elif result.rc == adapter.MQTT_ERR_SUCCESS and result.mid is None:
+            # Some adapters ACK synchronously without a mid.
+            state["subscribed"].set()
+    with state["lock"]:
+        if not state["sub_mids"] and state["granted_ok"]:
+            state["subscribed"].set()
+
     if not state["subscribed"].wait(30):
         write_json(cfg["result_path"], {"ok": False, "error": "subscribe_timeout", **identity})
         adapter.loop_stop()

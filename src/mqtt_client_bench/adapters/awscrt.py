@@ -45,7 +45,7 @@ class AwscrtAdapter:
             async_bridged=False,
             mqtt_v311=True,
             mqtt_v5=True,
-            qos2=True,
+            qos2=False,  # awscrt mqtt3 QoS2 against Mosquitto currently fails PUBLISH completion
             tls=True,
             max_inflight=False,
             max_queued=False,
@@ -318,8 +318,8 @@ class AwscrtAdapter:
 
         assert self._conn is not None
 
-        def _cb(topic_name, payload, dup, qos_val, retain, **kwargs):
-            self._dispatch(_Msg(topic_name, payload, int(qos_val), bool(retain)))
+        def _cb(topic, payload, dup, qos, retain, **kwargs):
+            self._dispatch(_Msg(topic, payload, int(qos), bool(retain)))
 
         future, packet_id = self._conn.subscribe(topic, mqtt.QoS(qos), callback=_cb)
         mid = int(packet_id)

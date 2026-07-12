@@ -59,8 +59,16 @@ class AsyncioBridge:
     def run(self, coro: Coroutine[Any, Any, T], timeout: Optional[float] = 30.0) -> T:
         if self._loop is None:
             raise RuntimeError("asyncio bridge is not running")
+        if threading.current_thread() is self._thread:
+            raise RuntimeError(
+                "AsyncioBridge.run() called from the bridge loop thread; "
+                "schedule work with create_task() instead to avoid deadlock"
+            )
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=timeout)
+
+    def on_loop_thread(self) -> bool:
+        return self._thread is not None and threading.current_thread() is self._thread
 
     def create_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Future:
         if self._loop is None:
