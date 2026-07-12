@@ -106,7 +106,7 @@ Experimental: `.[zmqtt]` or `.[aiomqtt3]` (separate environments).
 
 Useful flags:
 
-- `--profile smoke|standard` — smoke is short and marked `non_comparable` (default: **standard**)
+- `--profile smoke|standard` — smoke is short and marked `non_comparable` (default: **standard**: 20 s measure / 5 s warmup / 3 runs; smoke: 3 s / 1 s / 1 run)
 - `--client …` — system under test
 - `--client-path` — optional checkout/worktree for A/B of the same library
 - `--broker host:port` — external broker (`managed_broker=false`)

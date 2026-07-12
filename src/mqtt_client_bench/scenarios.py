@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
@@ -26,9 +26,10 @@ class Scenario:
     publishers: int = 1
     subscribers: int = 0
     loadgen_clients: int = 0
-    duration_s: float = 60.0
-    warmup_s: float = 15.0
-    drain_s: float = 30.0
+    # Base timings; expand_scenario() overwrites from PROFILE_SPECS.
+    duration_s: float = 20.0
+    warmup_s: float = 5.0
+    drain_s: float = 10.0
     tls: bool = False
     network: str = "localhost"
     variants: Tuple[Dict[str, Any], ...] = ()
@@ -42,6 +43,35 @@ class Scenario:
         if overrides:
             data.update(overrides)
         return data
+
+
+# Comparable profile budgets. Chosen so a full core×5-client campaign fits a
+# night (~4–6 h) while keeping a usable median (3 runs) and enough samples
+# (20 s measure at thousands msg/s ⇒ tens of thousands of messages).
+PROFILE_SPECS: Dict[str, Dict[str, Any]] = {
+    "smoke": {
+        "duration_s": 3.0,
+        "warmup_s": 1.0,
+        "drain_s": 2.0,
+        "default_runs": 1,
+        "non_comparable": True,
+    },
+    "standard": {
+        "duration_s": 20.0,
+        "warmup_s": 5.0,
+        "drain_s": 10.0,
+        "default_runs": 3,
+        "non_comparable": False,
+    },
+}
+
+
+def default_runs(profile: str) -> int:
+    """Default repetitions per point for a profile."""
+    try:
+        return int(PROFILE_SPECS[profile]["default_runs"])
+    except KeyError as exc:
+        raise KeyError(f"unknown profile {profile!r}; choose from {', '.join(PROFILE_SPECS)}") from exc
 
 
 def _variants(**axes: Sequence[Any]) -> Tuple[Dict[str, Any], ...]:
@@ -520,6 +550,9 @@ def list_scenarios(suite: Optional[str] = None) -> List[Scenario]:
 
 def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[str, Any]]:
     """Expand a scenario into concrete run points with profile-adjusted timings."""
+    if profile not in PROFILE_SPECS:
+        raise KeyError(f"unknown profile {profile!r}; choose from {', '.join(PROFILE_SPECS)}")
+    spec = PROFILE_SPECS[profile]
     base_variants = scenario.variants or ({},)
     points = []
     for variant in base_variants:
@@ -528,13 +561,10 @@ def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[
             resolved["require_max_inflight"] = True
         if "max_queued" in variant:
             resolved["require_max_queued"] = True
-        if profile == "smoke":
-            resolved["duration_s"] = min(float(resolved.get("duration_s", 60.0)), 3.0)
-            resolved["warmup_s"] = min(float(resolved.get("warmup_s", 15.0)), 1.0)
-            resolved["drain_s"] = min(float(resolved.get("drain_s", 30.0)), 2.0)
-            resolved["non_comparable"] = True
-        else:
-            resolved["non_comparable"] = False
+        resolved["duration_s"] = float(spec["duration_s"])
+        resolved["warmup_s"] = float(spec["warmup_s"])
+        resolved["drain_s"] = float(spec["drain_s"])
+        resolved["non_comparable"] = bool(spec["non_comparable"])
         # Loopback netem is diagnostic only — not comparable across hosts/kernels.
         if str(resolved.get("network", "localhost")) not in ("localhost", ""):
             resolved["non_comparable"] = True
@@ -553,19 +583,36 @@ def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[
     return points
 
 
-def estimate_suite(suite: str, profile: str, runs: int) -> dict:
-    scenarios = list_scenarios(suite)
-    points = sum(len(expand_scenario(s, profile)) for s in scenarios)
-    minutes = sum(s.estimated_minutes for s in scenarios)
-    if profile == "smoke":
-        minutes = minutes * 0.05
-        runs = 1
-    else:
-        minutes = minutes * (runs / 7.0)
+def estimate_suite(suite: str, profile: str, runs: Optional[int] = None) -> dict:
+    """Wall-clock estimate from profile timings × runs (+ light per-run overhead)."""
+    if profile not in PROFILE_SPECS:
+        raise KeyError(f"unknown profile {profile!r}; choose from {', '.join(PROFILE_SPECS)}")
+    if runs is None:
+        runs = default_runs(profile)
+    scenarios = [s for s in list_scenarios(suite) if "planned" not in s.tags]
+    points = 0
+    seconds = 0.0
+    # Drain often ends early on publishers; subscribers wait it out. Blend + spawn cost.
+    overhead_per_run_s = 2.0
+    for scenario in scenarios:
+        for point in expand_scenario(scenario, profile):
+            points += 1
+            active = (
+                float(point["warmup_s"])
+                + float(point["duration_s"])
+                + 0.4 * float(point["drain_s"])
+            )
+            seconds += runs * (active + overhead_per_run_s)
     return {
         "suite": suite,
         "scenarios": len(scenarios),
         "points": points,
         "runs_per_point": runs,
-        "estimated_minutes": round(minutes, 1),
+        "estimated_minutes": round(seconds / 60.0, 1),
+        "profile": profile,
+        "timings": {
+            "duration_s": PROFILE_SPECS[profile]["duration_s"],
+            "warmup_s": PROFILE_SPECS[profile]["warmup_s"],
+            "drain_s": PROFILE_SPECS[profile]["drain_s"],
+        },
     }

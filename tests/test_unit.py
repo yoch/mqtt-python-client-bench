@@ -430,11 +430,22 @@ class ScenarioTests(unittest.TestCase):
         standard = expand_scenario(scenario, "standard")
         self.assertTrue(all(p.get("non_comparable") for p in smoke))
         self.assertGreater(standard[0]["duration_s"], smoke[0]["duration_s"])
+        self.assertEqual(standard[0]["duration_s"], 20.0)
+        self.assertEqual(standard[0]["warmup_s"], 5.0)
+        self.assertEqual(standard[0]["drain_s"], 10.0)
+        self.assertEqual(smoke[0]["duration_s"], 3.0)
 
     def test_estimate(self):
+        from mqtt_client_bench.scenarios import default_runs
+
         est = estimate_suite("core", "smoke", 1)
         self.assertGreater(est["points"], 0)
         self.assertGreater(est["estimated_minutes"], 0)
+        std = estimate_suite("core", "standard", default_runs("standard"))
+        self.assertEqual(std["runs_per_point"], 3)
+        # core×1 client must stay night-sized, not multi-day.
+        self.assertLess(std["estimated_minutes"], 120.0)
+        self.assertGreater(std["estimated_minutes"], 20.0)
 
     def test_experimental_suite_matches_core_contracts(self):
         core = {s.name for s in list_scenarios("core")}
