@@ -12,6 +12,31 @@ from mqtt_client_bench.adapters.base import (
 )
 
 
+def build_paho_publish_properties(profile: str) -> Any:
+    """MQTT v5 PUBLISH properties shared by Paho and aiomqtt (paho Properties objects)."""
+    if profile in (None, "none"):
+        return None
+    from paho.mqtt.packettypes import PacketTypes
+    from paho.mqtt.properties import Properties
+
+    props = Properties(PacketTypes.PUBLISH)
+    if profile == "realistic":
+        props.PayloadFormatIndicator = 1
+        props.ContentType = "application/json"
+        props.MessageExpiryInterval = 60
+        props.UserProperty = [("schema", "telemetry.v1"), ("region", "eu-west-1")]
+    elif profile == "rich":
+        props.PayloadFormatIndicator = 1
+        props.ContentType = "application/json"
+        props.MessageExpiryInterval = 60
+        props.CorrelationData = b"c" * 32
+        props.ResponseTopic = "bench/response/" + ("r" * 48)
+        props.UserProperty = [(f"k{i:02d}", "v" * 64) for i in range(16)]
+    else:
+        return None
+    return props
+
+
 class PahoAdapter:
     MQTT_ERR_SUCCESS = 0
 
@@ -115,27 +140,7 @@ class PahoAdapter:
         self._client.message_callback_add(topic, callback)
 
     def build_publish_properties(self, profile: str) -> Any:
-        if profile in (None, "none"):
-            return None
-        from paho.mqtt.packettypes import PacketTypes
-        from paho.mqtt.properties import Properties
-
-        props = Properties(PacketTypes.PUBLISH)
-        if profile == "realistic":
-            props.PayloadFormatIndicator = 1
-            props.ContentType = "application/json"
-            props.MessageExpiryInterval = 60
-            props.UserProperty = [("schema", "telemetry.v1"), ("region", "eu-west-1")]
-        elif profile == "rich":
-            props.PayloadFormatIndicator = 1
-            props.ContentType = "application/json"
-            props.MessageExpiryInterval = 60
-            props.CorrelationData = b"c" * 32
-            props.ResponseTopic = "bench/response/" + ("r" * 48)
-            props.UserProperty = [(f"k{i:02d}", "v" * 64) for i in range(16)]
-        else:
-            return None
-        return props
+        return build_paho_publish_properties(profile)
 
     @property
     def on_connect(self):

@@ -123,17 +123,110 @@ class AdapterRegistryTests(unittest.TestCase):
         names = {row["name"] for row in list_clients()}
         self.assertEqual(names, {"paho", "gmqtt", "aiomqtt", "amqtt"})
 
-    def test_stub_clients_refuse_runs(self):
+    def test_implemented_clients_accept_core_points(self):
         point = {"payload": "telemetry256", "qos_publish": 0, "protocol": "MQTTv311"}
-        for name in ("gmqtt", "aiomqtt", "amqtt"):
+        for name in ("paho", "gmqtt", "aiomqtt", "amqtt"):
             missing = unsupported_for_client(name, point)
-            self.assertTrue(any(m.startswith("adapter:") for m in missing), name)
-        self.assertEqual(unsupported_for_client("paho", point), [])
+            self.assertEqual(missing, [], name)
 
     def test_callback_matching_capability(self):
         point = {"callback_filters": 64, "qos_subscribe": 0}
-        self.assertEqual(unsupported_for_client("paho", point), [])
-        self.assertIn("message_callback_add", unsupported_for_client("gmqtt", point))
+        for name in ("paho", "gmqtt", "aiomqtt", "amqtt"):
+            self.assertEqual(unsupported_for_client(name, point), [], name)
+
+    def test_amqtt_refuses_v5_properties_profile(self):
+        point = {"protocol": "MQTTv5", "properties_profile": "realistic", "qos_publish": 0}
+        missing = unsupported_for_client("amqtt", point)
+        self.assertIn("properties_profile:realistic", missing)
+        self.assertEqual(unsupported_for_client("gmqtt", point), [])
+        self.assertEqual(unsupported_for_client("aiomqtt", point), [])
+
+    def test_client_identities(self):
+        from mqtt_client_bench.adapters.registry import adapter_identity, get_adapter_class
+
+        for name in ("paho", "gmqtt", "aiomqtt", "amqtt"):
+            caps = get_adapter_class(name).capabilities()
+            self.assertEqual(caps.unimplemented, [], name)
+            info = adapter_identity(name)
+            self.assertEqual(info["client"], name)
+            self.assertIsNotNone(info.get("client_module"), name)
+            self.assertNotEqual(info.get("status"), "stub", name)
+
+
+class BridgedAdapterTests(unittest.TestCase):
+    def test_topic_matches_sub(self):
+        from mqtt_client_bench.adapters.async_bridge import topic_matches_sub
+
+        self.assertTrue(topic_matches_sub("a/b", "a/b"))
+        self.assertTrue(topic_matches_sub("a/+", "a/b"))
+        self.assertTrue(topic_matches_sub("a/#", "a/b/c"))
+        self.assertTrue(topic_matches_sub("#", "a/b"))
+        self.assertFalse(topic_matches_sub("a/b", "a/c"))
+        self.assertFalse(topic_matches_sub("a/+", "a/b/c"))
+        self.assertFalse(topic_matches_sub("a/#", "b/c"))
+
+    def test_dispatch_prefers_topic_callback(self):
+        from mqtt_client_bench.adapters.async_bridge import BridgedAdapterBase, IncomingMessage
+
+        adapter = BridgedAdapterBase()
+        seen = {"topic": 0, "global": 0}
+
+        def on_topic(client, userdata, msg):
+            seen["topic"] += 1
+
+        def on_message(client, userdata, msg):
+            seen["global"] += 1
+
+        adapter.on_message = on_message
+        adapter.message_callback_add("bench/+/data", on_topic)
+        adapter._dispatch_message(IncomingMessage(topic="bench/x/data", payload=b"1"))
+        self.assertEqual(seen["topic"], 1)
+        self.assertEqual(seen["global"], 0)
+        adapter._dispatch_message(IncomingMessage(topic="other", payload=b"2"))
+        self.assertEqual(seen["global"], 1)
+
+    def test_bridge_start_stop_and_callbacks(self):
+        from mqtt_client_bench.adapters.async_bridge import BridgedAdapterBase
+
+        adapter = BridgedAdapterBase()
+        connected = []
+        published = []
+        subscribed = []
+
+        adapter.on_connect = lambda *a, **k: connected.append(a)
+        adapter.on_publish = lambda *a, **k: published.append(a)
+        adapter.on_subscribe = lambda *a, **k: subscribed.append(a)
+
+        adapter.loop_start()
+        self.assertTrue(adapter._bridge.running)
+        adapter._fire_on_connect(reason_code=0)
+        adapter._fire_on_publish(7, reason_code=0)
+        adapter._fire_on_subscribe(3, [0])
+        adapter.loop_stop()
+        self.assertFalse(adapter._bridge.running)
+        self.assertEqual(len(connected), 1)
+        self.assertEqual(published[0][2], 7)
+        self.assertEqual(subscribed[0][2], 3)
+
+    def test_alloc_mid_cycles(self):
+        from mqtt_client_bench.adapters.async_bridge import BridgedAdapterBase
+
+        adapter = BridgedAdapterBase()
+        mids = [adapter.alloc_mid() for _ in range(5)]
+        self.assertEqual(mids, [1, 2, 3, 4, 5])
+        adapter._next_mid = 65535
+        self.assertEqual(adapter.alloc_mid(), 65535)
+        self.assertEqual(adapter.alloc_mid(), 1)
+
+    def test_create_adapters(self):
+        from mqtt_client_bench.adapters.registry import create_adapter
+
+        for name in ("gmqtt", "aiomqtt", "amqtt"):
+            adapter = create_adapter(name, client_id=f"test-{name}")
+            self.assertEqual(adapter.MQTT_ERR_SUCCESS, 0)
+            self.assertTrue(hasattr(adapter, "publish"))
+            self.assertTrue(hasattr(adapter, "subscribe"))
+            self.assertIsNone(adapter.build_publish_properties("none"))
 
 
 class ScenarioTests(unittest.TestCase):
