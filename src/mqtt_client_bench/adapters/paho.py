@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import socket as _socket
 from pathlib import Path
 from typing import Any, Optional
 
@@ -35,6 +36,13 @@ def build_paho_publish_properties(profile: str) -> Any:
     else:
         return None
     return props
+
+
+def _set_tcp_nodelay(client, userdata, sock) -> None:
+    try:
+        sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+    except (OSError, ValueError):
+        pass  # non-TCP transport (unix socket / websocket wrapper)
 
 
 class PahoAdapter:
@@ -116,6 +124,10 @@ class PahoAdapter:
         client = mqtt.Client(**kwargs)
         client.max_inflight_messages = max_inflight
         client.max_queued_messages = max_queued
+        # Paho leaves Nagle enabled; asyncio clients get TCP_NODELAY by default.
+        # Without this, request/response traffic measures a deterministic
+        # ~40 ms/hop Nagle+delayed-ACK artifact instead of the client.
+        client.on_socket_open = _set_tcp_nodelay
         adapter = cls(client, mqtt)
         if tls_ca_certs:
             adapter.tls_set(ca_certs=tls_ca_certs)

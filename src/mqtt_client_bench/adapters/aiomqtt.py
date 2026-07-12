@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 from pathlib import Path
 from typing import Any, Optional
 
@@ -139,6 +140,16 @@ class AiomqttAdapter(BridgedAdapterBase):
             # Skip the per-publish pending-calls warning branch entirely.
             self._client.pending_calls_threshold = 1 << 30
             await self._client.__aenter__()
+            # aiomqtt drives paho's raw socket itself (Nagle left on); align
+            # with asyncio clients which enable TCP_NODELAY by default.
+            # aiomqtt claims on_socket_open for its loop glue, so set the
+            # option on the live socket instead.
+            try:
+                sock = self._client._client.socket()  # noqa: SLF001
+                if sock is not None:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except (OSError, ValueError, AttributeError):
+                pass
             self._connected = True
             self._fire_on_connect(flags={}, reason_code=0, properties=None)
             self._start_pump()

@@ -44,6 +44,10 @@ class AdapterCapabilities:
     io_model: str = "sync"  # sync | asyncio_bridged | crt_event_loop
     implementation_language: str = "python"  # python | native
     synthetic_mids: bool = False
+    # Whether the transport runs with TCP_NODELAY (set by the adapter or by the
+    # runtime, e.g. asyncio). Without it, request/response scenarios measure a
+    # deterministic Nagle+delayed-ACK plateau (~40 ms/hop) instead of the client.
+    tcp_nodelay: bool = True
     notes: str = ""
     unimplemented: List[str] = field(default_factory=list)
 
@@ -68,6 +72,10 @@ class AdapterCapabilities:
             missing.append("native_message_callback_add")
         if point.get("topology") == "fleet" and self.async_bridged:
             missing.append("fleet_async_bridged")
+        if point.get("topology") == "application_rtt" and not self.tcp_nodelay:
+            # Ping-pong traffic without TCP_NODELAY measures the TCP stack's
+            # Nagle/delayed-ACK plateau, not the client library.
+            missing.append("tcp_nodelay")
         profile = point.get("properties_profile", "none")
         if protocol == "MQTTv5" and profile not in (None, "none") and not self.v5_publish_properties:
             missing.append(f"properties_profile:{profile}")

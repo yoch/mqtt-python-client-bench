@@ -71,6 +71,9 @@ class AwscrtAdapter:
             implementation_language="native",
             # mqtt3 QoS0 and all mqtt5 publishes use counter-allocated mids.
             synthetic_mids=True,
+            # aws-c-io exposes no TCP_NODELAY knob and hides the fd; RTT
+            # ping-pong would measure an ~84 ms Nagle plateau, so refuse it.
+            tcp_nodelay=False,
             notes=(
                 "AWS Common Runtime mqtt/mqtt5 clients (aws-c-mqtt). "
                 "Native engine — not pure Python."
