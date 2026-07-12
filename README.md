@@ -13,20 +13,20 @@ generalized behind a per-library adapter layer.
 
 ### Stable catalogue
 
-| Client | Notes |
-|---|---|
-| `paho` | Eclipse Paho MQTT Python (sync callbacks) — reference |
-| `gmqtt` | asyncio + callbacks; sync facade via `AsyncioBridge` (QoS2 refused: PUBREC≠PUBCOMP) |
-| `aiomqtt` | asyncio idiomatic API **v2.x** (paho backend); sync facade |
-| `amqtt` | asyncio client only (MQTT 3.1.1; v5 refused) |
-| `awscrt` | AWS Common Runtime (`aws-c-mqtt`) — **native** engine, not pure Python |
+| Client | Repository | Notes |
+|---|---|---|
+| `paho` | [eclipse-paho/paho.mqtt.python](https://github.com/eclipse-paho/paho.mqtt.python) | Eclipse Paho MQTT Python (sync callbacks) — reference |
+| `gmqtt` | [wialon/gmqtt](https://github.com/wialon/gmqtt) | asyncio + callbacks; sync facade via `AsyncioBridge` (QoS2 refused: PUBREC≠PUBCOMP) |
+| `aiomqtt` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | asyncio idiomatic API **v2.x** (paho backend); sync facade |
+| `amqtt` | [Yakifo/amqtt](https://github.com/Yakifo/amqtt) | asyncio client only (MQTT 3.1.1; v5 refused) |
+| `awscrt` | [awslabs/aws-crt-python](https://github.com/awslabs/aws-crt-python) | AWS Common Runtime (`aws-c-mqtt`) — **native** engine, not pure Python |
 
 ### Experimental catalogue (separate rankings)
 
-| Client | Notes |
-|---|---|
-| `zmqtt` | Pure asyncio MQTT 3.1.1/5 (Alpha) — `pip install 'mqtt-client-bench[zmqtt]'` |
-| `aiomqtt3` | aiomqtt **v3** alpha (mqtt5 sans-io, MQTT5 only). **Cannot** share an env with `aiomqtt` v2 |
+| Client | Repository | Notes |
+|---|---|---|
+| `zmqtt` | [faststream-community/zMQTT](https://github.com/faststream-community/zMQTT) | Pure asyncio MQTT 3.1.1/5 (Alpha) — `pip install 'mqtt-client-bench[zmqtt]'` |
+| `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | aiomqtt **v3** alpha (mqtt5 sans-io, MQTT5 only). **Cannot** share an env with `aiomqtt` v2 |
 
 ```bash
 python -m mqtt_client_bench.run clients -v
@@ -37,7 +37,7 @@ Unsupported scenario knobs for a given adapter are refused with
 
 ### Watchlist (not in catalogue yet)
 
-`mqttproto`, `ohmqtt` — too early / no stable PyPI story.
+[`mqttproto`](https://github.com/agronholm/mqttproto), [`ohmqtt`](https://github.com/ohmqtt/ohmqtt_python) — too early / no stable PyPI story.
 Wrappers of Paho/gmqtt (`fastapi-mqtt`, `jmqtt`, …) are intentionally excluded.
 
 ### Suites
