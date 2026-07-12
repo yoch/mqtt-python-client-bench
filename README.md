@@ -14,9 +14,9 @@ generalized behind a per-library adapter layer.
 | Client | Status | Notes |
 |---|---|---|
 | `paho` | implemented | Eclipse Paho MQTT Python (sync callbacks) |
-| `gmqtt` | stub | asyncio + callbacks; sync facade planned via thread loop |
-| `aiomqtt` | stub | asyncio idiomatic API (v2.x); sync facade planned |
-| `amqtt` | stub | asyncio client only (broker unused) |
+| `gmqtt` | implemented | asyncio + callbacks; sync facade via `AsyncioBridge` |
+| `aiomqtt` | implemented | asyncio idiomatic API (v2.x); sync facade via `AsyncioBridge` |
+| `amqtt` | implemented | asyncio client only (broker unused); sync facade via `AsyncioBridge` |
 
 List adapters and capability flags:
 
@@ -91,7 +91,7 @@ Role workers (publisher / subscriber / RTT / responder) talk only to
 `MqttClientAdapter`. Library-specific code lives under
 `src/mqtt_client_bench/adapters/`.
 
-Async libraries (`gmqtt`, `aiomqtt`, `amqtt`) will expose the same sync facade
+Async libraries (`gmqtt`, `aiomqtt`, `amqtt`) expose the same sync facade
 by driving an asyncio loop on a dedicated thread (`AsyncioBridge`).
 
 ## Publishing results
@@ -131,8 +131,8 @@ python -m mqtt_client_bench.run compare \
   --output /tmp/ab.json
 ```
 
-While stub adapters still report `not_implemented:adapter:*`, compare runs that
-include them stay inconclusive by design.
+Compare runs between any two implemented adapters use the same ABBA protocol
+as same-library A/B comparisons.
 
 ## Layout
 
@@ -141,7 +141,7 @@ src/mqtt_client_bench/
   run.py              CLI
   harness.py          orchestration / barriers / drain
   scenarios.py        catalogue
-  adapters/           paho + stubs (gmqtt, aiomqtt, amqtt)
+  adapters/           paho, gmqtt, aiomqtt, amqtt
   roles/              worker processes
 docker-compose.yml    Mosquitto
 mosquitto/ certs/     broker config + TLS material
@@ -158,7 +158,7 @@ PYTHONPATH=src python tests/test_unit.py
 
 ## Known limitations
 
-- Non-Paho adapters are capability stubs until their sync facades are wired.
 - Harness-level gaps (`receive_maximum`, retained bootstrap, session outage, …)
   still refuse with `not_implemented:*` as in the original suite.
-- `aiomqtt` v3 (mqtt5 backend) is out of scope for the first adapter pass; target v2.x.
+- `aiomqtt` v3 (mqtt5 backend) is out of scope; this bench targets v2.x.
+- `amqtt` does not expose MQTT v5 publish properties (`v5_publish_properties=false`).
