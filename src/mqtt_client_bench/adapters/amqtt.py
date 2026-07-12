@@ -117,10 +117,22 @@ class AmqttAdapter(BridgedAdapterBase):
         self._bridge.run(_connect())
 
     async def _message_pump(self) -> None:
+        """Drain inbound publishes from amqtt's delivery queue.
+
+        Do **not** call ``MQTTClient.deliver_message()`` in a tight loop: that
+        helper spawns a new ``asyncio.Task`` per wait and uses ``asyncio.wait``
+        with cancel-on-timeout, which collapses to tens of msg/s under
+        emqtt-bench ingress. Reading ``session.delivered_message_queue``
+        directly sustains thousands of msg/s on the same workload.
+        """
         assert self._client is not None
+        session = getattr(self._client, "session", None)
+        queue = getattr(session, "delivered_message_queue", None)
+        if queue is None:
+            raise RuntimeError("amqtt session delivery queue is not available")
         while not self._stopping:
             try:
-                message = await self._client.deliver_message(timeout_duration=1.0)
+                message = await asyncio.wait_for(queue.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
             except Exception:  # noqa: BLE001

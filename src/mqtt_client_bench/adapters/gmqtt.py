@@ -45,6 +45,8 @@ class GmqttAdapter(BridgedAdapterBase):
             stability="stable",
             io_model="asyncio_bridged",
             implementation_language="python",
+            # QoS0 publish returns mid=None from the connection layer; we allocate synthetics.
+            synthetic_mids=True,
             notes=cls._NOTES,
             unimplemented=[],
         )
@@ -175,8 +177,12 @@ class GmqttAdapter(BridgedAdapterBase):
         message = Message(topic, payload, qos=qos, retain=retain, **kwargs)
         client = self._client
 
-        async def _publish():
+        async def _publish(qos0_mid: Optional[int] = None):
             mid, package = client._connection.publish(message)
+            if mid is None:
+                mid = qos0_mid if qos0_mid is not None else self.alloc_mid()
+            else:
+                mid = int(mid)
             if qos > 0:
                 push = getattr(client._persistent_storage, "push_message_nowait", None)
                 if push is not None:
@@ -184,9 +190,15 @@ class GmqttAdapter(BridgedAdapterBase):
                 else:
                     client._persistent_storage.push_message(mid, package)
             else:
-                self._fire_on_publish(int(mid), reason_code=0)
-            return int(mid)
+                self._fire_on_publish(mid, reason_code=0)
+            return mid
 
+        # Responder on_message runs on the bridge loop — schedule, don't re-enter run().
+        # Pre-allocate the QoS0 mid so the returned value matches on_publish.
+        if self._bridge.on_loop_thread():
+            mid = self.alloc_mid()
+            self._bridge.create_task(_publish(qos0_mid=mid))
+            return PublishResult(rc=0, mid=mid)
         mid = self._bridge.run(_publish())
         return PublishResult(rc=0, mid=mid)
 

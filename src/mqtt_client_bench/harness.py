@@ -39,6 +39,7 @@ from mqtt_client_bench.metrics import (
     compare_verdict_from_block_ratios,
     integrity_counts,
     latency_summary,
+    median,
     sanitize_number,
     summarize_valid_runs,
 )
@@ -72,6 +73,16 @@ def mqtt_version_for_point(point: dict) -> int:
     if protocol == "MQTTv31":
         return 3
     return 4
+
+
+def effective_loadgen_mqtt_version(requested: int) -> int:
+    """emqtt-bench client IDs are rejected by Mosquitto on MQTT 3.1/3.1.1.
+
+    Keep the SUT on ``point.protocol``; only the ingress loadgen is forced to v5.
+    """
+    if int(requested) in (3, 4):
+        return 5
+    return int(requested)
 
 
 def _python() -> str:
@@ -163,9 +174,16 @@ def validate_run(point: dict, worker_results: List[dict], loadgen_stats: Optiona
     # An ingress run where the loadgen emitted traffic but nothing was delivered
     # indicates a topic/filter mismatch or a broken subscriber, not a client score.
     if point.get("topology") == "subscriber_ingress":
-        emitted = ((loadgen_stats or {}).get("parsed") or {}).get("last_total")
+        parsed = ((loadgen_stats or {}).get("parsed") or {})
+        emitted = parsed.get("last_total")
         delivered = sum(int(r.get("subscriber_delivered") or 0) for r in worker_results if r.get("role") == "subscriber")
-        if emitted and delivered == 0:
+        if emitted is None:
+            # Parser empty / loadgen silent — only flag when nothing was delivered either.
+            if delivered == 0:
+                reasons.append("loadgen_emitted_nothing")
+        elif int(emitted) == 0:
+            reasons.append("loadgen_emitted_nothing")
+        elif delivered == 0:
             reasons.append("no_delivery_despite_load")
 
     # Telemetry saturation heuristics.
@@ -304,6 +322,8 @@ def run_point(
     expected_workers = 0
     barrier_failed = False
     barrier_error = None
+    requested_mqtt_v: Optional[int] = None
+    loadgen_mqtt_v: Optional[int] = None
 
     try:
         if topology == "publisher_only":
@@ -471,6 +491,8 @@ def run_point(
                 # emqtt-bench -L is a global cap across all clients.
                 limit_total = 1000 if cadence == "microburst" else max(1, int(target * float(point.get("duration_s", 3))))
                 interval = 1
+            requested_mqtt_v = mqtt_version_for_point(point)
+            loadgen_mqtt_v = effective_loadgen_mqtt_version(requested_mqtt_v)
             spec = LoadgenSpec(
                 host=host,
                 port=endpoint_port,
@@ -481,7 +503,7 @@ def run_point(
                 payload_size=max(size, 1),
                 duration_s=float(point.get("duration_s", 3)),
                 limit=limit_total,
-                mqtt_version=mqtt_version_for_point(point),
+                mqtt_version=loadgen_mqtt_v,
             )
             loadgen = EmqttBenchProcess(spec, cpuset=cpusets.get("loadgen"))
             # Warmup uses a separate short-lived loadgen so measure starts clean.
@@ -496,7 +518,7 @@ def run_point(
                     payload_size=max(size, 1),
                     duration_s=float(point.get("warmup_s", 1)),
                     limit=0,
-                    mqtt_version=mqtt_version_for_point(point),
+                    mqtt_version=loadgen_mqtt_v,
                 )
                 warmup_loadgen = EmqttBenchProcess(warmup_spec, cpuset=cpusets.get("loadgen"))
             else:
@@ -504,6 +526,8 @@ def run_point(
 
         elif topology == "duplex_gateway":
             # Modest command stream toward the SUT subscriber while the SUT publishes.
+            requested_mqtt_v = mqtt_version_for_point(point)
+            loadgen_mqtt_v = effective_loadgen_mqtt_version(requested_mqtt_v)
             spec = LoadgenSpec(
                 host=host,
                 port=endpoint_port,
@@ -513,7 +537,7 @@ def run_point(
                 interval_ms=interval_for_rate(2, 200.0),
                 payload_size=256,
                 duration_s=float(point.get("duration_s", 3)),
-                mqtt_version=mqtt_version_for_point(point),
+                mqtt_version=loadgen_mqtt_v,
             )
             loadgen = EmqttBenchProcess(spec, cpuset=cpusets.get("loadgen"))
             warmup_loadgen = None
@@ -576,6 +600,15 @@ def run_point(
             loadgen_stats = loadgen.stop()
             if loadgen_stats is not None:
                 loadgen_stats["mqtt_version"] = getattr(loadgen.spec, "mqtt_version", None)
+                loadgen_stats["mqtt_version_requested"] = requested_mqtt_v
+                if (
+                    requested_mqtt_v is not None
+                    and loadgen_mqtt_v is not None
+                    and requested_mqtt_v != loadgen_mqtt_v
+                ):
+                    loadgen_stats["mqtt_version_override"] = (
+                        "emqtt_bench_v311_client_id_rejected_by_mosquitto"
+                    )
 
         worker_results = []
         for cfg in configs:
@@ -883,6 +916,31 @@ def run_suite(suite: str, **kwargs) -> dict:
     return {"suite": suite, "estimate": estimate, "scenarios": outputs}
 
 
+def capacity_from_qos_sweep(result: dict) -> Optional[float]:
+    """Extract QoS1 publisher capacity for open-loop load fractions.
+
+    Smoke/diagnostic runs are marked ``non_comparable`` so reporting summaries
+    exclude them — calibration still needs a numeric capacity to size loaded
+    scenarios during mise au point.
+    """
+    blocks = list(result.get("results") or [])
+    qos1 = [b for b in blocks if int((b.get("point") or {}).get("qos_publish", -1)) == 1]
+    candidates = qos1 or blocks
+    rates: List[float] = []
+    for block in candidates:
+        summary = block.get("summary") or {}
+        if summary.get("median") is not None:
+            rates.append(float(summary["median"]))
+            continue
+        for run in block.get("runs") or []:
+            if run.get("status") != "valid":
+                continue
+            rate = run.get("primary_msgs_per_s")
+            if rate is not None:
+                rates.append(float(rate))
+    return median(rates)
+
+
 def calibrate(
     output: str,
     *,
@@ -898,14 +956,7 @@ def calibrate(
         profile=profile,
         runs=7 if profile == "standard" else 1,
     )
-    capacity = None
-    for block in result.get("results", []):
-        point = block["point"]
-        if int(point.get("qos_publish", -1)) == 1:
-            capacity = block["summary"].get("median")
-            break
-    if capacity is None and result.get("results"):
-        capacity = result["results"][0]["summary"].get("median")
+    capacity = capacity_from_qos_sweep(result)
     identity = adapter_identity(client, client_path)
     payload = {
         "schema_version": 1,

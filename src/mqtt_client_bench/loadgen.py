@@ -103,6 +103,9 @@ def build_pub_args(spec: LoadgenSpec) -> List[str]:
         "-F",
         str(spec.inflight),
     ]
+    # MQTT 3.1 / 3.1.1 reject the long default emqtt-bench client IDs.
+    if int(spec.mqtt_version) in (3, 4):
+        args.append("--shortids")
     if spec.limit > 0:
         args.extend(["-L", str(spec.limit)])
     return args
