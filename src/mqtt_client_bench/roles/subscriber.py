@@ -236,7 +236,11 @@ def main(argv=None) -> int:
     barrier.wait("T_MEASURE")
     barrier.close()
 
-    state["phase"] = "measure"
+    # Traffic can arrive between the post-warmup reset and T_MEASURE (e.g. the
+    # measure loadgen ramp); it must not inflate the callback rate.
+    with state["lock"]:
+        state["callback_invocations"] = 0
+        state["phase"] = "measure"
     t0 = time.perf_counter()
     time.sleep(duration_s)
     t1 = time.perf_counter()

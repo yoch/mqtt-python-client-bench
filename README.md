@@ -138,7 +138,11 @@ feeds the primary throughput.
 
 Async libraries use a sync facade (`AsyncioBridge`). That cost is assumed and
 documented; scenarios where it is not representative (`fleet`, native callback
-matching) are refused for bridged clients.
+matching) are refused for bridged clients. All bridged adapters share the same
+submission discipline: `publish()` allocates a synthetic mid, schedules the
+coroutine on the loop (`create_task`, non-blocking) and completion is reported
+via `on_publish` — no adapter pays a per-publish blocking bridge round-trip
+that its peers do not.
 
 Mosquitto provides a local broker on `127.0.0.1:11883` (TCP) and
 `127.0.0.1:11884` (TLS — established TLS, no TLS 1.3 guarantee claimed).

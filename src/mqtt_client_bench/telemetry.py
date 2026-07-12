@@ -194,9 +194,17 @@ def environment_metadata() -> dict:
         try:
             mod = __import__(pkg if pkg != "paho" else "paho.mqtt.client")
             if pkg == "paho":
-                import paho
+                import paho.mqtt
 
-                installed[pkg] = getattr(paho, "__version__", None) or getattr(mod, "__version__", None)
+                ver = getattr(paho.mqtt, "__version__", None)
+                if ver is None:
+                    try:
+                        from importlib.metadata import version as pkg_version
+
+                        ver = pkg_version("paho-mqtt")
+                    except Exception:  # noqa: BLE001
+                        ver = None
+                installed[pkg] = ver
             else:
                 ver = getattr(mod, "__version__", None)
                 if ver is None:

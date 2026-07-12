@@ -69,14 +69,23 @@ class PahoAdapter:
     @classmethod
     def identity(cls) -> dict:
         import paho
-        import paho.mqtt.client as mqtt
+        import paho.mqtt
 
         caps = cls.capabilities()
+        # The version lives on paho.mqtt (the namespace package has none).
+        version = getattr(paho.mqtt, "__version__", None)
+        if version is None:
+            try:
+                from importlib.metadata import version as pkg_version
+
+                version = pkg_version("paho-mqtt")
+            except Exception:  # noqa: BLE001
+                version = None
         return {
             "client": "paho",
             "adapter": "paho",
             "client_module": str(Path(paho.__file__).resolve()),
-            "client_version": getattr(paho, "__version__", None) or getattr(mqtt, "__version__", None),
+            "client_version": version,
             "stability": caps.stability,
             "io_model": caps.io_model,
             "implementation_language": caps.implementation_language,
