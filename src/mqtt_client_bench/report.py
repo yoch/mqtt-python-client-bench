@@ -35,6 +35,238 @@ def _esc(value: Any) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
+_CLIENT_ORDER = ("awscrt", "gmqtt", "paho", "amqtt", "aiomqtt", "zmqtt", "aiomqtt3")
+
+# Rate-capped / functional scenarios: primary msg/s just echoes the injected
+# ceiling, so they flatten the throughput chart. Keep them in the matrix (last)
+# until we have a better integrity-oriented presentation.
+_CHART_EXCLUDED_SCENARIOS = frozenset({"duplex_gateway", "e2e_integrity"})
+
+# Failures that reflect how the SUT behaved under the offered load (or its
+# protocol/API limits). These must stay visible in the report — excluding them
+# from the throughput chart is fine; burying them is not.
+_CLIENT_LOAD_REASON_PREFIXES = (
+    "open_loop_rate_out_of_tolerance",
+    "protocol_failed",
+    "timed_out_mids",
+    "rtt_timeouts",
+    "warmup_drain_timeout",
+    "no_delivery_despite_load",
+    "worker_error:",
+)
+_CLIENT_CAPABILITY_PREFIX = "not_implemented:"
+_ENVIRONMENT_REASON_PREFIXES = (
+    "container_cpu_high:",
+    "broker_telemetry_missing",
+    "loadgen_emitted_nothing",
+    "loadgen_below_half_nominal",
+    "barrier_failed",
+)
+
+# Values within this relative tolerance of the row/series maximum are treated
+# as tied. Medians carry float noise (e.g. a 1000 msg/s rate cap surfaces as
+# 999.9944...), so a strict `==` comparison against the max silently picks a
+# single "winner" among values that are displayed identically.
+_TIE_RELATIVE_TOLERANCE = 1e-3
+
+
+def _is_tied_with_best(value: float, best: float) -> bool:
+    if value == best:
+        return True
+    scale = max(abs(best), 1e-9)
+    return abs(value - best) / scale <= _TIE_RELATIVE_TOLERANCE
+
+
+def _reason_kind(reason: str) -> str:
+    if reason.startswith(_CLIENT_CAPABILITY_PREFIX):
+        return "capability"
+    if any(reason.startswith(p) for p in _CLIENT_LOAD_REASON_PREFIXES):
+        return "load"
+    if any(reason.startswith(p) for p in _ENVIRONMENT_REASON_PREFIXES):
+        return "environment"
+    return "other"
+
+
+def _short_reason(reason: str) -> str:
+    if reason.startswith(_CLIENT_CAPABILITY_PREFIX):
+        return reason[len(_CLIENT_CAPABILITY_PREFIX) :]
+    if reason.startswith("container_cpu_high:"):
+        return "broker_cpu"
+    if reason.startswith("worker_error:"):
+        return "worker_error"
+    if reason.startswith("barrier_failed"):
+        return "barrier"
+    return reason
+
+
+def _order_matrix_scenarios(scenarios: Sequence[str]) -> List[str]:
+    """Throughput scenarios first; rate-capped / functional rows last."""
+    primary = [s for s in scenarios if s not in _CHART_EXCLUDED_SCENARIOS]
+    trailing = [s for s in scenarios if s in _CHART_EXCLUDED_SCENARIOS]
+    return primary + trailing
+
+# One stable colour per known client, shared by the matrix swatches, the
+# results table, and the overview chart so the same client always reads the
+# same colour anywhere on the site.
+_CLIENT_COLORS = {
+    "paho": "#0f6e56",
+    "gmqtt": "#245b7a",
+    "aiomqtt": "#9a5b12",
+    "amqtt": "#6b4f7a",
+    "awscrt": "#8b3a3a",
+    "zmqtt": "#3f6b4d",
+    "aiomqtt3": "#4a5a78",
+}
+_FALLBACK_PALETTE = ["#5c6b64", "#7a6a4f", "#4f6b7a", "#7a4f5c"]
+
+
+def _sort_clients(clients: Sequence[str]) -> List[str]:
+    rank = {name: i for i, name in enumerate(_CLIENT_ORDER)}
+    return sorted(clients, key=lambda c: (rank.get(c, len(_CLIENT_ORDER)), c))
+
+
+def _client_colors(clients: Sequence[str]) -> Dict[str, str]:
+    colors: Dict[str, str] = {}
+    fallback_idx = 0
+    for client in clients:
+        if client in _CLIENT_COLORS:
+            colors[client] = _CLIENT_COLORS[client]
+        else:
+            colors[client] = _FALLBACK_PALETTE[fallback_idx % len(_FALLBACK_PALETTE)]
+            fallback_idx += 1
+    return colors
+
+
+def _client_swatch(name: str, colors: Dict[str, str]) -> str:
+    color = colors.get(name, "#5c6b64")
+    return f'<span class="swatch" style="background:{_esc(color)}"></span>{_esc(name)}'
+
+
+def _performance_matrix_html(
+    scenarios: Sequence[str],
+    clients: Sequence[str],
+    by_key: Dict[tuple, Optional[float]],
+    colors: Dict[str, str],
+) -> str:
+    """Compact scenario × client table for immediate reading on the index page."""
+    if not scenarios or not clients:
+        return ""
+    ordered = _sort_clients(clients)
+    head = "".join(f'<th scope="col" class="num">{_client_swatch(c, colors)}</th>' for c in ordered)
+    body_rows: List[str] = []
+    for scenario in scenarios:
+        cells = [by_key.get((scenario, c)) for c in ordered]
+        numeric = [v for v in cells if v is not None]
+        best = max(numeric) if numeric else None
+        tied_count = sum(1 for v in numeric if best is not None and _is_tied_with_best(v, best))
+        # A tie across every populated cell isn't a "winner" — it means the
+        # scenario is rate-capped, not that one client outperformed the rest.
+        all_tied = bool(numeric) and tied_count == len(numeric)
+        tds = []
+        for value in cells:
+            if value is None:
+                tds.append('<td class="num muted">—</td>')
+            elif all_tied:
+                tds.append(f'<td class="num">{_esc(_fmt_num(value))}</td>')
+            elif best is not None and _is_tied_with_best(value, best):
+                tds.append(f'<td class="num best">{_esc(_fmt_num(value))}</td>')
+            else:
+                tds.append(f'<td class="num">{_esc(_fmt_num(value))}</td>')
+        body_rows.append(
+            f'<tr><th scope="row" class="scenario">{_esc(scenario)}</th>{"".join(tds)}</tr>'
+        )
+    return f"""
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Performance matrix</h2>
+          <p class="hint">Median msg/s per scenario × client, comparable runs only. Best result in each row is highlighted, unless every client ties (rate-capped scenario). Rate-capped checks (<code>duplex_gateway</code>, <code>e2e_integrity</code>) are listed last and omitted from the chart above. Client load misses and capability gaps are listed in Client issues at the bottom.</p>
+        </div>
+        <div class="table-wrap table-wrap-sticky-col">
+          <table class="matrix">
+            <thead>
+              <tr>
+                <th scope="col" class="scenario-head">Scenario</th>
+                {head}
+              </tr>
+            </thead>
+            <tbody>
+              {"".join(body_rows)}
+            </tbody>
+          </table>
+        </div>
+      </section>
+"""
+
+
+def _client_signals_html(docs: Sequence[ResultDoc], colors: Dict[str, str]) -> str:
+    """Single dedicated table for SUT-attributable failures and capability gaps."""
+    rows: List[tuple] = []
+    for doc in docs:
+        if doc.kind != "scenario":
+            continue
+        client = doc.client or "?"
+        scenario = doc.scenario or doc.title
+        if doc.load_reasons:
+            detail = ", ".join(f"{name}×{count}" for name, count in sorted(doc.load_reasons.items()))
+            rows.append(("load", client, scenario, detail, doc.inconclusive_runs, doc.total_runs, doc.slug))
+        if doc.capability_reasons:
+            detail = ", ".join(sorted(doc.capability_reasons))
+            rows.append(("capability", client, scenario, detail, doc.inconclusive_runs, doc.total_runs, doc.slug))
+    if not rows:
+        return ""
+
+    kind_rank = {"load": 0, "capability": 1}
+    client_rank = {name: i for i, name in enumerate(_CLIENT_ORDER)}
+    rows.sort(
+        key=lambda r: (
+            kind_rank.get(r[0], 9),
+            client_rank.get(r[1], len(_CLIENT_ORDER)),
+            r[1],
+            r[2],
+        )
+    )
+
+    body = []
+    for kind, client, scenario, detail, failed, total, slug in rows:
+        swatch = _client_swatch(client, colors) if client in colors else _esc(client)
+        kind_label = "under load" if kind == "load" else "capability"
+        body.append(
+            f"<tr>"
+            f"<td><span class=\"badge badge-{'partial' if kind == 'load' else 'inconclusive'}\">{_esc(kind_label)}</span></td>"
+            f"<td>{swatch}</td>"
+            f"<td class=\"mono\">{_esc(scenario)}</td>"
+            f"<td class=\"mono\">{_esc(detail)}</td>"
+            f"<td class=\"num\">{_esc(failed)}/{_esc(total)}</td>"
+            f"<td><a href=\"runs/{_esc(slug)}.html\">detail</a></td>"
+            f"</tr>"
+        )
+    return f"""
+      <section class="panel panel-signal">
+        <div class="panel-head">
+          <h2>Client issues</h2>
+          <p class="hint">SUT-attributable problems kept out of the throughput median on purpose: missed open-loop targets / protocol failures under load, and points refused for missing adapter capabilities. Environment issues (broker CPU, loadgen, barriers) stay in All results only.</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Kind</th>
+                <th>Client</th>
+                <th>Scenario</th>
+                <th>Signal</th>
+                <th class="num">Failed runs</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {"".join(body)}
+            </tbody>
+          </table>
+        </div>
+      </section>
+"""
+
+
 def _load_json(path: Path) -> Optional[Dict[str, Any]]:
     try:
         with path.open(encoding="utf-8") as fh:
@@ -133,6 +365,8 @@ class PointRow:
     latency: Dict[str, Optional[float]] = field(default_factory=dict)
     integrity: Optional[Dict[str, Any]] = None
     chart_rates: List[Optional[float]] = field(default_factory=list)
+    spread_low: Optional[float] = None
+    spread_high: Optional[float] = None
 
 
 @dataclass
@@ -152,6 +386,16 @@ class ResultDoc:
     broker: Dict[str, Any]
     verdict: Optional[Dict[str, Any]]
     raw_meta: Dict[str, Any]
+    spread_low: Optional[float] = None
+    spread_high: Optional[float] = None
+    # Aggregated inconclusive-run signals for the index page. Keys are reason
+    # strings; values are run counts. Split by attribution so load/capability
+    # failures stay visible even when excluded from the throughput chart.
+    load_reasons: Dict[str, int] = field(default_factory=dict)
+    capability_reasons: Dict[str, int] = field(default_factory=dict)
+    environment_reasons: Dict[str, int] = field(default_factory=dict)
+    inconclusive_runs: int = 0
+    total_runs: int = 0
 
 
 def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
@@ -251,10 +495,16 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
         )
 
     points: List[PointRow] = []
-    medians: List[float] = []
+    # (median, min, max) per comparable point; used both for the scenario's
+    # headline value and for the observed run-to-run range behind it.
+    median_min_max: List[tuple] = []
     any_non_comparable = False
     overall_valid = 0
     overall_total = 0
+    load_reasons: Dict[str, int] = {}
+    capability_reasons: Dict[str, int] = {}
+    environment_reasons: Dict[str, int] = {}
+    inconclusive_runs = 0
     for block in data.get("results") or []:
         point = block.get("point") or {}
         runs = block.get("runs") or []
@@ -262,6 +512,19 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
         counts = _run_status_counts(runs)
         overall_valid += counts["valid"]
         overall_total += counts["total"]
+        for run in runs:
+            if run.get("status") == "valid":
+                continue
+            inconclusive_runs += 1
+            for reason in run.get("reasons") or []:
+                kind = _reason_kind(str(reason))
+                short = _short_reason(str(reason))
+                if kind == "load":
+                    load_reasons[short] = load_reasons.get(short, 0) + 1
+                elif kind == "capability":
+                    capability_reasons[short] = capability_reasons.get(short, 0) + 1
+                elif kind == "environment":
+                    environment_reasons[short] = environment_reasons.get(short, 0) + 1
         non_comparable = any(bool(r.get("non_comparable")) for r in runs) or bool(point.get("non_comparable"))
         any_non_comparable = any_non_comparable or non_comparable
         # Prefer summary computed from valid runs only.
@@ -269,8 +532,16 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
         if non_comparable or (point.get("profile") == "smoke"):
             # Keep value for display but mark non-comparable.
             pass
+        point_min = summary.get("min")
+        point_max = summary.get("max")
         if median_rate is not None and not non_comparable:
-            medians.append(float(median_rate))
+            median_min_max.append(
+                (
+                    float(median_rate),
+                    float(point_min) if point_min is not None else float(median_rate),
+                    float(point_max) if point_max is not None else float(median_rate),
+                )
+            )
         status = "valid" if counts["valid"] == counts["total"] and counts["total"] else (
             "partial" if counts["valid"] else "inconclusive"
         )
@@ -290,6 +561,8 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
                 latency=_collect_latency(runs),
                 integrity=_collect_integrity(runs),
                 chart_rates=chart_rates,
+                spread_low=float(point_min) if point_min is not None else None,
+                spread_high=float(point_max) if point_max is not None else None,
             )
         )
 
@@ -303,9 +576,11 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
         status = "partial"
 
     primary_median = None
-    if medians:
-        medians_sorted = sorted(medians)
-        primary_median = medians_sorted[len(medians_sorted) // 2]
+    spread_low = None
+    spread_high = None
+    if median_min_max:
+        ordered_mmm = sorted(median_min_max, key=lambda t: t[0])
+        primary_median, spread_low, spread_high = ordered_mmm[len(ordered_mmm) // 2]
 
     return ResultDoc(
         source_name=source_name,
@@ -327,6 +602,13 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
             "seed": data.get("seed"),
             "client_identity": data.get("client_identity"),
         },
+        spread_low=spread_low,
+        spread_high=spread_high,
+        load_reasons=load_reasons,
+        capability_reasons=capability_reasons,
+        environment_reasons=environment_reasons,
+        inconclusive_runs=inconclusive_runs,
+        total_runs=overall_total,
     )
 
 
@@ -400,55 +682,131 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
 """
         return _page_shell("Benchmark reports", body)
 
-    rows = []
+    # Grouped bar chart + matrix: one x-tick / row per scenario, one series /
+    # column per client. Computed before the flat table so client colours are
+    # known up front and reused everywhere on the page.
+    scenario_docs = [
+        doc
+        for doc in docs
+        if doc.kind == "scenario" and doc.median_msgs_per_s is not None and not doc.non_comparable
+    ]
+    scenarios: List[str] = []
+    for doc in scenario_docs:
+        name = doc.scenario or doc.title
+        if name not in scenarios:
+            scenarios.append(name)
+    # Single-library scenario clients only. ABBA compare docs store a composite
+    # "a / b" label in `client` and must not inflate the Clients stat.
+    all_clients: List[str] = []
     for doc in docs:
+        if doc.kind != "scenario" or not doc.client:
+            continue
+        if doc.client not in all_clients:
+            all_clients.append(doc.client)
+    scenario_clients: List[str] = []
+    for doc in scenario_docs:
+        name = doc.client or "?"
+        if name not in scenario_clients:
+            scenario_clients.append(name)
+    colors = _client_colors(_sort_clients(all_clients))
+    by_key = {(doc.scenario or doc.title, doc.client or "?"): doc.median_msgs_per_s for doc in scenario_docs}
+    by_key_low = {(doc.scenario or doc.title, doc.client or "?"): doc.spread_low for doc in scenario_docs}
+    by_key_high = {(doc.scenario or doc.title, doc.client or "?"): doc.spread_high for doc in scenario_docs}
+    # Include clients/scenarios that only produced capability or load signals so
+    # the issues table and matrix columns stay aligned with the full campaign.
+    for doc in docs:
+        if doc.kind != "scenario":
+            continue
+        if doc.client and doc.client not in scenario_clients:
+            scenario_clients.append(doc.client)
+        name = doc.scenario or doc.title
+        if name not in scenarios and (doc.median_msgs_per_s is not None or doc.capability_reasons or doc.load_reasons):
+            scenarios.append(name)
+    chart_scenarios = [s for s in scenarios if s not in _CHART_EXCLUDED_SCENARIOS]
+    matrix_scenarios = _order_matrix_scenarios(scenarios)
+    overview_series = [
+        {
+            "client": client,
+            "color": colors.get(client, "#5c6b64"),
+            "values": [by_key.get((scenario, client)) for scenario in chart_scenarios],
+            "low": [by_key_low.get((scenario, client)) for scenario in chart_scenarios],
+            "high": [by_key_high.get((scenario, client)) for scenario in chart_scenarios],
+        }
+        for client in _sort_clients(scenario_clients)
+    ]
+    overview_payload = {"scenarios": chart_scenarios, "series": overview_series}
+    matrix_html = _performance_matrix_html(matrix_scenarios, scenario_clients, by_key, colors)
+    signals_html = _client_signals_html(docs, colors)
+
+    non_comparable_n = sum(1 for doc in docs if doc.non_comparable)
+    stats_html = f"""
+      <div class="stats">
+        <article>
+          <p class="stat-label">Clients</p>
+          <p class="stat-value">{_esc(len(all_clients))}</p>
+        </article>
+        <article>
+          <p class="stat-label">Scenarios covered</p>
+          <p class="stat-value">{_esc(len(scenarios))}</p>
+        </article>
+        <article>
+          <p class="stat-label">Result files</p>
+          <p class="stat-value">{_esc(len(docs))}<span> {_esc(non_comparable_n)} non-comparable</span></p>
+        </article>
+      </div>
+"""
+
+    client_rank = {name: i for i, name in enumerate(_CLIENT_ORDER)}
+    rows = []
+    for doc in sorted(
+        docs,
+        key=lambda d: (
+            client_rank.get(d.client or "", len(_CLIENT_ORDER)),
+            d.client or "~",
+            d.kind,
+            d.scenario or d.title,
+        ),
+    ):
+        client_cell = _client_swatch(doc.client, colors) if doc.client in colors else _esc(doc.client or "—")
         rows.append(
             f"""<tr>
   <td><a href="runs/{_esc(doc.slug)}.html">{_esc(doc.title)}</a></td>
   <td>{_esc(doc.kind)}</td>
-  <td>{_esc(doc.client or "—")}</td>
+  <td>{client_cell}</td>
   <td>{_esc(doc.profile or "—")}</td>
   <td>{_status_badge(doc.status, doc.non_comparable)}</td>
   <td class="num">{_esc(_fmt_num(doc.median_msgs_per_s))}</td>
-  <td class="mono">{_esc(doc.source_name)}</td>
+  <td class="mono muted">{_esc(doc.source_name)}</td>
 </tr>"""
         )
-
-    chart_labels = [
-        doc.title
-        for doc in docs
-        if doc.kind == "scenario" and doc.median_msgs_per_s is not None and not doc.non_comparable
-    ]
-    chart_values = [
-        doc.median_msgs_per_s
-        for doc in docs
-        if doc.kind == "scenario" and doc.median_msgs_per_s is not None and not doc.non_comparable
-    ]
-    chart_clients = [
-        doc.client or "?"
-        for doc in docs
-        if doc.kind == "scenario" and doc.median_msgs_per_s is not None and not doc.non_comparable
-    ]
 
     body = f"""
     <main>
       <section class="hero">
         <h1>Benchmark reports</h1>
         <p>Readable summaries of local MQTT client runs. Higher throughput is better; latency and integrity appear on each detail page.</p>
-        <p class="meta">{_esc(len(docs))} file(s) · generated { _esc(generated_at) }</p>
+        <p class="meta">generated { _esc(generated_at) }</p>
+        {stats_html}
       </section>
 
       <section class="panel">
-        <h2>Throughput snapshot</h2>
-        <div class="chart-wrap">
-          <canvas id="overview-chart" data-labels='{_esc(json.dumps(chart_labels))}' data-values='{_esc(json.dumps(chart_values))}' data-clients='{_esc(json.dumps(chart_clients))}'></canvas>
+        <div class="panel-head">
+          <h2>Throughput snapshot</h2>
+          <p class="hint">Grouped by scenario, one colour per client. Whiskers show the observed run-to-run min/max. Rate-capped checks, smoke, and non-comparable results are omitted.</p>
         </div>
-        <p class="hint">Median messages/s across points for each scenario result. Smoke profiles are marked non-comparable on detail pages.</p>
+        <div class="chart-wrap chart-wrap-wide">
+          <canvas id="overview-chart" data-overview='{_esc(json.dumps(overview_payload))}'></canvas>
+        </div>
       </section>
 
+      {matrix_html}
+
       <section class="panel">
-        <h2>All results</h2>
-        <div class="table-wrap">
+        <div class="panel-head">
+          <h2>All results</h2>
+          <p class="hint">Every committed result file, including diagnostics and smoke runs excluded from the charts above.</p>
+        </div>
+        <div class="table-wrap table-wrap-scroll">
           <table>
             <thead>
               <tr>
@@ -457,7 +815,7 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
                 <th>Client</th>
                 <th>Profile</th>
                 <th>Status</th>
-                <th>Median msg/s</th>
+                <th class="num">Median msg/s</th>
                 <th>Source</th>
               </tr>
             </thead>
@@ -467,6 +825,8 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
           </table>
         </div>
       </section>
+
+      {signals_html}
     </main>
 """
     return _page_shell("Benchmark reports", body)
@@ -510,11 +870,14 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
     if doc.points:
         labels = [p.label for p in doc.points]
         values = [p.median_msgs_per_s for p in doc.points]
+        lows = [p.spread_low for p in doc.points]
+        highs = [p.spread_high for p in doc.points]
         chart_block = f"""
       <section class="panel">
         <h2>Per-point throughput</h2>
+        <p class="hint">Whiskers show the observed run-to-run min/max at each point.</p>
         <div class="chart-wrap">
-          <canvas class="detail-chart" data-labels='{_esc(json.dumps(labels))}' data-values='{_esc(json.dumps(values))}'></canvas>
+          <canvas class="detail-chart" data-labels='{_esc(json.dumps(labels))}' data-values='{_esc(json.dumps(values))}' data-low='{_esc(json.dumps(lows))}' data-high='{_esc(json.dumps(highs))}'></canvas>
         </div>
       </section>
 """
