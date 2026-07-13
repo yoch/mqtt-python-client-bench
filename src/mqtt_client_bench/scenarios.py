@@ -555,6 +555,53 @@ SCENARIOS: List[Scenario] = [
         variants=tuple({"fleet_size": n, "keepalive": 30} for n in (1, 32, 256)),
         estimated_minutes=5.0,
     ),
+    Scenario(
+        name="broker_ceiling_ingress",
+        suite="full",
+        tags=("diagnostic",),
+        topology="broker_ceiling",
+        description=(
+            "Broker ceiling probe: emqtt-bench pub + emqtt-bench sub (no Python SUT). "
+            "Offer grid 32k/64k/128k via loadgen_clients with I=1."
+        ),
+        qos_publish=0,
+        qos_subscribe=0,
+        payload="telemetry256",
+        cadence="capacity",
+        topic_topology="single",
+        subscription="exact",
+        loadgen_clients=32,
+        variants=(
+            {"loadgen_clients": 32, "ingress_target_msgs_per_s": 32000},
+            {"loadgen_clients": 64, "ingress_target_msgs_per_s": 64000},
+            {"loadgen_clients": 128, "ingress_target_msgs_per_s": 128000},
+        ),
+        estimated_minutes=6.0,
+    ),
+    Scenario(
+        name="client_ceiling_ingress",
+        suite="full",
+        tags=("diagnostic",),
+        topology="subscriber_ingress",
+        description=(
+            "Client ceiling probe: growing emqtt-bench offer vs one SUT subscriber. "
+            "Same offer grid as broker_ceiling_ingress; compare delivered vs effective_offer + $SYS."
+        ),
+        qos_publish=0,
+        qos_subscribe=0,
+        payload="telemetry256",
+        cadence="capacity",
+        topic_topology="single",
+        subscription="exact",
+        loadgen_clients=32,
+        subscribers=1,
+        variants=(
+            {"loadgen_clients": 32, "ingress_target_msgs_per_s": 32000},
+            {"loadgen_clients": 64, "ingress_target_msgs_per_s": 64000},
+            {"loadgen_clients": 128, "ingress_target_msgs_per_s": 128000},
+        ),
+        estimated_minutes=6.0,
+    ),
 ]
 
 
@@ -594,6 +641,9 @@ def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[
             if "diagnostic" not in tags:
                 tags.append("diagnostic")
             resolved["tags"] = tags
+        # Ceiling probes are diagnostic / non-ranking.
+        if scenario.name in ("broker_ceiling_ingress", "client_ceiling_ingress"):
+            resolved["non_comparable"] = True
         # Planned / incomplete scenarios stay in the catalogue but are non-executable.
         if "planned" in scenario.tags:
             resolved["non_comparable"] = True

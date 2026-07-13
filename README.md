@@ -116,6 +116,12 @@ Useful flags:
 - `--load-profile` — JSON produced by `calibrate` (must match client/version/broker)
 - `--output` — write full JSON result
 
+## Scenario design
+
+How each scenario is wired (topology, cadence, primary metric, caps, refusals):
+see **[SCENARIOS.md](SCENARIOS.md)**. Broker vs client ceiling probes:
+**[docs/CEILING_PROBES.md](docs/CEILING_PROBES.md)**.
+
 ## What is measured
 
 Three protocols are never mixed:

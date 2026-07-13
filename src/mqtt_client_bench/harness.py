@@ -33,7 +33,7 @@ from mqtt_client_bench.broker import (
     wait_for_broker,
 )
 from mqtt_client_bench.control import BarrierServer, read_json, wait_for_file, write_json
-from mqtt_client_bench.loadgen import EmqttBenchProcess, LoadgenSpec, interval_for_rate, nominal_rate
+from mqtt_client_bench.loadgen import EmqttBenchProcess, LoadgenSpec, interval_for_rate
 from mqtt_client_bench.metrics import (
     abba_order,
     abba_block_ratios,
@@ -54,6 +54,7 @@ from mqtt_client_bench.scenarios import (
     expand_scenario,
     list_scenarios,
 )
+from mqtt_client_bench.sys_probe import SysCountersProbe, sys_counters_delta
 from mqtt_client_bench.telemetry import TelemetrySampler, allocate_cpuset, environment_metadata
 from mqtt_client_bench.workloads import (
     PAYLOAD_SPECS,
@@ -90,6 +91,20 @@ def effective_loadgen_mqtt_version(requested: int) -> int:
     if int(requested) in (3, 4):
         return 5
     return int(requested)
+
+
+def resolve_ingress_offer(point: dict, clients: int) -> float:
+    """Aggregate msgs/s requested from emqtt-bench before I=1 quantization.
+
+    With ``interval_ms = max(1, round(clients * 1000 / target))``, an I=1
+    offer of N×1000 requires ``ingress_target_msgs_per_s >= N*1000`` (or
+    equivalently ``loadgen_clients = N`` and a high enough target).
+    """
+    if point.get("ingress_target_msgs_per_s") is not None:
+        return float(point["ingress_target_msgs_per_s"])
+    if point.get("fanin_mode") == "per_publisher":
+        return float(clients) * 1000.0
+    return 40000.0
 
 
 def _python() -> str:
@@ -147,7 +162,14 @@ def unsupported_features(point: dict, client: str = "paho") -> List[str]:
     return missing
 
 
-def validate_run(point: dict, worker_results: List[dict], loadgen_stats: Optional[dict], telemetry_samples: List[dict]) -> dict:
+def validate_run(
+    point: dict,
+    worker_results: List[dict],
+    loadgen_stats: Optional[dict],
+    telemetry_samples: List[dict],
+    sys_counters: Optional[dict] = None,
+    loadgen_ref_sub: Optional[dict] = None,
+) -> dict:
     reasons = []
     for result in worker_results:
         if not result.get("ok", False):
@@ -178,9 +200,17 @@ def validate_run(point: dict, worker_results: List[dict], loadgen_stats: Optiona
                 if target > 0 and abs(actual - target) / target > 0.02:
                     reasons.append("open_loop_rate_out_of_tolerance")
 
+    topology = point.get("topology")
+    duration_s = float(point.get("duration_s") or 1.0)
+    offer = None
+    if loadgen_stats:
+        offer = loadgen_stats.get("effective_offer_msgs_per_s")
+        if offer is None:
+            offer = loadgen_stats.get("nominal_rate")
+
     # An ingress run where the loadgen emitted traffic but nothing was delivered
     # indicates a topic/filter mismatch or a broken subscriber, not a client score.
-    if point.get("topology") == "subscriber_ingress":
+    if topology == "subscriber_ingress":
         parsed = ((loadgen_stats or {}).get("parsed") or {})
         emitted = parsed.get("last_total")
         delivered = sum(int(r.get("subscriber_delivered") or 0) for r in worker_results if r.get("role") == "subscriber")
@@ -191,6 +221,14 @@ def validate_run(point: dict, worker_results: List[dict], loadgen_stats: Optiona
         elif int(emitted) == 0:
             reasons.append("loadgen_emitted_nothing")
         elif delivered == 0:
+            reasons.append("no_delivery_despite_load")
+
+    if topology == "broker_ceiling":
+        pub_parsed = ((loadgen_stats or {}).get("parsed") or {})
+        recv_parsed = ((loadgen_ref_sub or {}).get("parsed") or {})
+        if pub_parsed.get("last_total") in (None, 0) and recv_parsed.get("last_total") in (None, 0):
+            reasons.append("loadgen_emitted_nothing")
+        elif (recv_parsed.get("last_total") in (None, 0)) and (pub_parsed.get("last_total") or 0) > 0:
             reasons.append("no_delivery_despite_load")
 
     # Telemetry saturation heuristics.
@@ -210,24 +248,84 @@ def validate_run(point: dict, worker_results: List[dict], loadgen_stats: Optiona
     if watched_any and not watched_ok:
         reasons.append("broker_telemetry_missing")
 
+    # Loadgen health vs effective offer (never raw QoS0 pub rates — they are ~2×).
     if loadgen_stats and loadgen_stats.get("parsed") and point.get("cadence") not in ("burst", "microburst"):
-        parsed = loadgen_stats["parsed"]
-        nominal = loadgen_stats.get("nominal_rate")
-        last = parsed.get("last_rate")
-        if nominal and last is not None and nominal < float("inf"):
-            if last < 0.5 * nominal:
+        observed = loadgen_stats.get("observed_pub_rate")
+        if observed is None:
+            parsed = loadgen_stats["parsed"]
+            raw = parsed.get("last_rate")
+            if raw is not None and loadgen_stats.get("qos0_pub_counter_double_count"):
+                observed = float(raw) / 2.0
+            else:
+                observed = raw
+        if offer and observed is not None and float(offer) < float("inf"):
+            if float(observed) < 0.5 * float(offer):
                 reasons.append("loadgen_below_half_nominal")
+
+    # $SYS publish drops over the measure window (inform bottleneck; do not
+    # auto-invalidate core ranking runs — QoS0 drops can be expected under load).
+    dropped_delta = (sys_counters or {}).get("dropped_delta") if sys_counters else None
+    drop_threshold = 100
+    if offer and float(offer) < float("inf") and duration_s > 0:
+        drop_threshold = max(100, int(0.01 * float(offer) * duration_s))
+    sys_drops = dropped_delta is not None and int(dropped_delta) > drop_threshold
+    diagnostic = "diagnostic" in (point.get("tags") or ()) or topology == "broker_ceiling"
+    if sys_drops and diagnostic:
+        reasons.append("sys_publish_dropped")
+
+    # Delivered rate vs effective offer (ingress / broker ceiling).
+    delivered_rate = None
+    if topology == "subscriber_ingress" and offer and point.get("cadence") not in ("burst", "microburst"):
+        for result in worker_results:
+            if result.get("role") == "subscriber" and result.get("msgs_per_s") is not None:
+                delivered_rate = float(result["msgs_per_s"])
+                break
+        if delivered_rate is None:
+            delivered = sum(
+                int(r.get("subscriber_delivered") or 0) for r in worker_results if r.get("role") == "subscriber"
+            )
+            if duration_s > 0:
+                delivered_rate = delivered / duration_s
+    elif topology == "broker_ceiling" and offer and loadgen_ref_sub:
+        delivered_rate = loadgen_ref_sub.get("observed_recv_rate")
+        if delivered_rate is None:
+            delivered_rate = (loadgen_ref_sub.get("parsed") or {}).get("median_rate")
+        if delivered_rate is not None:
+            delivered_rate = float(delivered_rate)
+
+    delivery_ratio = None
+    if (
+        delivered_rate is not None
+        and offer
+        and float(offer) < float("inf")
+        and float(offer) > 0
+        and point.get("cadence") not in ("burst", "microburst")
+    ):
+        delivery_ratio = float(delivered_rate) / float(offer)
+        if diagnostic and delivery_ratio < 0.5:
+            reasons.append("delivery_below_half_offer")
 
     status = "valid" if not reasons else "inconclusive"
     bottleneck = "bottleneck_unattributed"
-    if any(r.startswith("container_cpu_high:") and "mosquitto" in r for r in reasons):
+    if any(r.startswith("container_cpu_high:") and "mosquitto" in r for r in reasons) or sys_drops:
         bottleneck = "broker_limited"
     elif any(r.startswith("loadgen_") for r in reasons):
         bottleneck = "loadgen_limited"
     elif not reasons:
-        bottleneck = "sut_limited"
+        # Near the configured offer: the point is offer-capped, not a SUT score.
+        if delivery_ratio is not None and delivery_ratio >= 0.90:
+            bottleneck = "offer_limited"
+        else:
+            bottleneck = "sut_limited"
 
-    return {"status": status, "reasons": reasons, "bottleneck": bottleneck}
+    return {
+        "status": status,
+        "reasons": reasons,
+        "bottleneck": bottleneck,
+        "effective_offer_msgs_per_s": offer,
+        "delivered_rate": delivered_rate,
+        "delivery_offer_ratio": delivery_ratio,
+    }
 
 
 def run_point(
@@ -356,7 +454,11 @@ def run_point(
 
     loadgen = None
     warmup_loadgen = None
+    ref_sub_loadgen = None
     loadgen_stats = None
+    loadgen_ref_sub_stats = None
+    sys_probe = None
+    sys_counters = None
     expected_workers = 0
     barrier_failed = False
     barrier_error = None
@@ -397,6 +499,10 @@ def run_point(
             configs.append(sub_cfg)
             expected_workers = 1
             # Start loadgen after subscriber ready.
+
+        elif topology == "broker_ceiling":
+            # emqtt-bench pub + emqtt-bench sub only — no Python SUT.
+            expected_workers = 0
 
         elif topology == "application_rtt":
             req = f"bench/{run_id}/rtt/request"
@@ -481,22 +587,22 @@ def run_point(
         cadence = str(point.get("cadence", "capacity"))
         burst_ingress = topology == "subscriber_ingress" and cadence in ("burst", "microburst")
 
-        if topology == "subscriber_ingress":
+        if topology in ("subscriber_ingress", "broker_ceiling"):
             clients = int(point.get("loadgen_clients", 32) or 32)
             payload = point.get("payload", "telemetry256")
             size = PAYLOAD_SPECS.get(payload, {"size": 256})["size"]
             # Capacity points must exceed the historical ~5k delivery ceiling
             # even in smoke runs, otherwise A/B ingress optimisations are hidden
             # behind the offered rate and incorrectly labelled SUT-limited.
-            target = 40000.0
-            if point.get("fanin_mode") == "per_publisher":
-                target = clients * 1000.0
+            target = resolve_ingress_offer(point, clients)
             if cadence == "periodic10":
                 target = 10.0
             callback_filters = int(point.get("callback_filters", 0) or 0)
             overlapping = bool(point.get("overlapping_callbacks", False))
             lg_topic = topic
-            if callback_filters > 0:
+            if topology == "broker_ceiling":
+                lg_topic = single_topic(run_id)
+            elif callback_filters > 0:
                 # Publish onto cb/%i/data so local message_callback_add filters receive traffic.
                 lg_topic = callback_match_loadgen_topic(run_id)
                 if not overlapping:
@@ -506,7 +612,7 @@ def run_point(
                     # which also records the delivery. Cap avoids a connection storm.
                     clients = max(clients, min(callback_filters, 256))
                 # Keep aggregate offered load stable when client count grows with filters.
-                target = 40000.0
+                target = resolve_ingress_offer(point, clients) if point.get("ingress_target_msgs_per_s") is not None else 40000.0
             elif point.get("subscription") in ("plus", "hash") or str(point.get("topic_topology", "")).startswith("fleet"):
                 lg_topic = f"bench/{run_id}/org/acme/site/s0000/device/d0000/telemetry/temperature"
             else:
@@ -531,6 +637,8 @@ def run_point(
                 interval = 1
             requested_mqtt_v = mqtt_version_for_point(point)
             loadgen_mqtt_v = effective_loadgen_mqtt_version(requested_mqtt_v)
+            point["ingress_target_msgs_per_s"] = target
+            point["loadgen_clients"] = clients
             spec = LoadgenSpec(
                 host=host,
                 port=endpoint_port,
@@ -542,6 +650,8 @@ def run_point(
                 duration_s=float(point.get("duration_s", 3)),
                 limit=limit_total,
                 mqtt_version=loadgen_mqtt_v,
+                mode="pub",
+                target_requested=target,
             )
             loadgen = EmqttBenchProcess(spec, cpuset=cpusets.get("loadgen"))
             # Warmup uses a separate short-lived loadgen so measure starts clean.
@@ -557,25 +667,48 @@ def run_point(
                     duration_s=float(point.get("warmup_s", 1)),
                     limit=0,
                     mqtt_version=loadgen_mqtt_v,
+                    mode="pub",
+                    target_requested=target,
                 )
                 warmup_loadgen = EmqttBenchProcess(warmup_spec, cpuset=cpusets.get("loadgen"))
             else:
                 warmup_loadgen = None
 
+            if topology == "broker_ceiling":
+                ref_spec = LoadgenSpec(
+                    host=host,
+                    port=endpoint_port,
+                    topic=lg_topic,
+                    qos=int(point.get("qos_subscribe", point.get("qos_publish", 0))),
+                    clients=max(1, int(point.get("ref_sub_clients", 1) or 1)),
+                    interval_ms=1,
+                    payload_size=max(size, 1),
+                    duration_s=float(point.get("duration_s", 3)),
+                    mqtt_version=loadgen_mqtt_v,
+                    mode="sub",
+                    target_requested=target,
+                )
+                # Keep the ref subscriber off the loadgen cpuset so pub and
+                # recv do not contend for the same pinned cores.
+                ref_sub_loadgen = EmqttBenchProcess(ref_spec, cpuset=cpusets.get("orch"))
+
         elif topology == "duplex_gateway":
             # Modest command stream toward the SUT subscriber while the SUT publishes.
             requested_mqtt_v = mqtt_version_for_point(point)
             loadgen_mqtt_v = effective_loadgen_mqtt_version(requested_mqtt_v)
+            duplex_target = 200.0
             spec = LoadgenSpec(
                 host=host,
                 port=endpoint_port,
                 topic=f"bench/{run_id}/commands",
                 qos=int(point.get("qos_subscribe", 1)),
                 clients=2,
-                interval_ms=interval_for_rate(2, 200.0),
+                interval_ms=interval_for_rate(2, duplex_target),
                 payload_size=256,
                 duration_s=float(point.get("duration_s", 3)),
                 mqtt_version=loadgen_mqtt_v,
+                mode="pub",
+                target_requested=duplex_target,
             )
             loadgen = EmqttBenchProcess(spec, cpuset=cpusets.get("loadgen"))
             warmup_loadgen = None
@@ -588,32 +721,52 @@ def run_point(
         )
         sampler.start()
 
+        need_sys = topology in ("subscriber_ingress", "broker_ceiling") and not burst_ingress
+        if need_sys:
+            try:
+                sys_probe = SysCountersProbe(host, endpoint_port, client_id=f"sys-{run_id}")
+                sys_probe.start(timeout_s=10.0)
+            except Exception as exc:  # noqa: BLE001
+                sys_probe = None
+                sys_counters = {"error": f"sys_probe_start_failed:{exc}"}
+
         # Phase 1: warmup.
-        if topology == "subscriber_ingress" and warmup_loadgen is not None:
+        if topology == "broker_ceiling" and ref_sub_loadgen is not None:
+            ref_sub_loadgen.start()
+            time.sleep(min(2.0, float(point.get("warmup_s", 1)) + 0.5))
+
+        if topology in ("subscriber_ingress", "broker_ceiling") and warmup_loadgen is not None:
             warmup_loadgen.start()
             ramp_s = min(warmup_loadgen.spec.clients * warmup_loadgen.spec.connect_interval_ms / 1000.0 + 0.5, 15.0)
             time.sleep(ramp_s)
-        elif loadgen is not None and loadgen.proc is not None and topology != "subscriber_ingress":
+        elif loadgen is not None and loadgen.proc is not None and topology not in ("subscriber_ingress", "broker_ceiling"):
             ramp_s = min(loadgen.spec.clients * loadgen.spec.connect_interval_ms / 1000.0 + 0.5, 15.0)
             time.sleep(ramp_s)
 
         failures = barrier.broadcast("T0")
         barrier_failed = failures > 0
-        try:
-            barrier.wait_for_acks("WARMUP_DRAINED", expected_workers, timeout_s=max(60.0, float(point.get("warmup_s", 1)) + float(point.get("drain_s", 2)) + 30))
-        except (TimeoutError, RuntimeError) as exc:
-            barrier_failed = True
-            barrier_error = str(exc)
+        if expected_workers > 0:
+            try:
+                barrier.wait_for_acks("WARMUP_DRAINED", expected_workers, timeout_s=max(60.0, float(point.get("warmup_s", 1)) + float(point.get("drain_s", 2)) + 30))
+            except (TimeoutError, RuntimeError) as exc:
+                barrier_failed = True
+                barrier_error = str(exc)
+            else:
+                barrier_error = None
         else:
+            # No SUT workers: mimic a short warmup drain window.
+            time.sleep(min(1.0, float(point.get("warmup_s", 1))))
             barrier_error = None
 
-        if topology == "subscriber_ingress" and warmup_loadgen is not None:
+        if topology in ("subscriber_ingress", "broker_ceiling") and warmup_loadgen is not None:
             warmup_loadgen.stop()
             # Brief quiet so the subscriber can drain late warmup deliveries.
             time.sleep(min(1.0, float(point.get("drain_s", 2))))
 
+        sys_before = sys_probe.snapshot() if sys_probe is not None else None
+
         # Phase 2: measure — fresh ingress loadgen when applicable.
-        if topology == "subscriber_ingress" and loadgen is not None and not burst_ingress:
+        if topology in ("subscriber_ingress", "broker_ceiling") and loadgen is not None and not burst_ingress:
             loadgen.start()
             ramp_s = min(loadgen.spec.clients * loadgen.spec.connect_interval_ms / 1000.0 + 0.5, 15.0)
             time.sleep(ramp_s)
@@ -626,14 +779,25 @@ def run_point(
         # Wait workers; a hung worker invalidates the run instead of crashing the harness.
         worker_hang = False
         worker_timeout = max(120.0, float(point.get("duration_s", 3)) + float(point.get("warmup_s", 1)) + float(point.get("drain_s", 2)) + 60)
-        for w in workers:
-            try:
-                w.wait(timeout=worker_timeout)
-            except subprocess.TimeoutExpired:
-                worker_hang = True
-                w.kill()
+        if topology == "broker_ceiling":
+            # No SUT processes — hold the measure window on the orchestrator.
+            time.sleep(float(point.get("duration_s", 3)))
+        else:
+            for w in workers:
+                try:
+                    w.wait(timeout=worker_timeout)
+                except subprocess.TimeoutExpired:
+                    worker_hang = True
+                    w.kill()
 
         telemetry_samples = sampler.stop()
+        sys_after = sys_probe.snapshot() if sys_probe is not None else None
+        if sys_probe is not None:
+            sys_probe.stop()
+            sys_probe = None
+            if not (isinstance(sys_counters, dict) and sys_counters.get("error")):
+                sys_counters = sys_counters_delta(sys_before, sys_after)
+
         if loadgen is not None:
             loadgen_stats = loadgen.stop()
             if loadgen_stats is not None:
@@ -648,6 +812,10 @@ def run_point(
                         "emqtt_bench_v311_client_id_rejected_by_mosquitto"
                     )
 
+        if ref_sub_loadgen is not None:
+            loadgen_ref_sub_stats = ref_sub_loadgen.stop()
+            ref_sub_loadgen = None
+
         worker_results = []
         for cfg in configs:
             if os.path.exists(cfg["result_path"]):
@@ -655,7 +823,14 @@ def run_point(
             else:
                 worker_results.append({"ok": False, "error": "missing_result", "result_path": cfg["result_path"]})
 
-        validity = validate_run(point, worker_results, loadgen_stats, telemetry_samples)
+        validity = validate_run(
+            point,
+            worker_results,
+            loadgen_stats,
+            telemetry_samples,
+            sys_counters=sys_counters if isinstance(sys_counters, dict) else None,
+            loadgen_ref_sub=loadgen_ref_sub_stats,
+        )
         if worker_hang:
             validity["status"] = "inconclusive"
             validity["reasons"].append("worker_hang")
@@ -697,6 +872,14 @@ def run_point(
                         primary_rate = wr["msgs_per_s"]
                 elif primary_rate is None:
                     primary_rate = wr["msgs_per_s"]
+        if topology == "broker_ceiling" and loadgen_ref_sub_stats is not None:
+            primary_rate = loadgen_ref_sub_stats.get("observed_recv_rate")
+            if primary_rate is None:
+                primary_rate = (loadgen_ref_sub_stats.get("parsed") or {}).get("median_rate")
+            if loadgen_stats and loadgen_stats.get("effective_offer_msgs_per_s") is not None:
+                secondary["effective_offer"] = sanitize_number(loadgen_stats["effective_offer_msgs_per_s"])
+            if loadgen_stats and loadgen_stats.get("observed_pub_rate") is not None:
+                secondary["observed_pub"] = sanitize_number(loadgen_stats["observed_pub_rate"])
 
         return {
             "schema_version": 1,
@@ -709,8 +892,12 @@ def run_point(
             "bottleneck": validity["bottleneck"],
             "primary_msgs_per_s": sanitize_number(primary_rate),
             "secondary_msgs_per_s": secondary,
+            "delivery_offer_ratio": validity.get("delivery_offer_ratio"),
+            "effective_offer_msgs_per_s": validity.get("effective_offer_msgs_per_s"),
             "workers": worker_results,
             "loadgen": loadgen_stats,
+            "loadgen_ref_sub": loadgen_ref_sub_stats,
+            "sys_counters": sys_counters,
             "telemetry": telemetry_samples[-30:],
             "network": net_result,
             "qdisc": qdisc_stats() if network != "localhost" else None,
@@ -727,6 +914,13 @@ def run_point(
                 w.terminate()
         if loadgen is not None and loadgen.proc is not None and loadgen.proc.poll() is None:
             loadgen.stop()
+        if ref_sub_loadgen is not None and ref_sub_loadgen.proc is not None and ref_sub_loadgen.proc.poll() is None:
+            ref_sub_loadgen.stop()
+        if sys_probe is not None:
+            try:
+                sys_probe.stop()
+            except Exception:  # noqa: BLE001
+                pass
         if network != "localhost":
             clear_profile()
 
