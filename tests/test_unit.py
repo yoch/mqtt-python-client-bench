@@ -700,6 +700,177 @@ class ReportTests(unittest.TestCase):
             self.assertIn("pub_qos_sweep_telemetry", suite_html)
             self.assertFalse(any(site.rglob("*.json")))
 
+    def test_performance_matrix_on_index(self):
+        import html
+        import json
+        import tempfile
+
+        from mqtt_client_bench.report import build_site
+
+        def sample(client: str, scenario: str, rate: float) -> dict:
+            return {
+                "schema_version": 1,
+                "scenario": scenario,
+                "profile": "standard",
+                "runs": 1,
+                "client": client,
+                "results": [
+                    {
+                        "point": {"qos_publish": 1},
+                        "runs": [
+                            {
+                                "status": "valid",
+                                "primary_msgs_per_s": rate,
+                                "non_comparable": False,
+                                "workers": [{"role": "publisher", "ok": True}],
+                            }
+                        ],
+                        "summary": {"n": 1, "median": rate, "total_runs": 1},
+                    }
+                ],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results = root / "results"
+            site = root / "site"
+            results.mkdir()
+            (results / "paho-pub.json").write_text(
+                json.dumps(sample("paho", "pub_qos_sweep_telemetry", 7000.0)), encoding="utf-8"
+            )
+            (results / "gmqtt-pub.json").write_text(
+                json.dumps(sample("gmqtt", "pub_qos_sweep_telemetry", 8000.0)), encoding="utf-8"
+            )
+            (results / "paho-duplex.json").write_text(
+                json.dumps(sample("paho", "duplex_gateway", 200.0)), encoding="utf-8"
+            )
+            (results / "paho-e2e.json").write_text(
+                json.dumps(sample("paho", "e2e_integrity", 1000.0)), encoding="utf-8"
+            )
+            (results / "compare-paho-gmqtt.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "scenario": "pub_qos_sweep_telemetry",
+                        "profile": "standard",
+                        "baseline_client": "paho",
+                        "candidate_client": "gmqtt",
+                        "order": "ABBA",
+                        "verdict": {"verdict": "inconclusive"},
+                        "points": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            build_site(results, site)
+            index = (site / "index.html").read_text(encoding="utf-8")
+            self.assertIn("Performance matrix", index)
+            self.assertIn('class="matrix"', index)
+            self.assertIn('class="num best"', index)
+            self.assertIn("8,000.0", index)
+            self.assertIn("data-overview=", index)
+            # Rate-capped checks stay in the matrix (at the end) but leave the chart.
+            self.assertIn("duplex_gateway", index)
+            self.assertIn("e2e_integrity", index)
+            overview_attr = index.split("data-overview='", 1)[1].split("'></canvas>", 1)[0]
+            overview_payload = json.loads(html.unescape(overview_attr))
+            self.assertNotIn("duplex_gateway", overview_payload["scenarios"])
+            self.assertNotIn("e2e_integrity", overview_payload["scenarios"])
+            self.assertEqual(overview_payload["scenarios"], ["pub_qos_sweep_telemetry"])
+            clients_in_chart = [s["client"] for s in overview_payload["series"]]
+            self.assertEqual(clients_in_chart, ["gmqtt", "paho"])
+            matrix_body = index[index.index('class="matrix"') :]
+            self.assertLess(matrix_body.index("pub_qos_sweep_telemetry"), matrix_body.index("duplex_gateway"))
+            self.assertLess(matrix_body.index("duplex_gateway"), matrix_body.index("e2e_integrity"))
+            # Matrix header order matches chart: gmqtt before paho.
+            self.assertLess(matrix_body.index(">gmqtt<"), matrix_body.index(">paho<"))
+            # Compare docs must not inflate the Clients hero stat.
+            self.assertRegex(index, r'stat-label">Clients</p>\s*<p class="stat-value">2</p>')
+
+    def test_client_load_signals_surface_on_index(self):
+        import json
+        import tempfile
+
+        from mqtt_client_bench.report import build_site
+
+        payload = {
+            "schema_version": 1,
+            "scenario": "puback_latency_qos1",
+            "profile": "standard",
+            "runs": 3,
+            "client": "awscrt",
+            "results": [
+                {
+                    "point": {"qos_publish": 1, "load_fraction": 0.9},
+                    "runs": [
+                        {
+                            "status": "inconclusive",
+                            "primary_msgs_per_s": None,
+                            "non_comparable": False,
+                            "reasons": ["open_loop_rate_out_of_tolerance"],
+                            "workers": [],
+                        },
+                        {
+                            "status": "valid",
+                            "primary_msgs_per_s": 5000.0,
+                            "non_comparable": False,
+                            "reasons": [],
+                            "workers": [{"role": "publisher", "ok": True}],
+                        },
+                        {
+                            "status": "inconclusive",
+                            "primary_msgs_per_s": None,
+                            "non_comparable": False,
+                            "reasons": ["open_loop_rate_out_of_tolerance"],
+                            "workers": [],
+                        },
+                    ],
+                    "summary": {"n": 1, "median": 5000.0, "total_runs": 3},
+                }
+            ],
+        }
+        refused = {
+            "schema_version": 1,
+            "scenario": "application_rtt_qos1",
+            "profile": "standard",
+            "runs": 1,
+            "client": "awscrt",
+            "results": [
+                {
+                    "point": {"topology": "application_rtt"},
+                    "runs": [
+                        {
+                            "status": "inconclusive",
+                            "primary_msgs_per_s": None,
+                            "non_comparable": False,
+                            "reasons": ["not_implemented:tcp_nodelay"],
+                            "workers": [],
+                        }
+                    ],
+                    "summary": {"n": 0, "median": None, "total_runs": 1},
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results = root / "results"
+            site = root / "site"
+            results.mkdir()
+            (results / "awscrt-puback.json").write_text(json.dumps(payload), encoding="utf-8")
+            (results / "awscrt-rtt.json").write_text(json.dumps(refused), encoding="utf-8")
+            build_site(results, site)
+            index = (site / "index.html").read_text(encoding="utf-8")
+            self.assertIn("Client issues", index)
+            self.assertIn("under load", index)
+            self.assertIn("open_loop_rate_out_of_tolerance", index)
+            self.assertIn("capability", index)
+            self.assertIn("tcp_nodelay", index)
+            # Matrix stays numeric-only; issues live in the dedicated table.
+            matrix_body = index[index.index('class="matrix"') : index.index("Client issues")]
+            self.assertNotIn("open_loop_rate_out_of_tolerance", matrix_body)
+            self.assertNotIn("tcp_nodelay", matrix_body)
+
     def test_integrity_aggregates_all_runs(self):
         from mqtt_client_bench.report import _collect_integrity
 
