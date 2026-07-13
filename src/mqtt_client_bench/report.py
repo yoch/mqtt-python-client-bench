@@ -37,10 +37,23 @@ def _esc(value: Any) -> str:
 
 _CLIENT_ORDER = ("awscrt", "gmqtt", "paho", "amqtt", "aiomqtt", "zmqtt", "aiomqtt3")
 
-# Rate-capped / functional scenarios: primary msg/s just echoes the injected
-# ceiling, so they flatten the throughput chart. Keep them in the matrix (last)
-# until we have a better integrity-oriented presentation.
-_CHART_EXCLUDED_SCENARIOS = frozenset({"duplex_gateway", "e2e_integrity"})
+# Rate-capped / functional / niche scenarios: primary msg/s either echoes an
+# injected ceiling or is only meaningful for one client (paho-native callbacks).
+# Keep them in the matrix (last); omit them from the overview throughput chart.
+_CHART_EXCLUDED_SCENARIOS = frozenset(
+    {
+        "duplex_gateway",
+        "e2e_integrity",
+        "sub_callback_matching",
+        "remaining_length_boundaries",
+    }
+)
+_CHART_EXCLUDED_ORDER = (
+    "duplex_gateway",
+    "e2e_integrity",
+    "sub_callback_matching",
+    "remaining_length_boundaries",
+)
 
 # Failures that reflect how the SUT behaved under the offered load (or its
 # protocol/API limits). These must stay visible in the report — excluding them
@@ -100,9 +113,11 @@ def _short_reason(reason: str) -> str:
 
 
 def _order_matrix_scenarios(scenarios: Sequence[str]) -> List[str]:
-    """Throughput scenarios first; rate-capped / functional rows last."""
+    """Throughput scenarios first; rate-capped / niche rows last (stable order)."""
     primary = [s for s in scenarios if _scenario_base(s) not in _CHART_EXCLUDED_SCENARIOS]
     trailing = [s for s in scenarios if _scenario_base(s) in _CHART_EXCLUDED_SCENARIOS]
+    rank = {name: i for i, name in enumerate(_CHART_EXCLUDED_ORDER)}
+    trailing.sort(key=lambda s: (rank.get(_scenario_base(s), 99), s))
     return primary + trailing
 
 
@@ -196,7 +211,7 @@ def _performance_matrix_html(
       <section class="panel">
         <div class="panel-head">
           <h2>Performance matrix</h2>
-          <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols. Best result in each row is highlighted, unless every client ties (rate-capped scenario). Rate-capped checks (<code>duplex_gateway</code>, <code>e2e_integrity</code>) are listed last and omitted from the chart above. Client load misses and capability gaps are listed in Client issues at the bottom.</p>
+          <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols. Best result in each row is highlighted, unless every client ties (rate-capped scenario). Rate-capped / niche checks (<code>duplex_gateway</code>, <code>e2e_integrity</code>, <code>sub_callback_matching</code>, <code>remaining_length_boundaries</code>) are listed last and omitted from the chart above. Client load misses and capability gaps are listed in Client issues at the bottom.</p>
         </div>
         <div class="table-wrap table-wrap-sticky-col">
           <table class="matrix">
