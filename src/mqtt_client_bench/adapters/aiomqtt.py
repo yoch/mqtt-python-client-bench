@@ -127,13 +127,18 @@ class AiomqttAdapter(BridgedAdapterBase):
             "port": port,
             "identifier": self._client_id,
             "protocol": self._protocol_enum(),
-            "clean_session": self._clean_session,
             "keepalive": keepalive,
             "tls_params": tls_params,
             "max_inflight_messages": self._max_inflight,
             "max_queued_outgoing_messages": self._max_queued,
             "logger": quiet_logger,
         }
+        # Paho rejects clean_session for MQTT 5; use clean_start instead.
+        if self._protocol == "MQTTv5":
+            kwargs["clean_start"] = self._clean_session
+            kwargs["clean_session"] = None
+        else:
+            kwargs["clean_session"] = self._clean_session
 
         async def _connect():
             self._client = aiomqtt.Client(**kwargs)

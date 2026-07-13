@@ -859,6 +859,12 @@ class ReportTests(unittest.TestCase):
             (results / "paho-e2e.json").write_text(
                 json.dumps(sample("paho", "e2e_integrity", 1000.0)), encoding="utf-8"
             )
+            (results / "paho-callback.json").write_text(
+                json.dumps(sample("paho", "sub_callback_matching", 12000.0)), encoding="utf-8"
+            )
+            (results / "paho-rl.json").write_text(
+                json.dumps(sample("paho", "remaining_length_boundaries", 6500.0)), encoding="utf-8"
+            )
             (results / "compare-paho-gmqtt.json").write_text(
                 json.dumps(
                     {
@@ -881,13 +887,17 @@ class ReportTests(unittest.TestCase):
             self.assertIn('class="num best"', index)
             self.assertIn("8,000.0", index)
             self.assertIn("data-overview=", index)
-            # Rate-capped checks stay in the matrix (at the end) but leave the chart.
+            # Rate-capped / niche checks stay in the matrix (at the end) but leave the chart.
             self.assertIn("duplex_gateway", index)
             self.assertIn("e2e_integrity", index)
+            self.assertIn("sub_callback_matching", index)
+            self.assertIn("remaining_length_boundaries", index)
             overview_attr = index.split("data-overview='", 1)[1].split("'></canvas>", 1)[0]
             overview_payload = json.loads(html.unescape(overview_attr))
             self.assertNotIn("duplex_gateway", overview_payload["scenarios"])
             self.assertNotIn("e2e_integrity", overview_payload["scenarios"])
+            self.assertNotIn("sub_callback_matching", overview_payload["scenarios"])
+            self.assertNotIn("remaining_length_boundaries", overview_payload["scenarios"])
             self.assertEqual(overview_payload["scenarios"], ["pub_qos_sweep_telemetry · MQTTv311"])
             clients_in_chart = [s["client"] for s in overview_payload["series"]]
             self.assertEqual(clients_in_chart, ["gmqtt", "paho"])
@@ -897,6 +907,14 @@ class ReportTests(unittest.TestCase):
                 matrix_body.index("duplex_gateway · MQTTv311"),
             )
             self.assertLess(matrix_body.index("duplex_gateway · MQTTv311"), matrix_body.index("e2e_integrity · MQTTv311"))
+            self.assertLess(
+                matrix_body.index("e2e_integrity · MQTTv311"),
+                matrix_body.index("sub_callback_matching · MQTTv311"),
+            )
+            self.assertLess(
+                matrix_body.index("sub_callback_matching · MQTTv311"),
+                matrix_body.index("remaining_length_boundaries · MQTTv311"),
+            )
             # Matrix header order matches chart: gmqtt before paho.
             self.assertLess(matrix_body.index(">gmqtt<"), matrix_body.index(">paho<"))
             # Compare docs must not inflate the Clients hero stat.
