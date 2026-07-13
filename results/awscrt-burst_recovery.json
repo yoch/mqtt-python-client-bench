@@ -1,0 +1,2235 @@
+{
+  "broker": {
+    "certs": {
+      "ca_crt": "/home/yoch/mqtt-python-client-bench/certs/ca.crt",
+      "fingerprint": "sha256 Fingerprint=42:DA:72:5E:7F:59:64:A5:3F:6C:BC:FC:64:AB:C6:01:BF:A0:1C:57:67:71:AF:5C:83:97:DA:17:F3:FA:13:9B",
+      "server_crt": "/home/yoch/mqtt-python-client-bench/certs/server.crt",
+      "server_key": "/home/yoch/mqtt-python-client-bench/certs/server.key"
+    },
+    "config_hash": "29f25cf4f6957571e9767f5d30c775a27be0a7e481d7cfc0a743850fd5827814",
+    "container_name": "mqtt-python-client-bench-mosquitto-1",
+    "cpuset": "1,5",
+    "cpuset_observed": "1,5",
+    "host": "127.0.0.1",
+    "image": "eclipse-mosquitto:2.0.20@sha256:21421af7b32bf9ce508e9090c8eb13bb81f410ca778dc205506180a6f862d0eb",
+    "image_digest": "eclipse-mosquitto@sha256:21421af7b32bf9ce508e9090c8eb13bb81f410ca778dc205506180a6f862d0eb",
+    "managed_broker": true,
+    "port": 11883,
+    "tls_port": 11884
+  },
+  "client": "awscrt",
+  "client_identity": {
+    "adapter": "awscrt",
+    "client": "awscrt",
+    "client_module": "/home/yoch/mqtt-python-client-bench/.venv/lib/python3.12/site-packages/awscrt/__init__.py",
+    "client_version": "0.35.0",
+    "implementation_language": "native",
+    "io_model": "crt_event_loop",
+    "stability": "stable",
+    "synthetic_mids": true
+  },
+  "client_path": null,
+  "cpusets": {
+    "broker": "1,5",
+    "loadgen": "2,6",
+    "orch": "3,7",
+    "sut": "0,4"
+  },
+  "environment": {
+    "client_versions": {
+      "aiomqtt": "2.5.1",
+      "aiomqtt3": null,
+      "amqtt": "0.11.3",
+      "awscrt": "0.35.0",
+      "gmqtt": "0.7.0",
+      "paho": "2.1.0",
+      "zmqtt": "0.0.5"
+    },
+    "cpu_count": 8,
+    "cpu_model": "Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz",
+    "hostname": "yoch-HP",
+    "loadavg": [
+      3.16748046875,
+      2.93017578125,
+      2.81591796875
+    ],
+    "machine": "x86_64",
+    "physical_cpu_groups": [
+      [
+        0,
+        4
+      ],
+      [
+        1,
+        5
+      ],
+      [
+        2,
+        6
+      ],
+      [
+        3,
+        7
+      ]
+    ],
+    "platform": "Linux-6.8.0-134-lowlatency-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "scaling_governor": "schedutil"
+  },
+  "profile": "standard",
+  "results": [
+    {
+      "point": {
+        "cadence": "burst",
+        "description": "Ingress under bursty load with backlog recovery metrics.",
+        "drain_s": 10.0,
+        "duration_s": 20.0,
+        "inflight": 20,
+        "loadgen_clients": 32,
+        "max_queued": 200,
+        "name": "burst_recovery",
+        "network": "localhost",
+        "non_comparable": false,
+        "outstanding": 64,
+        "payload": "telemetry256",
+        "protocol": "MQTTv311",
+        "publishers": 1,
+        "qos_publish": 0,
+        "qos_subscribe": 0,
+        "scenario": "burst_recovery",
+        "subscribers": 1,
+        "subscription": "hash",
+        "suite": "core",
+        "tags": [
+          "representative"
+        ],
+        "tls": false,
+        "topic_topology": "fleet4k_uniform",
+        "topology": "subscriber_ingress",
+        "warmup_s": 5.0
+      },
+      "runs": [
+        {
+          "bottleneck": "sut_limited",
+          "client": "awscrt",
+          "client_path": null,
+          "cpusets": {
+            "broker": "1,5",
+            "loadgen": "2,6",
+            "orch": "3,7",
+            "sut": "0,4"
+          },
+          "environment": {
+            "client_versions": {
+              "aiomqtt": "2.5.1",
+              "aiomqtt3": null,
+              "amqtt": "0.11.3",
+              "awscrt": "0.35.0",
+              "gmqtt": "0.7.0",
+              "paho": "2.1.0",
+              "zmqtt": "0.0.5"
+            },
+            "cpu_count": 8,
+            "cpu_model": "Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz",
+            "hostname": "yoch-HP",
+            "loadavg": [
+              2.75244140625,
+              2.82666015625,
+              2.77587890625
+            ],
+            "machine": "x86_64",
+            "physical_cpu_groups": [
+              [
+                0,
+                4
+              ],
+              [
+                1,
+                5
+              ],
+              [
+                2,
+                6
+              ],
+              [
+                3,
+                7
+              ]
+            ],
+            "platform": "Linux-6.8.0-134-lowlatency-x86_64-with-glibc2.39",
+            "python": "3.12.3",
+            "scaling_governor": "schedutil"
+          },
+          "loadgen": {
+            "args": [
+              "pub",
+              "-h",
+              "127.0.0.1",
+              "-p",
+              "11883",
+              "-V",
+              "5",
+              "-c",
+              "32",
+              "-i",
+              "10",
+              "-I",
+              "1",
+              "-t",
+              "bench/abbf36dd/org/acme/site/s0000/device/d0000/telemetry/temperature",
+              "-s",
+              "256",
+              "-q",
+              "0",
+              "-F",
+              "100",
+              "-L",
+              "800000"
+            ],
+            "image": "emqx/emqtt-bench:latest@sha256:ae7f2d56cd49b14824c835140c808b093c5e3f2defb3a29b34b17560feb456cd",
+            "image_digest": "emqx/emqtt-bench@sha256:ae7f2d56cd49b14824c835140c808b093c5e3f2defb3a29b34b17560feb456cd",
+            "mqtt_version": 5,
+            "mqtt_version_override": "emqtt_bench_v311_client_id_rejected_by_mosquitto",
+            "mqtt_version_requested": 4,
+            "nominal_rate": 32000.0,
+            "parsed": {
+              "kinds": [
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub"
+              ],
+              "last_rate": 64002.0,
+              "last_total": 1589852,
+              "max_rate": 65362.0,
+              "median_rate": 64000.0,
+              "rates": [
+                53742.51,
+                64026.0,
+                63974.0,
+                62642.0,
+                65362.0,
+                64000.0,
+                64002.0,
+                63994.0,
+                64000.0,
+                64004.0,
+                64002.0,
+                63994.0,
+                63994.0,
+                63984.0,
+                64024.0,
+                63994.0,
+                64008.0,
+                64002.0,
+                63998.0,
+                64018.0,
+                63978.0,
+                64004.0,
+                63998.0,
+                63998.0,
+                64002.0
+              ],
+              "samples": 25,
+              "totals": [
+                53850,
+                117876,
+                181850,
+                244492,
+                309854,
+                373854,
+                437856,
+                501850,
+                565850,
+                629854,
+                693856,
+                757850,
+                821844,
+                885828,
+                949852,
+                1013846,
+                1077854,
+                1141856,
+                1205854,
+                1269872,
+                1333850,
+                1397854,
+                1461852,
+                1525850,
+                1589852
+              ]
+            },
+            "stdout_tail": "\n21s pub_overrun total=43832 rate=851.45/sec\n\n22s pub total=1397854 rate=64004.00/sec\n\n22s pub_overrun total=44869 rate=1038.04/sec\n\n23s pub total=1461852 rate=63998.00/sec\n\n23s pub_overrun total=45789 rate=921.84/sec\n\n24s pub total=1525850 rate=63998.00/sec\n\n24s pub_overrun total=46671 rate=882.00/sec\n\n25s pub total=1589852 rate=64002.00/sec\n\n25s pub_overrun total=47524 rate=854.71/sec\n\npublish complete"
+          },
+          "managed_broker": true,
+          "network": {
+            "applied": false,
+            "profile": "localhost",
+            "reason": "localhost_noop"
+          },
+          "non_comparable": false,
+          "point": {
+            "cadence": "burst",
+            "description": "Ingress under bursty load with backlog recovery metrics.",
+            "drain_s": 10.0,
+            "duration_s": 20.0,
+            "inflight": 20,
+            "loadgen_clients": 32,
+            "max_queued": 200,
+            "name": "burst_recovery",
+            "network": "localhost",
+            "non_comparable": false,
+            "outstanding": 64,
+            "payload": "telemetry256",
+            "protocol": "MQTTv311",
+            "publishers": 1,
+            "qos_publish": 0,
+            "qos_subscribe": 0,
+            "run_id": "abbf36dd",
+            "scenario": "burst_recovery",
+            "subscribers": 1,
+            "subscription": "hash",
+            "suite": "core",
+            "tags": [
+              "representative"
+            ],
+            "tls": false,
+            "topic_topology": "fleet4k_uniform",
+            "topology": "subscriber_ingress",
+            "warmup_s": 5.0
+          },
+          "primary_msgs_per_s": 29144.71969042351,
+          "protocol_effective": "MQTTv311",
+          "qdisc": null,
+          "reasons": [],
+          "run_id": "abbf36dd",
+          "run_index": 0,
+          "schema_version": 1,
+          "secondary_msgs_per_s": {
+            "subscriber": 29144.71969042351
+          },
+          "status": "valid",
+          "telemetry": [
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.05,
+                  "mem": "1.434MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.1728515625,
+                2.73486328125,
+                2.7451171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 15,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28908,
+                  "stime_ticks": 1,
+                  "utime_ticks": 14,
+                  "voluntary_ctxt_switches": 6
+                }
+              },
+              "ts": 1783926929.528619
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.05,
+                  "mem": "1.434MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.1728515625,
+                2.73486328125,
+                2.7451171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 16,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28908,
+                  "stime_ticks": 1,
+                  "utime_ticks": 15,
+                  "voluntary_ctxt_switches": 7
+                }
+              },
+              "ts": 1783926931.73308
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.03,
+                  "mem": "1.434MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.1728515625,
+                2.73486328125,
+                2.7451171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 16,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28908,
+                  "stime_ticks": 1,
+                  "utime_ticks": 15,
+                  "voluntary_ctxt_switches": 7
+                }
+              },
+              "ts": 1783926933.9345434
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 25.48,
+                  "mem": "1.836MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.07861328125,
+                2.7060546875,
+                2.7353515625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 16,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28908,
+                  "stime_ticks": 1,
+                  "utime_ticks": 15,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926936.11448
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 68.09,
+                  "mem": "1.512MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.07861328125,
+                2.7060546875,
+                2.7353515625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 152,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28924,
+                  "stime_ticks": 62,
+                  "utime_ticks": 90,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926938.280012
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 72.43,
+                  "mem": "1.77MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.39306640625,
+                2.7607421875,
+                2.7529296875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 364,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28924,
+                  "stime_ticks": 151,
+                  "utime_ticks": 213,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926940.4755156
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 66.62,
+                  "mem": "1.527MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.39306640625,
+                2.7607421875,
+                2.7529296875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 579,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28928,
+                  "stime_ticks": 238,
+                  "utime_ticks": 341,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926942.692891
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 67.95,
+                  "mem": "1.773MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.60205078125,
+                2.79833984375,
+                2.76513671875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 793,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28924,
+                  "stime_ticks": 327,
+                  "utime_ticks": 466,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926944.9230342
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 66.89,
+                  "mem": "1.777MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.60205078125,
+                2.79833984375,
+                2.76513671875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1004,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28924,
+                  "stime_ticks": 417,
+                  "utime_ticks": 587,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926947.1112223
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 66.46,
+                  "mem": "1.543MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.71435546875,
+                2.818359375,
+                2.77197265625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1216,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28928,
+                  "stime_ticks": 507,
+                  "utime_ticks": 709,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926949.3121297
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 67.41,
+                  "mem": "2.02MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.71435546875,
+                2.818359375,
+                2.77197265625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1426,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28924,
+                  "stime_ticks": 597,
+                  "utime_ticks": 829,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926951.502328
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 66.38,
+                  "mem": "1.75MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.71435546875,
+                2.818359375,
+                2.77197265625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1637,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28924,
+                  "stime_ticks": 681,
+                  "utime_ticks": 956,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926953.690998
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 66.15,
+                  "mem": "2.016MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.8173828125,
+                2.83837890625,
+                2.77880859375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1845,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28924,
+                  "stime_ticks": 772,
+                  "utime_ticks": 1073,
+                  "voluntary_ctxt_switches": 15
+                }
+              },
+              "ts": 1783926955.8663774
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 67.09,
+                  "mem": "1.52MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.8173828125,
+                2.83837890625,
+                2.77880859375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2057,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28928,
+                  "stime_ticks": 864,
+                  "utime_ticks": 1193,
+                  "voluntary_ctxt_switches": 15
+                }
+              },
+              "ts": 1783926958.0672762
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 66.53,
+                  "mem": "1.766MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.9921875,
+                2.87451171875,
+                2.791015625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2269,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28988,
+                  "stime_ticks": 954,
+                  "utime_ticks": 1315,
+                  "voluntary_ctxt_switches": 15
+                }
+              },
+              "ts": 1783926960.2694614
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.03,
+                  "mem": "1.438MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.9921875,
+                2.87451171875,
+                2.791015625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2428,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28988,
+                  "stime_ticks": 1023,
+                  "utime_ticks": 1405,
+                  "voluntary_ctxt_switches": 15
+                }
+              },
+              "ts": 1783926962.4639883
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.05,
+                  "mem": "1.426MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.75244140625,
+                2.82666015625,
+                2.77587890625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2428,
+                  "nonvoluntary_ctxt_switches": 2,
+                  "pid": 4068590,
+                  "rss_kb": 28988,
+                  "stime_ticks": 1023,
+                  "utime_ticks": 1405,
+                  "voluntary_ctxt_switches": 15
+                }
+              },
+              "ts": 1783926964.6795356
+            }
+          ],
+          "workers": [
+            {
+              "adapter": "awscrt",
+              "callback_filters": 0,
+              "callback_invocations": 582900,
+              "callback_topics_count": 0,
+              "callbacks_per_s": 29144.71969042351,
+              "client": "awscrt",
+              "client_module": "/home/yoch/mqtt-python-client-bench/.venv/lib/python3.12/site-packages/awscrt/__init__.py",
+              "client_version": "0.35.0",
+              "delivered_during_drain": 217100,
+              "duration_s": 20.00019235702348,
+              "filters": [
+                "bench/abbf36dd/org/acme/#"
+              ],
+              "implementation_language": "native",
+              "io_model": "crt_event_loop",
+              "latencies_ns": [],
+              "msgs_per_s": 29144.71969042351,
+              "ok": true,
+              "overlapping_callbacks": false,
+              "payload_bytes_in_window": 149222400,
+              "payload_bytes_per_s": 7461048.2407484185,
+              "pid": 4068590,
+              "qos": 0,
+              "role": "subscriber",
+              "sequences": [],
+              "stability": "stable",
+              "subscriber_delivered": 582900,
+              "synthetic_mids": true,
+              "t0_s": 193104.531168898,
+              "t1_s": 193124.531361255
+            }
+          ]
+        },
+        {
+          "bottleneck": "sut_limited",
+          "client": "awscrt",
+          "client_path": null,
+          "cpusets": {
+            "broker": "1,5",
+            "loadgen": "2,6",
+            "orch": "3,7",
+            "sut": "0,4"
+          },
+          "environment": {
+            "client_versions": {
+              "aiomqtt": "2.5.1",
+              "aiomqtt3": null,
+              "amqtt": "0.11.3",
+              "awscrt": "0.35.0",
+              "gmqtt": "0.7.0",
+              "paho": "2.1.0",
+              "zmqtt": "0.0.5"
+            },
+            "cpu_count": 8,
+            "cpu_model": "Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz",
+            "hostname": "yoch-HP",
+            "loadavg": [
+              2.80419921875,
+              2.8310546875,
+              2.77978515625
+            ],
+            "machine": "x86_64",
+            "physical_cpu_groups": [
+              [
+                0,
+                4
+              ],
+              [
+                1,
+                5
+              ],
+              [
+                2,
+                6
+              ],
+              [
+                3,
+                7
+              ]
+            ],
+            "platform": "Linux-6.8.0-134-lowlatency-x86_64-with-glibc2.39",
+            "python": "3.12.3",
+            "scaling_governor": "schedutil"
+          },
+          "loadgen": {
+            "args": [
+              "pub",
+              "-h",
+              "127.0.0.1",
+              "-p",
+              "11883",
+              "-V",
+              "5",
+              "-c",
+              "32",
+              "-i",
+              "10",
+              "-I",
+              "1",
+              "-t",
+              "bench/a68fdb9c/org/acme/site/s0000/device/d0000/telemetry/temperature",
+              "-s",
+              "256",
+              "-q",
+              "0",
+              "-F",
+              "100",
+              "-L",
+              "800000"
+            ],
+            "image": "emqx/emqtt-bench:latest@sha256:ae7f2d56cd49b14824c835140c808b093c5e3f2defb3a29b34b17560feb456cd",
+            "image_digest": "emqx/emqtt-bench@sha256:ae7f2d56cd49b14824c835140c808b093c5e3f2defb3a29b34b17560feb456cd",
+            "mqtt_version": 5,
+            "mqtt_version_override": "emqtt_bench_v311_client_id_rejected_by_mosquitto",
+            "mqtt_version_requested": 4,
+            "nominal_rate": 32000.0,
+            "parsed": {
+              "kinds": [
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub"
+              ],
+              "last_rate": 64112.0,
+              "last_total": 1589866,
+              "max_rate": 64112.0,
+              "median_rate": 63996.0,
+              "rates": [
+                53758.48,
+                64010.0,
+                63996.0,
+                63996.0,
+                63994.0,
+                64020.0,
+                63990.0,
+                63996.0,
+                64008.0,
+                63992.0,
+                64012.0,
+                64002.0,
+                63968.0,
+                64026.0,
+                63996.0,
+                64002.0,
+                64000.0,
+                64016.0,
+                63982.0,
+                64002.0,
+                64014.0,
+                63996.0,
+                63988.0,
+                63882.0,
+                64112.0
+              ],
+              "samples": 25,
+              "totals": [
+                53866,
+                117876,
+                181872,
+                245868,
+                309862,
+                373882,
+                437872,
+                501868,
+                565876,
+                629868,
+                693880,
+                757882,
+                821850,
+                885876,
+                949872,
+                1013874,
+                1077874,
+                1141890,
+                1205872,
+                1269874,
+                1333888,
+                1397884,
+                1461872,
+                1525754,
+                1589866
+              ]
+            },
+            "stdout_tail": "\n21s pub_overrun total=25278 rate=1358.00/sec\n\n22s pub total=1397884 rate=63996.00/sec\n\n22s pub_overrun total=26339 rate=1061.00/sec\n\n23s pub total=1461872 rate=63988.00/sec\n\n23s pub_overrun total=27348 rate=1010.01/sec\n\n24s pub total=1525754 rate=63882.00/sec\n\n24s pub_overrun total=30195 rate=2844.16/sec\n\n25s pub total=1589866 rate=64112.00/sec\n\n25s pub_overrun total=31100 rate=905.00/sec\n\npublish complete"
+          },
+          "managed_broker": true,
+          "network": {
+            "applied": false,
+            "profile": "localhost",
+            "reason": "localhost_noop"
+          },
+          "non_comparable": false,
+          "point": {
+            "cadence": "burst",
+            "description": "Ingress under bursty load with backlog recovery metrics.",
+            "drain_s": 10.0,
+            "duration_s": 20.0,
+            "inflight": 20,
+            "loadgen_clients": 32,
+            "max_queued": 200,
+            "name": "burst_recovery",
+            "network": "localhost",
+            "non_comparable": false,
+            "outstanding": 64,
+            "payload": "telemetry256",
+            "protocol": "MQTTv311",
+            "publishers": 1,
+            "qos_publish": 0,
+            "qos_subscribe": 0,
+            "run_id": "a68fdb9c",
+            "scenario": "burst_recovery",
+            "subscribers": 1,
+            "subscription": "hash",
+            "suite": "core",
+            "tags": [
+              "representative"
+            ],
+            "tls": false,
+            "topic_topology": "fleet4k_uniform",
+            "topology": "subscriber_ingress",
+            "warmup_s": 5.0
+          },
+          "primary_msgs_per_s": 29178.901798405554,
+          "protocol_effective": "MQTTv311",
+          "qdisc": null,
+          "reasons": [],
+          "run_id": "a68fdb9c",
+          "run_index": 1,
+          "schema_version": 1,
+          "secondary_msgs_per_s": {
+            "subscriber": 29178.901798405554
+          },
+          "status": "valid",
+          "telemetry": [
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.04,
+                  "mem": "1.434MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.75244140625,
+                2.82666015625,
+                2.77587890625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 15,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28844,
+                  "stime_ticks": 1,
+                  "utime_ticks": 14,
+                  "voluntary_ctxt_switches": 6
+                }
+              },
+              "ts": 1783926966.345441
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.05,
+                  "mem": "1.434MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.75244140625,
+                2.82666015625,
+                2.77587890625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 15,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28844,
+                  "stime_ticks": 1,
+                  "utime_ticks": 14,
+                  "voluntary_ctxt_switches": 7
+                }
+              },
+              "ts": 1783926968.8800585
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.04,
+                  "mem": "1.434MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.61181640625,
+                2.7958984375,
+                2.76611328125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 15,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28844,
+                  "stime_ticks": 1,
+                  "utime_ticks": 14,
+                  "voluntary_ctxt_switches": 7
+                }
+              },
+              "ts": 1783926971.0699654
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 50.55,
+                  "mem": "1.77MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.61181640625,
+                2.7958984375,
+                2.76611328125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 15,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28844,
+                  "stime_ticks": 1,
+                  "utime_ticks": 14,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926973.2541447
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 67.94,
+                  "mem": "1.766MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.64306640625,
+                2.79931640625,
+                2.767578125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 185,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28864,
+                  "stime_ticks": 71,
+                  "utime_ticks": 114,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926975.4357548
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 67.31,
+                  "mem": "1.781MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.64306640625,
+                2.79931640625,
+                2.767578125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 398,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28860,
+                  "stime_ticks": 160,
+                  "utime_ticks": 238,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926977.639042
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 68.01,
+                  "mem": "2.004MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.751953125,
+                2.8193359375,
+                2.7744140625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 611,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28864,
+                  "stime_ticks": 242,
+                  "utime_ticks": 369,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926979.8526773
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 67.55,
+                  "mem": "1.77MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.751953125,
+                2.8193359375,
+                2.7744140625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 824,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28860,
+                  "stime_ticks": 330,
+                  "utime_ticks": 494,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926982.0522773
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 68.17,
+                  "mem": "2.047MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.77197265625,
+                2.82275390625,
+                2.77587890625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1037,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28864,
+                  "stime_ticks": 415,
+                  "utime_ticks": 622,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926984.2595334
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 67.69,
+                  "mem": "1.785MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.77197265625,
+                2.82275390625,
+                2.77587890625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1247,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28864,
+                  "stime_ticks": 504,
+                  "utime_ticks": 743,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926986.4415674
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 67.02,
+                  "mem": "1.773MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.77197265625,
+                2.82275390625,
+                2.77587890625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1458,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28860,
+                  "stime_ticks": 591,
+                  "utime_ticks": 867,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926988.6304855
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 68.43,
+                  "mem": "1.762MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.87060546875,
+                2.8427734375,
+                2.78271484375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1671,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28860,
+                  "stime_ticks": 676,
+                  "utime_ticks": 995,
+                  "voluntary_ctxt_switches": 10
+                }
+              },
+              "ts": 1783926990.8472638
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 68.28,
+                  "mem": "1.766MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.87060546875,
+                2.8427734375,
+                2.78271484375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1885,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28860,
+                  "stime_ticks": 762,
+                  "utime_ticks": 1123,
+                  "voluntary_ctxt_switches": 11
+                }
+              },
+              "ts": 1783926993.0515141
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 67.55,
+                  "mem": "1.777MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.96142578125,
+                2.8623046875,
+                2.78955078125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2100,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28860,
+                  "stime_ticks": 851,
+                  "utime_ticks": 1249,
+                  "voluntary_ctxt_switches": 11
+                }
+              },
+              "ts": 1783926995.2777395
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 65.21,
+                  "mem": "1.684MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.96142578125,
+                2.8623046875,
+                2.78955078125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2303,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28924,
+                  "stime_ticks": 936,
+                  "utime_ticks": 1367,
+                  "voluntary_ctxt_switches": 11
+                }
+              },
+              "ts": 1783926997.498316
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.05,
+                  "mem": "1.438MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.80419921875,
+                2.8310546875,
+                2.77978515625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2424,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28924,
+                  "stime_ticks": 983,
+                  "utime_ticks": 1441,
+                  "voluntary_ctxt_switches": 11
+                }
+              },
+              "ts": 1783926999.7730153
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.04,
+                  "mem": "1.426MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.80419921875,
+                2.8310546875,
+                2.77978515625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2424,
+                  "nonvoluntary_ctxt_switches": 0,
+                  "pid": 4069974,
+                  "rss_kb": 28924,
+                  "stime_ticks": 983,
+                  "utime_ticks": 1441,
+                  "voluntary_ctxt_switches": 11
+                }
+              },
+              "ts": 1783927001.9499366
+            }
+          ],
+          "workers": [
+            {
+              "adapter": "awscrt",
+              "callback_filters": 0,
+              "callback_invocations": 583580,
+              "callback_topics_count": 0,
+              "callbacks_per_s": 29178.901798405554,
+              "client": "awscrt",
+              "client_module": "/home/yoch/mqtt-python-client-bench/.venv/lib/python3.12/site-packages/awscrt/__init__.py",
+              "client_version": "0.35.0",
+              "delivered_during_drain": 216420,
+              "duration_s": 20.000067310000304,
+              "filters": [
+                "bench/a68fdb9c/org/acme/#"
+              ],
+              "implementation_language": "native",
+              "io_model": "crt_event_loop",
+              "latencies_ns": [],
+              "msgs_per_s": 29178.901798405554,
+              "ok": true,
+              "overlapping_callbacks": false,
+              "payload_bytes_in_window": 149396480,
+              "payload_bytes_per_s": 7469798.860391822,
+              "pid": 4069974,
+              "qos": 0,
+              "role": "subscriber",
+              "sequences": [],
+              "stability": "stable",
+              "subscriber_delivered": 583580,
+              "synthetic_mids": true,
+              "t0_s": 193141.348517914,
+              "t1_s": 193161.348585224
+            }
+          ]
+        },
+        {
+          "bottleneck": "sut_limited",
+          "client": "awscrt",
+          "client_path": null,
+          "cpusets": {
+            "broker": "1,5",
+            "loadgen": "2,6",
+            "orch": "3,7",
+            "sut": "0,4"
+          },
+          "environment": {
+            "client_versions": {
+              "aiomqtt": "2.5.1",
+              "aiomqtt3": null,
+              "amqtt": "0.11.3",
+              "awscrt": "0.35.0",
+              "gmqtt": "0.7.0",
+              "paho": "2.1.0",
+              "zmqtt": "0.0.5"
+            },
+            "cpu_count": 8,
+            "cpu_model": "Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz",
+            "hostname": "yoch-HP",
+            "loadavg": [
+              3.16748046875,
+              2.93017578125,
+              2.81591796875
+            ],
+            "machine": "x86_64",
+            "physical_cpu_groups": [
+              [
+                0,
+                4
+              ],
+              [
+                1,
+                5
+              ],
+              [
+                2,
+                6
+              ],
+              [
+                3,
+                7
+              ]
+            ],
+            "platform": "Linux-6.8.0-134-lowlatency-x86_64-with-glibc2.39",
+            "python": "3.12.3",
+            "scaling_governor": "schedutil"
+          },
+          "loadgen": {
+            "args": [
+              "pub",
+              "-h",
+              "127.0.0.1",
+              "-p",
+              "11883",
+              "-V",
+              "5",
+              "-c",
+              "32",
+              "-i",
+              "10",
+              "-I",
+              "1",
+              "-t",
+              "bench/8a5f2317/org/acme/site/s0000/device/d0000/telemetry/temperature",
+              "-s",
+              "256",
+              "-q",
+              "0",
+              "-F",
+              "100",
+              "-L",
+              "800000"
+            ],
+            "image": "emqx/emqtt-bench:latest@sha256:ae7f2d56cd49b14824c835140c808b093c5e3f2defb3a29b34b17560feb456cd",
+            "image_digest": "emqx/emqtt-bench@sha256:ae7f2d56cd49b14824c835140c808b093c5e3f2defb3a29b34b17560feb456cd",
+            "mqtt_version": 5,
+            "mqtt_version_override": "emqtt_bench_v311_client_id_rejected_by_mosquitto",
+            "mqtt_version_requested": 4,
+            "nominal_rate": 32000.0,
+            "parsed": {
+              "kinds": [
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub",
+                "pub"
+              ],
+              "last_rate": 63518.0,
+              "last_total": 1589376,
+              "max_rate": 64580.0,
+              "median_rate": 64000.0,
+              "rates": [
+                53740.52,
+                64000.0,
+                64018.0,
+                63988.0,
+                64008.0,
+                63752.0,
+                64048.0,
+                64188.0,
+                64000.0,
+                63990.0,
+                64022.0,
+                63998.0,
+                63992.0,
+                64018.0,
+                63980.0,
+                64004.0,
+                64004.0,
+                63980.0,
+                64010.0,
+                63430.0,
+                64580.0,
+                63994.0,
+                64006.0,
+                64000.0,
+                63518.0
+              ],
+              "samples": 25,
+              "totals": [
+                53848,
+                117848,
+                181866,
+                245854,
+                309862,
+                373614,
+                437662,
+                501850,
+                565850,
+                629840,
+                693862,
+                757860,
+                821852,
+                885870,
+                949850,
+                1013854,
+                1077858,
+                1141838,
+                1205848,
+                1269278,
+                1333858,
+                1397852,
+                1461858,
+                1525858,
+                1589376
+              ]
+            },
+            "stdout_tail": "\n21s pub_overrun total=71276 rate=3684.79/sec\n\n22s pub total=1397852 rate=63994.00/sec\n\n22s pub_overrun total=72286 rate=1006.98/sec\n\n23s pub total=1461858 rate=64006.00/sec\n\n23s pub_overrun total=73129 rate=847.24/sec\n\n24s pub total=1525858 rate=64000.00/sec\n\n24s pub_overrun total=74178 rate=1047.95/sec\n\n25s pub total=1589376 rate=63518.00/sec\n\n25s pub_overrun total=75978 rate=1789.26/sec\n\npublish complete"
+          },
+          "managed_broker": true,
+          "network": {
+            "applied": false,
+            "profile": "localhost",
+            "reason": "localhost_noop"
+          },
+          "non_comparable": false,
+          "point": {
+            "cadence": "burst",
+            "description": "Ingress under bursty load with backlog recovery metrics.",
+            "drain_s": 10.0,
+            "duration_s": 20.0,
+            "inflight": 20,
+            "loadgen_clients": 32,
+            "max_queued": 200,
+            "name": "burst_recovery",
+            "network": "localhost",
+            "non_comparable": false,
+            "outstanding": 64,
+            "payload": "telemetry256",
+            "protocol": "MQTTv311",
+            "publishers": 1,
+            "qos_publish": 0,
+            "qos_subscribe": 0,
+            "run_id": "8a5f2317",
+            "scenario": "burst_recovery",
+            "subscribers": 1,
+            "subscription": "hash",
+            "suite": "core",
+            "tags": [
+              "representative"
+            ],
+            "tls": false,
+            "topic_topology": "fleet4k_uniform",
+            "topology": "subscriber_ingress",
+            "warmup_s": 5.0
+          },
+          "primary_msgs_per_s": 29269.613586036055,
+          "protocol_effective": "MQTTv311",
+          "qdisc": null,
+          "reasons": [],
+          "run_id": "8a5f2317",
+          "run_index": 2,
+          "schema_version": 1,
+          "secondary_msgs_per_s": {
+            "subscriber": 29269.613586036055
+          },
+          "status": "valid",
+          "telemetry": [
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.03,
+                  "mem": "1.434MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.80419921875,
+                2.8310546875,
+                2.77978515625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 15,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28896,
+                  "stime_ticks": 2,
+                  "utime_ticks": 13,
+                  "voluntary_ctxt_switches": 5
+                }
+              },
+              "ts": 1783927003.5419292
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.04,
+                  "mem": "1.434MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.900390625,
+                2.8505859375,
+                2.78662109375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 16,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28896,
+                  "stime_ticks": 2,
+                  "utime_ticks": 14,
+                  "voluntary_ctxt_switches": 6
+                }
+              },
+              "ts": 1783927006.1536198
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.03,
+                  "mem": "1.434MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.900390625,
+                2.8505859375,
+                2.78662109375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 16,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28896,
+                  "stime_ticks": 2,
+                  "utime_ticks": 14,
+                  "voluntary_ctxt_switches": 6
+                }
+              },
+              "ts": 1783927008.3443558
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 59.66,
+                  "mem": "2.012MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.748046875,
+                2.81982421875,
+                2.77685546875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 16,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28896,
+                  "stime_ticks": 2,
+                  "utime_ticks": 14,
+                  "voluntary_ctxt_switches": 9
+                }
+              },
+              "ts": 1783927010.5336604
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 69.98,
+                  "mem": "2.004MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.748046875,
+                2.81982421875,
+                2.77685546875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 196,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28916,
+                  "stime_ticks": 79,
+                  "utime_ticks": 117,
+                  "voluntary_ctxt_switches": 9
+                }
+              },
+              "ts": 1783927012.7081423
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 71.45,
+                  "mem": "1.77MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.9287109375,
+                2.8564453125,
+                2.7890625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 411,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28912,
+                  "stime_ticks": 169,
+                  "utime_ticks": 242,
+                  "voluntary_ctxt_switches": 9
+                }
+              },
+              "ts": 1783927014.9301546
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 75.55,
+                  "mem": "1.762MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                2.9287109375,
+                2.8564453125,
+                2.7890625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 620,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28916,
+                  "stime_ticks": 252,
+                  "utime_ticks": 368,
+                  "voluntary_ctxt_switches": 9
+                }
+              },
+              "ts": 1783927017.1012454
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 74.57,
+                  "mem": "1.512MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                3.0146484375,
+                2.87548828125,
+                2.7958984375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 838,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28912,
+                  "stime_ticks": 338,
+                  "utime_ticks": 500,
+                  "voluntary_ctxt_switches": 9
+                }
+              },
+              "ts": 1783927019.302913
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 71.08,
+                  "mem": "1.766MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                3.0146484375,
+                2.87548828125,
+                2.7958984375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1052,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28912,
+                  "stime_ticks": 429,
+                  "utime_ticks": 623,
+                  "voluntary_ctxt_switches": 9
+                }
+              },
+              "ts": 1783927021.532265
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 71.77,
+                  "mem": "1.52MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                3.0146484375,
+                2.87548828125,
+                2.7958984375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1265,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28912,
+                  "stime_ticks": 519,
+                  "utime_ticks": 746,
+                  "voluntary_ctxt_switches": 9
+                }
+              },
+              "ts": 1783927023.756718
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 70.05,
+                  "mem": "1.758MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                3.333984375,
+                2.9443359375,
+                2.81884765625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1476,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28916,
+                  "stime_ticks": 607,
+                  "utime_ticks": 869,
+                  "voluntary_ctxt_switches": 9
+                }
+              },
+              "ts": 1783927025.9565637
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 70.43,
+                  "mem": "1.785MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                3.333984375,
+                2.9443359375,
+                2.81884765625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1688,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28912,
+                  "stime_ticks": 693,
+                  "utime_ticks": 995,
+                  "voluntary_ctxt_switches": 9
+                }
+              },
+              "ts": 1783927028.161275
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 76.74,
+                  "mem": "1.758MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                3.3876953125,
+                2.9619140625,
+                2.8251953125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1898,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28916,
+                  "stime_ticks": 779,
+                  "utime_ticks": 1119,
+                  "voluntary_ctxt_switches": 11
+                }
+              },
+              "ts": 1783927030.3628204
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 71.73,
+                  "mem": "1.773MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                3.3876953125,
+                2.9619140625,
+                2.8251953125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2111,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28916,
+                  "stime_ticks": 864,
+                  "utime_ticks": 1247,
+                  "voluntary_ctxt_switches": 11
+                }
+              },
+              "ts": 1783927032.5922616
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 65.02,
+                  "mem": "1.434MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                3.3564453125,
+                2.962890625,
+                2.826171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2319,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28976,
+                  "stime_ticks": 959,
+                  "utime_ticks": 1360,
+                  "voluntary_ctxt_switches": 11
+                }
+              },
+              "ts": 1783927034.7708678
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.05,
+                  "mem": "1.434MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                3.3564453125,
+                2.962890625,
+                2.826171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2423,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28976,
+                  "stime_ticks": 1003,
+                  "utime_ticks": 1420,
+                  "voluntary_ctxt_switches": 11
+                }
+              },
+              "ts": 1783927036.9577057
+            },
+            {
+              "containers": {
+                "mqtt-python-client-bench-mosquitto-1": {
+                  "cpu_pct": 0.05,
+                  "mem": "1.426MiB / 31.22GiB",
+                  "name": "mqtt-python-client-bench-mosquitto-1"
+                }
+              },
+              "loadavg": [
+                3.3564453125,
+                2.962890625,
+                2.826171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2424,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 4071336,
+                  "rss_kb": 28984,
+                  "stime_ticks": 1003,
+                  "utime_ticks": 1421,
+                  "voluntary_ctxt_switches": 15
+                }
+              },
+              "ts": 1783927039.1585243
+            }
+          ],
+          "workers": [
+            {
+              "adapter": "awscrt",
+              "callback_filters": 0,
+              "callback_invocations": 585395,
+              "callback_topics_count": 0,
+              "callbacks_per_s": 29269.613586036055,
+              "client": "awscrt",
+              "client_module": "/home/yoch/mqtt-python-client-bench/.venv/lib/python3.12/site-packages/awscrt/__init__.py",
+              "client_version": "0.35.0",
+              "delivered_during_drain": 214605,
+              "duration_s": 20.000093212001957,
+              "filters": [
+                "bench/8a5f2317/org/acme/#"
+              ],
+              "implementation_language": "native",
+              "io_model": "crt_event_loop",
+              "latencies_ns": [],
+              "msgs_per_s": 29269.613586036055,
+              "ok": true,
+              "overlapping_callbacks": false,
+              "payload_bytes_in_window": 149861120,
+              "payload_bytes_per_s": 7493021.07802523,
+              "pid": 4071336,
+              "qos": 0,
+              "role": "subscriber",
+              "sequences": [],
+              "stability": "stable",
+              "subscriber_delivered": 585395,
+              "synthetic_mids": true,
+              "t0_s": 193178.545154588,
+              "t1_s": 193198.5452478
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "inconclusive_n": 0,
+        "inconclusive_rates": [],
+        "mad": 34.18210798204382,
+        "max": 29269.613586036055,
+        "mean": 29197.745024955042,
+        "median": 29178.901798405554,
+        "min": 29144.71969042351,
+        "n": 3,
+        "total_runs": 3,
+        "values": [
+          29144.71969042351,
+          29178.901798405554,
+          29269.613586036055
+        ]
+      }
+    }
+  ],
+  "runs": 3,
+  "scenario": "burst_recovery",
+  "schema_version": 1,
+  "seed": 42
+}
