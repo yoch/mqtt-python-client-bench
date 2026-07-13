@@ -101,9 +101,26 @@ def _short_reason(reason: str) -> str:
 
 def _order_matrix_scenarios(scenarios: Sequence[str]) -> List[str]:
     """Throughput scenarios first; rate-capped / functional rows last."""
-    primary = [s for s in scenarios if s not in _CHART_EXCLUDED_SCENARIOS]
-    trailing = [s for s in scenarios if s in _CHART_EXCLUDED_SCENARIOS]
+    primary = [s for s in scenarios if _scenario_base(s) not in _CHART_EXCLUDED_SCENARIOS]
+    trailing = [s for s in scenarios if _scenario_base(s) in _CHART_EXCLUDED_SCENARIOS]
     return primary + trailing
+
+
+def _matrix_row_id(scenario: str, protocol: Optional[str] = None) -> str:
+    proto = protocol or "MQTTv311"
+    return f"{scenario} · {proto}"
+
+
+def _scenario_base(row_id: str) -> str:
+    if " · " in row_id:
+        return row_id.rsplit(" · ", 1)[0]
+    return row_id
+
+
+def _protocol_from_row_id(row_id: str) -> str:
+    if " · " in row_id:
+        return row_id.rsplit(" · ", 1)[1]
+    return "MQTTv311"
 
 # One stable colour per known client, shared by the matrix swatches, the
 # results table, and the overview chart so the same client always reads the
@@ -179,7 +196,7 @@ def _performance_matrix_html(
       <section class="panel">
         <div class="panel-head">
           <h2>Performance matrix</h2>
-          <p class="hint">Median msg/s per scenario × client, comparable runs only. Best result in each row is highlighted, unless every client ties (rate-capped scenario). Rate-capped checks (<code>duplex_gateway</code>, <code>e2e_integrity</code>) are listed last and omitted from the chart above. Client load misses and capability gaps are listed in Client issues at the bottom.</p>
+          <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols. Best result in each row is highlighted, unless every client ties (rate-capped scenario). Rate-capped checks (<code>duplex_gateway</code>, <code>e2e_integrity</code>) are listed last and omitted from the chart above. Client load misses and capability gaps are listed in Client issues at the bottom.</p>
         </div>
         <div class="table-wrap table-wrap-sticky-col">
           <table class="matrix">
@@ -367,6 +384,7 @@ class PointRow:
     chart_rates: List[Optional[float]] = field(default_factory=list)
     spread_low: Optional[float] = None
     spread_high: Optional[float] = None
+    protocol: Optional[str] = None
 
 
 @dataclass
@@ -491,6 +509,7 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
                 "fractions": data.get("fractions"),
                 "rtt_capacity_msgs_per_s": data.get("rtt_capacity_msgs_per_s"),
                 "rtt_fractions": data.get("rtt_fractions"),
+                "protocol_capacities": data.get("protocol_capacities"),
             },
         )
 
@@ -563,6 +582,7 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
                 chart_rates=chart_rates,
                 spread_low=float(point_min) if point_min is not None else None,
                 spread_high=float(point_max) if point_max is not None else None,
+                protocol=str(point.get("protocol") or "MQTTv311"),
             )
         )
 
@@ -682,19 +702,56 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
 """
         return _page_shell("Benchmark reports", body)
 
-    # Grouped bar chart + matrix: one x-tick / row per scenario, one series /
-    # column per client. Computed before the flat table so client colours are
-    # known up front and reused everywhere on the page.
+    # Grouped bar chart + matrix: one x-tick / row per scenario·protocol, one
+    # series / column per client. Never merge medians across MQTT protocols.
     scenario_docs = [
         doc
         for doc in docs
         if doc.kind == "scenario" and doc.median_msgs_per_s is not None and not doc.non_comparable
     ]
-    scenarios: List[str] = []
+
+    def _protocol_aggregates(doc: ResultDoc) -> Dict[str, tuple]:
+        """protocol -> (median, spread_low, spread_high) from comparable points."""
+        buckets: Dict[str, List[PointRow]] = {}
+        for point in doc.points:
+            if point.non_comparable or point.median_msgs_per_s is None:
+                continue
+            proto = point.protocol or "MQTTv311"
+            buckets.setdefault(proto, []).append(point)
+        out: Dict[str, tuple] = {}
+        for proto, pts in buckets.items():
+            ordered = sorted(pts, key=lambda p: float(p.median_msgs_per_s or 0.0))
+            mid = ordered[len(ordered) // 2]
+            lows = [p.spread_low if p.spread_low is not None else p.median_msgs_per_s for p in pts]
+            highs = [p.spread_high if p.spread_high is not None else p.median_msgs_per_s for p in pts]
+            out[proto] = (
+                float(mid.median_msgs_per_s or 0.0),
+                float(min(v for v in lows if v is not None)),
+                float(max(v for v in highs if v is not None)),
+            )
+        if not out and doc.median_msgs_per_s is not None:
+            out["MQTTv311"] = (
+                float(doc.median_msgs_per_s),
+                float(doc.spread_low if doc.spread_low is not None else doc.median_msgs_per_s),
+                float(doc.spread_high if doc.spread_high is not None else doc.median_msgs_per_s),
+            )
+        return out
+
+    row_ids: List[str] = []
+    by_key: Dict[tuple, Optional[float]] = {}
+    by_key_low: Dict[tuple, Optional[float]] = {}
+    by_key_high: Dict[tuple, Optional[float]] = {}
     for doc in scenario_docs:
-        name = doc.scenario or doc.title
-        if name not in scenarios:
-            scenarios.append(name)
+        scenario = doc.scenario or doc.title
+        client = doc.client or "?"
+        for proto, (median_v, low_v, high_v) in _protocol_aggregates(doc).items():
+            row_id = _matrix_row_id(scenario, proto)
+            if row_id not in row_ids:
+                row_ids.append(row_id)
+            by_key[(row_id, client)] = median_v
+            by_key_low[(row_id, client)] = low_v
+            by_key_high[(row_id, client)] = high_v
+
     # Single-library scenario clients only. ABBA compare docs store a composite
     # "a / b" label in `client` and must not inflate the Clients stat.
     all_clients: List[str] = []
@@ -709,9 +766,6 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
         if name not in scenario_clients:
             scenario_clients.append(name)
     colors = _client_colors(_sort_clients(all_clients))
-    by_key = {(doc.scenario or doc.title, doc.client or "?"): doc.median_msgs_per_s for doc in scenario_docs}
-    by_key_low = {(doc.scenario or doc.title, doc.client or "?"): doc.spread_low for doc in scenario_docs}
-    by_key_high = {(doc.scenario or doc.title, doc.client or "?"): doc.spread_high for doc in scenario_docs}
     # Include clients/scenarios that only produced capability or load signals so
     # the issues table and matrix columns stay aligned with the full campaign.
     for doc in docs:
@@ -719,11 +773,18 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
             continue
         if doc.client and doc.client not in scenario_clients:
             scenario_clients.append(doc.client)
-        name = doc.scenario or doc.title
-        if name not in scenarios and (doc.median_msgs_per_s is not None or doc.capability_reasons or doc.load_reasons):
-            scenarios.append(name)
-    chart_scenarios = [s for s in scenarios if s not in _CHART_EXCLUDED_SCENARIOS]
-    matrix_scenarios = _order_matrix_scenarios(scenarios)
+        if not (doc.capability_reasons or doc.load_reasons):
+            continue
+        scenario = doc.scenario or doc.title
+        protos = list(_protocol_aggregates(doc)) if doc.points else ["MQTTv311"]
+        if not protos:
+            protos = ["MQTTv311"]
+        for proto in protos:
+            row_id = _matrix_row_id(scenario, proto)
+            if row_id not in row_ids:
+                row_ids.append(row_id)
+    chart_scenarios = [s for s in row_ids if _scenario_base(s) not in _CHART_EXCLUDED_SCENARIOS]
+    matrix_scenarios = _order_matrix_scenarios(row_ids)
     overview_series = [
         {
             "client": client,
@@ -746,8 +807,8 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
           <p class="stat-value">{_esc(len(all_clients))}</p>
         </article>
         <article>
-          <p class="stat-label">Scenarios covered</p>
-          <p class="stat-value">{_esc(len(scenarios))}</p>
+          <p class="stat-label">Scenario rows</p>
+          <p class="stat-value">{_esc(len(row_ids))}</p>
         </article>
         <article>
           <p class="stat-label">Result files</p>
@@ -792,7 +853,7 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
       <section class="panel">
         <div class="panel-head">
           <h2>Throughput snapshot</h2>
-          <p class="hint">Grouped by scenario, one colour per client. Whiskers show the observed run-to-run min/max. Rate-capped checks, smoke, and non-comparable results are omitted.</p>
+          <p class="hint">Grouped by scenario · MQTT protocol, one colour per client. Whiskers show the observed run-to-run min/max. Comparable only within the same protocol. Rate-capped checks, smoke, and non-comparable results are omitted.</p>
         </div>
         <div class="chart-wrap chart-wrap-wide">
           <canvas id="overview-chart" data-overview='{_esc(json.dumps(overview_payload))}'></canvas>
@@ -875,7 +936,7 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
         chart_block = f"""
       <section class="panel">
         <h2>Per-point throughput</h2>
-        <p class="hint">Whiskers show the observed run-to-run min/max at each point.</p>
+        <p class="hint">Whiskers show the observed run-to-run min/max at each point. Dual-protocol scenarios list MQTTv311 and MQTTv5 points separately (labels include <code>proto=</code>).</p>
         <div class="chart-wrap">
           <canvas class="detail-chart" data-labels='{_esc(json.dumps(labels))}' data-values='{_esc(json.dumps(values))}' data-low='{_esc(json.dumps(lows))}' data-high='{_esc(json.dumps(highs))}'></canvas>
         </div>
@@ -923,11 +984,19 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
         fractions = doc.raw_meta.get("fractions")
         rtt_fractions = doc.raw_meta.get("rtt_fractions")
         rtt_capacity = doc.raw_meta.get("rtt_capacity_msgs_per_s")
+        protocol_capacities = doc.raw_meta.get("protocol_capacities")
+        proto_block = ""
+        if protocol_capacities:
+            proto_block = f"""
+        <h3>Per-protocol capacities</h3>
+        <pre class="code-block">{_esc(json.dumps(protocol_capacities, indent=2))}</pre>
+"""
         calibrate_block = f"""
       <section class="panel">
         <h2>Calibration</h2>
-        <p>Publish capacity: <strong>{_esc(_fmt_num(doc.median_msgs_per_s))}</strong> msg/s</p>
-        <p>RTT capacity: <strong>{_esc(_fmt_num(rtt_capacity))}</strong> pairs/s</p>
+        <p>Publish capacity (primary): <strong>{_esc(_fmt_num(doc.median_msgs_per_s))}</strong> msg/s</p>
+        <p>RTT capacity (primary): <strong>{_esc(_fmt_num(rtt_capacity))}</strong> pairs/s</p>
+        {proto_block}
         <h3>Publish fractions</h3>
         <pre class="code-block">{_esc(json.dumps(fractions, indent=2))}</pre>
         <h3>RTT fractions</h3>

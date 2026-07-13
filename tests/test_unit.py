@@ -155,10 +155,12 @@ class MetricsTests(unittest.TestCase):
 
         scenario = SCENARIO_BY_NAME["rtt_capacity_qos1"]
         points = expand_scenario(scenario, "smoke")
-        self.assertEqual(len(points), 1)
-        self.assertEqual(points[0]["cadence"], "capacity")
-        self.assertNotIn("load_fraction", points[0])
-        self.assertEqual(points[0]["topology"], "application_rtt")
+        self.assertEqual(len(points), 2)  # dual_protocol: MQTTv311 + MQTTv5
+        for point in points:
+            self.assertEqual(point["cadence"], "capacity")
+            self.assertNotIn("load_fraction", point)
+            self.assertEqual(point["topology"], "application_rtt")
+            self.assertIn(point["protocol"], ("MQTTv311", "MQTTv5"))
 
     def test_integrity(self):
         expected = range(1, 6)
@@ -482,9 +484,9 @@ class ScenarioTests(unittest.TestCase):
         standard = expand_scenario(scenario, "standard")
         self.assertTrue(all(p.get("non_comparable") for p in smoke))
         self.assertGreater(standard[0]["duration_s"], smoke[0]["duration_s"])
-        self.assertEqual(standard[0]["duration_s"], 20.0)
-        self.assertEqual(standard[0]["warmup_s"], 5.0)
-        self.assertEqual(standard[0]["drain_s"], 10.0)
+        self.assertEqual(standard[0]["duration_s"], 12.0)
+        self.assertEqual(standard[0]["warmup_s"], 3.0)
+        self.assertEqual(standard[0]["drain_s"], 6.0)
         self.assertEqual(smoke[0]["duration_s"], 3.0)
 
     def test_estimate(self):
@@ -886,12 +888,15 @@ class ReportTests(unittest.TestCase):
             overview_payload = json.loads(html.unescape(overview_attr))
             self.assertNotIn("duplex_gateway", overview_payload["scenarios"])
             self.assertNotIn("e2e_integrity", overview_payload["scenarios"])
-            self.assertEqual(overview_payload["scenarios"], ["pub_qos_sweep_telemetry"])
+            self.assertEqual(overview_payload["scenarios"], ["pub_qos_sweep_telemetry · MQTTv311"])
             clients_in_chart = [s["client"] for s in overview_payload["series"]]
             self.assertEqual(clients_in_chart, ["gmqtt", "paho"])
             matrix_body = index[index.index('class="matrix"') :]
-            self.assertLess(matrix_body.index("pub_qos_sweep_telemetry"), matrix_body.index("duplex_gateway"))
-            self.assertLess(matrix_body.index("duplex_gateway"), matrix_body.index("e2e_integrity"))
+            self.assertLess(
+                matrix_body.index("pub_qos_sweep_telemetry · MQTTv311"),
+                matrix_body.index("duplex_gateway · MQTTv311"),
+            )
+            self.assertLess(matrix_body.index("duplex_gateway · MQTTv311"), matrix_body.index("e2e_integrity · MQTTv311"))
             # Matrix header order matches chart: gmqtt before paho.
             self.assertLess(matrix_body.index(">gmqtt<"), matrix_body.index(">paho<"))
             # Compare docs must not inflate the Clients hero stat.
@@ -1000,6 +1005,115 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(integ["missing"], 3)
         self.assertEqual(integ["worst_missing"], 2)
         self.assertEqual(integ["duplicates"], 1)
+
+
+class DualProtocolTests(unittest.TestCase):
+    def test_dual_expand_qos_sweep_and_sub_exact(self):
+        qos_points = expand_scenario(SCENARIO_BY_NAME["pub_qos_sweep_telemetry"], "standard")
+        self.assertEqual(len(qos_points), 6)  # 3 qos × 2 protocols
+        protos = {(p["qos_publish"], p["protocol"]) for p in qos_points}
+        self.assertEqual(
+            protos,
+            {(0, "MQTTv311"), (0, "MQTTv5"), (1, "MQTTv311"), (1, "MQTTv5"), (2, "MQTTv311"), (2, "MQTTv5")},
+        )
+        sub_points = expand_scenario(SCENARIO_BY_NAME["sub_exact_telemetry"], "standard")
+        self.assertEqual(len(sub_points), 2)
+        self.assertEqual({p["protocol"] for p in sub_points}, {"MQTTv311", "MQTTv5"})
+
+    def test_open_loop_fractions_and_dual(self):
+        for name in ("puback_latency_qos1", "application_rtt_qos1"):
+            points = expand_scenario(SCENARIO_BY_NAME[name], "standard")
+            fracs = sorted({float(p["load_fraction"]) for p in points})
+            self.assertEqual(fracs, [0.5, 0.9], name)
+            self.assertEqual(len(points), 4, name)  # 2 fractions × 2 protocols
+            self.assertEqual({p["protocol"] for p in points}, {"MQTTv311", "MQTTv5"}, name)
+
+    def test_payload_sweep_stays_v311_only(self):
+        points = expand_scenario(SCENARIO_BY_NAME["pub_payload_sweep_qos0"], "standard")
+        self.assertTrue(all(p.get("protocol", "MQTTv311") == "MQTTv311" for p in points))
+        self.assertEqual(len(points), 7)
+
+    def test_protocols_for_client(self):
+        from mqtt_client_bench.harness import protocols_for_client
+
+        self.assertEqual(protocols_for_client("paho"), ["MQTTv311", "MQTTv5"])
+        self.assertEqual(protocols_for_client("aiomqtt3"), ["MQTTv5"])
+        self.assertEqual(protocols_for_client("amqtt"), ["MQTTv311"])
+
+    def test_capacity_from_load_profile_protocol_buckets(self):
+        from mqtt_client_bench.harness import capacity_from_load_profile
+
+        profile = {
+            "protocol_capacities": {
+                "MQTTv5": {"capacity_msgs_per_s": 1000.0, "rtt_capacity_msgs_per_s": 500.0},
+            }
+        }
+        self.assertEqual(
+            capacity_from_load_profile(profile, protocol="MQTTv5", kind="publish"),
+            1000.0,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            capacity_from_load_profile(profile, protocol="MQTTv311", kind="publish")
+        self.assertIn("load_profile_missing_protocol:MQTTv311", str(ctx.exception))
+
+    def test_legacy_load_profile_v311_only(self):
+        from mqtt_client_bench.harness import capacity_from_load_profile
+
+        legacy = {"capacity_msgs_per_s": 2000.0, "rtt_capacity_msgs_per_s": 800.0}
+        self.assertEqual(capacity_from_load_profile(legacy, protocol="MQTTv311", kind="publish"), 2000.0)
+        with self.assertRaises(ValueError):
+            capacity_from_load_profile(legacy, protocol="MQTTv5", kind="publish")
+
+    def test_report_splits_dual_protocol_rows(self):
+        import json
+        import tempfile
+
+        from mqtt_client_bench.report import build_site
+
+        sample = {
+            "schema_version": 1,
+            "scenario": "pub_qos_sweep_telemetry",
+            "profile": "standard",
+            "runs": 1,
+            "client": "paho",
+            "results": [
+                {
+                    "point": {"qos_publish": 1, "protocol": "MQTTv311"},
+                    "runs": [
+                        {
+                            "status": "valid",
+                            "primary_msgs_per_s": 7000.0,
+                            "non_comparable": False,
+                            "workers": [{"role": "publisher", "ok": True}],
+                        }
+                    ],
+                    "summary": {"n": 1, "median": 7000.0, "total_runs": 1},
+                },
+                {
+                    "point": {"qos_publish": 1, "protocol": "MQTTv5"},
+                    "runs": [
+                        {
+                            "status": "valid",
+                            "primary_msgs_per_s": 6500.0,
+                            "non_comparable": False,
+                            "workers": [{"role": "publisher", "ok": True}],
+                        }
+                    ],
+                    "summary": {"n": 1, "median": 6500.0, "total_runs": 1},
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            results = root / "results"
+            site = root / "site"
+            results.mkdir()
+            (results / "paho-pub-dual.json").write_text(json.dumps(sample), encoding="utf-8")
+            build_site(results, site)
+            index = (site / "index.html").read_text(encoding="utf-8")
+            self.assertIn("pub_qos_sweep_telemetry · MQTTv311", index)
+            self.assertIn("pub_qos_sweep_telemetry · MQTTv5", index)
+            self.assertIn("Comparable only within the same protocol", index)
 
 
 if __name__ == "__main__":
