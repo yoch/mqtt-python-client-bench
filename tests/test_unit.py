@@ -18,7 +18,14 @@ from mqtt_client_bench.adapters.registry import (  # noqa: E402
     unsupported_for_client,
 )
 from mqtt_client_bench.harness import capacity_from_qos_sweep, capacity_from_scenario, unsupported_features  # noqa: E402
-from mqtt_client_bench.loadgen import interval_for_rate, nominal_rate, parse_emqtt_output  # noqa: E402
+from mqtt_client_bench.loadgen import (  # noqa: E402
+    LoadgenSpec,
+    enrich_loadgen_stats,
+    interval_for_rate,
+    nominal_rate,
+    observed_pub_rate,
+    parse_emqtt_output,
+)
 from mqtt_client_bench.metrics import (  # noqa: E402
     abba_block_ratios,
     abba_order,
@@ -558,6 +565,22 @@ class LoadgenTests(unittest.TestCase):
     def test_nominal_rate(self):
         self.assertEqual(nominal_rate(20, 100), 200.0)
         self.assertEqual(interval_for_rate(20, 20000), 1)
+        self.assertEqual(nominal_rate(32, 1), 32000.0)
+        self.assertEqual(nominal_rate(64, 1), 64000.0)
+        self.assertEqual(nominal_rate(128, 1), 128000.0)
+
+    def test_qos0_effective_offer_not_parsed_rate(self):
+        """QoS0 pub rates from emqtt-bench are ~2×; offer reference is nominal."""
+        spec = LoadgenSpec(clients=32, interval_ms=1, qos=0, mode="pub")
+        parsed = {"median_rate": 64000.0, "last_rate": 64000.0, "samples": 1, "rates": [64000.0], "totals": [64000], "kinds": ["pub"]}
+        stats = enrich_loadgen_stats(spec, parsed)
+        self.assertEqual(stats["effective_offer_msgs_per_s"], 32000.0)
+        self.assertEqual(stats["nominal_rate"], 32000.0)
+        self.assertTrue(stats["qos0_pub_counter_double_count"])
+        self.assertEqual(stats["parsed_pub_rate_raw"], 64000.0)
+        self.assertEqual(stats["observed_pub_rate"], 32000.0)
+        self.assertEqual(observed_pub_rate(parsed, qos=0), 32000.0)
+        self.assertEqual(observed_pub_rate(parsed, qos=1), 64000.0)
 
     def test_mqtt_version_helper(self):
         from mqtt_client_bench.harness import effective_loadgen_mqtt_version, mqtt_version_for_point
@@ -569,7 +592,7 @@ class LoadgenTests(unittest.TestCase):
         self.assertEqual(effective_loadgen_mqtt_version(5), 5)
 
     def test_loadgen_shortids_for_v311(self):
-        from mqtt_client_bench.loadgen import LoadgenSpec, build_pub_args
+        from mqtt_client_bench.loadgen import build_pub_args
 
         args = build_pub_args(LoadgenSpec(mqtt_version=4))
         self.assertIn("--shortids", args)
@@ -588,6 +611,93 @@ class LoadgenTests(unittest.TestCase):
         )
         self.assertEqual(callback_match_loadgen_topic(run_id), "bench/abcd1234/org/acme/cb/%i/data")
         self.assertEqual(len(overlapping_match_filters(run_id, 8)), 8)
+
+
+class CeilingProbeTests(unittest.TestCase):
+    def test_ceiling_scenario_expansion(self):
+        broker = SCENARIO_BY_NAME["broker_ceiling_ingress"]
+        client = SCENARIO_BY_NAME["client_ceiling_ingress"]
+        self.assertEqual(broker.topology, "broker_ceiling")
+        self.assertEqual(client.topology, "subscriber_ingress")
+        b_points = expand_scenario(broker, "smoke")
+        c_points = expand_scenario(client, "smoke")
+        self.assertEqual(len(b_points), 3)
+        self.assertEqual(len(c_points), 3)
+        self.assertEqual([p["loadgen_clients"] for p in b_points], [32, 64, 128])
+        self.assertEqual([p["ingress_target_msgs_per_s"] for p in b_points], [32000, 64000, 128000])
+        for p in b_points + c_points:
+            self.assertTrue(p["non_comparable"])
+            self.assertIn("diagnostic", p["tags"])
+            # I=1 quantization: clients * 1000 / target == 1
+            self.assertEqual(interval_for_rate(p["loadgen_clients"], p["ingress_target_msgs_per_s"]), 1)
+            self.assertEqual(nominal_rate(p["loadgen_clients"], 1), float(p["ingress_target_msgs_per_s"]))
+
+    def test_resolve_ingress_offer(self):
+        from mqtt_client_bench.harness import resolve_ingress_offer
+
+        self.assertEqual(resolve_ingress_offer({}, 32), 40000.0)
+        self.assertEqual(resolve_ingress_offer({"ingress_target_msgs_per_s": 64000}, 64), 64000.0)
+        self.assertEqual(resolve_ingress_offer({"fanin_mode": "per_publisher"}, 16), 16000.0)
+
+    def test_validate_run_uses_effective_offer_not_raw_qos0(self):
+        from mqtt_client_bench.harness import validate_run
+
+        point = {
+            "topology": "subscriber_ingress",
+            "cadence": "capacity",
+            "duration_s": 20.0,
+            "tags": ["representative"],
+        }
+        workers = [{"ok": True, "role": "subscriber", "msgs_per_s": 30000.0, "subscriber_delivered": 600000}]
+        # Raw last_rate looks like 64k but effective offer is 32k — must NOT flag loadgen_below_half.
+        loadgen = {
+            "nominal_rate": 32000.0,
+            "effective_offer_msgs_per_s": 32000.0,
+            "observed_pub_rate": 31000.0,
+            "qos0_pub_counter_double_count": True,
+            "parsed": {"last_rate": 64000.0, "last_total": 1280000, "median_rate": 64000.0},
+        }
+        validity = validate_run(point, workers, loadgen, [])
+        self.assertNotIn("loadgen_below_half_nominal", validity["reasons"])
+        self.assertEqual(validity["bottleneck"], "offer_limited")
+        self.assertAlmostEqual(validity["delivery_offer_ratio"], 30000.0 / 32000.0)
+
+    def test_validate_run_sys_drops_broker_limited(self):
+        from mqtt_client_bench.harness import validate_run
+
+        point = {
+            "topology": "broker_ceiling",
+            "cadence": "capacity",
+            "duration_s": 20.0,
+            "tags": ["diagnostic"],
+        }
+        loadgen = {
+            "nominal_rate": 64000.0,
+            "effective_offer_msgs_per_s": 64000.0,
+            "observed_pub_rate": 60000.0,
+            "qos0_pub_counter_double_count": True,
+            "parsed": {"last_rate": 120000.0, "last_total": 2400000, "median_rate": 120000.0},
+        }
+        ref_sub = {
+            "observed_recv_rate": 28000.0,
+            "parsed": {"last_rate": 28000.0, "last_total": 560000, "median_rate": 28000.0},
+        }
+        # > 1% of offer*duration (64000*20*0.01 = 12800)
+        sys_counters = {"dropped_delta": 20000}
+        validity = validate_run(point, [], loadgen, [], sys_counters=sys_counters, loadgen_ref_sub=ref_sub)
+        self.assertEqual(validity["bottleneck"], "broker_limited")
+        self.assertIn("sys_publish_dropped", validity["reasons"])
+        self.assertIn("delivery_below_half_offer", validity["reasons"])
+
+    def test_sys_counters_delta(self):
+        from mqtt_client_bench.sys_probe import sys_counters_delta
+
+        before = {"dropped": 10, "publish_sent": 100, "publish_received": 100}
+        after = {"dropped": 25, "publish_sent": 500, "publish_received": 480}
+        delta = sys_counters_delta(before, after)
+        self.assertEqual(delta["dropped_delta"], 15)
+        self.assertEqual(delta["publish_sent_delta"], 400)
+        self.assertEqual(delta["publish_received_delta"], 380)
 
 
 class SchemaTests(unittest.TestCase):

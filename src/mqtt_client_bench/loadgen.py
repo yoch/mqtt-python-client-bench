@@ -21,6 +21,11 @@ RATE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# emqtt-bench double-increments the ``pub`` counter on the QoS0 success path
+# (publish/2 + loop/5 both call inc_counter(pub) when emqtt:publish returns ok).
+# ``recv`` is incremented once. Treat nominal_rate as the real offer for QoS0 pubs.
+QOS0_PUB_COUNTER_DOUBLE_COUNT = True
+
 
 @dataclass
 class LoadgenSpec:
@@ -36,6 +41,9 @@ class LoadgenSpec:
     duration_s: float = 60.0
     connect_interval_ms: int = 10
     limit: int = 0
+    mode: str = "pub"  # pub | sub
+    # Requested aggregate offer before I=1 quantization (informational).
+    target_requested: Optional[float] = None
 
 
 def nominal_rate(clients: int, interval_ms: int) -> float:
@@ -51,7 +59,12 @@ def interval_for_rate(clients: int, target_msgs_per_s: float) -> int:
     return max(1, int(round(clients * 1000.0 / target_msgs_per_s)))
 
 
-def parse_emqtt_output(text: str) -> dict:
+def parse_emqtt_output(text: str, *, kind_filter: Optional[str] = None) -> dict:
+    """Parse emqtt-bench stdout.
+
+    When ``kind_filter`` is set (e.g. ``\"pub\"`` or ``\"recv\"``), only that
+    series is kept — needed when pub and recv lines share one process log.
+    """
     totals = []
     rates = []
     kinds = []
@@ -63,6 +76,8 @@ def parse_emqtt_output(text: str) -> dict:
             continue
         kind_l = kind.lower()
         if kind_l.startswith("connect"):
+            continue
+        if kind_filter is not None and kind_l != kind_filter.lower():
             continue
         kinds.append(kind_l)
         totals.append(int(total))
@@ -77,6 +92,27 @@ def parse_emqtt_output(text: str) -> dict:
         "max_rate": max(rates) if rates else None,
         "median_rate": sorted(rates)[len(rates) // 2] if rates else None,
     }
+
+
+def effective_offer_msgs_per_s(spec: LoadgenSpec) -> float:
+    """Best estimate of real aggregate publish rate.
+
+    For QoS0 pub, prefer ``nominal_rate`` — raw ``pub`` rates from emqtt-bench
+    are ~2× due to double-counting (see QOS0_PUB_COUNTER_DOUBLE_COUNT).
+    """
+    return nominal_rate(spec.clients, spec.interval_ms)
+
+
+def observed_pub_rate(parsed: dict, *, qos: int) -> Optional[float]:
+    """Correct observed publish rate from parsed emqtt-bench ``pub`` lines."""
+    raw = parsed.get("median_rate")
+    if raw is None:
+        raw = parsed.get("last_rate")
+    if raw is None:
+        return None
+    if int(qos) == 0 and QOS0_PUB_COUNTER_DOUBLE_COUNT:
+        return float(raw) / 2.0
+    return float(raw)
 
 
 def build_pub_args(spec: LoadgenSpec) -> List[str]:
@@ -111,6 +147,58 @@ def build_pub_args(spec: LoadgenSpec) -> List[str]:
     return args
 
 
+def build_sub_args(spec: LoadgenSpec) -> List[str]:
+    args = [
+        "sub",
+        "-h",
+        spec.host,
+        "-p",
+        str(spec.port),
+        "-V",
+        str(spec.mqtt_version),
+        "-c",
+        str(max(1, int(spec.clients))),
+        "-i",
+        str(spec.connect_interval_ms),
+        "-t",
+        spec.topic,
+        "-q",
+        str(spec.qos),
+    ]
+    if int(spec.mqtt_version) in (3, 4):
+        args.append("--shortids")
+    return args
+
+
+def build_args(spec: LoadgenSpec) -> List[str]:
+    if spec.mode == "sub":
+        return build_sub_args(spec)
+    return build_pub_args(spec)
+
+
+def enrich_loadgen_stats(spec: LoadgenSpec, parsed: dict) -> dict:
+    """Attach offer-reference fields; keep raw parsed rates for diagnostics."""
+    nom = nominal_rate(spec.clients, spec.interval_ms)
+    qos0_double = bool(spec.mode == "pub" and int(spec.qos) == 0 and QOS0_PUB_COUNTER_DOUBLE_COUNT)
+    out = {
+        "nominal_rate": nom,
+        "effective_offer_msgs_per_s": nom if spec.mode == "pub" else None,
+        "target_requested": spec.target_requested,
+        "interval_ms": spec.interval_ms,
+        "clients": spec.clients,
+        "mode": spec.mode,
+        "qos": spec.qos,
+        "qos0_pub_counter_double_count": qos0_double,
+        "parsed": parsed,
+        "parsed_pub_rate_raw": parsed.get("median_rate") if spec.mode == "pub" else None,
+        "observed_pub_rate": (
+            observed_pub_rate(parsed, qos=spec.qos) if spec.mode == "pub" else None
+        ),
+        "observed_recv_rate": parsed.get("median_rate") if spec.mode == "sub" else None,
+    }
+    return out
+
+
 class EmqttBenchProcess:
     def __init__(self, spec: LoadgenSpec, cpuset: Optional[str] = None):
         self.spec = spec
@@ -121,7 +209,7 @@ class EmqttBenchProcess:
         self.image = EMQTT_BENCH_IMAGE
 
     def start(self) -> None:
-        args = build_pub_args(self.spec)
+        args = build_args(self.spec)
         cmd = ["docker", "run", "--rm", "--network", "host"]
         if self.cpuset:
             cmd.extend(["--cpuset-cpus", self.cpuset])
@@ -137,7 +225,11 @@ class EmqttBenchProcess:
 
     def stop(self, timeout_s: float = 10.0) -> dict:
         if self.proc is None:
-            return {"emitted": None, "rates": [], "image_digest": image_digest(self.image.split("@")[0])}
+            return {
+                "emitted": None,
+                "rates": [],
+                "image_digest": image_digest(self.image.split("@")[0]),
+            }
         try:
             self.proc.terminate()
             out, _ = self.proc.communicate(timeout=timeout_s)
@@ -145,15 +237,18 @@ class EmqttBenchProcess:
             self.proc.kill()
             out, _ = self.proc.communicate(timeout=5)
         self.stdout_text = out or ""
-        parsed = parse_emqtt_output(self.stdout_text)
-        return {
-            "nominal_rate": nominal_rate(self.spec.clients, self.spec.interval_ms),
-            "args": build_pub_args(self.spec),
-            "image": self.image,
-            "image_digest": image_digest(self.image.split("@")[0]),
-            "parsed": parsed,
-            "stdout_tail": "\n".join(self.stdout_text.splitlines()[-20:]),
-        }
+        kind = "recv" if self.spec.mode == "sub" else "pub"
+        parsed = parse_emqtt_output(self.stdout_text, kind_filter=kind)
+        stats = enrich_loadgen_stats(self.spec, parsed)
+        stats.update(
+            {
+                "args": build_args(self.spec),
+                "image": self.image,
+                "image_digest": image_digest(self.image.split("@")[0]),
+                "stdout_tail": "\n".join(self.stdout_text.splitlines()[-20:]),
+            }
+        )
+        return stats
 
     def wait_duration(self, duration_s: float) -> None:
         if self.proc is None:
