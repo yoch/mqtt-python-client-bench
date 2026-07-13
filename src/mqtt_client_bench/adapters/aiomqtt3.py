@@ -30,6 +30,14 @@ def _require_aiomqtt_v3():
     return aiomqtt
 
 
+def _qos_enum(qos: int):
+    # mqtt5 is only installed in the aiomqtt3 extra env; keep the import lazy so
+    # registry can load this module without the optional dependency.
+    from mqtt5 import QoS
+
+    return QoS(int(qos))
+
+
 class Aiomqtt3Adapter(BridgedAdapterBase):
     _NAME = "aiomqtt3"
     _NOTES = (
@@ -110,11 +118,14 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
         aiomqtt = _require_aiomqtt_v3()
         self._ensure_bridge()
         self._stopping = False
+        # aiomqtt v3 uses keep_alive / clean_start (MQTT 5 names), not the
+        # paho-style keepalive / clean_session kwargs from aiomqtt v2.
         kwargs: dict[str, Any] = {
             "hostname": host,
             "port": port,
             "identifier": self._client_id,
-            "keepalive": keepalive,
+            "keep_alive": keepalive,
+            "clean_start": self._clean_session,
         }
         if self._tls_ca_certs:
             import ssl
@@ -124,6 +135,15 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
         async def _connect():
             self._client = aiomqtt.Client(**kwargs)
             await self._client.__aenter__()
+            # Align with other asyncio adapters / Mosquitto set_tcp_nodelay.
+            try:
+                import socket
+
+                sock = getattr(self._client, "_socket", None)
+                if sock is not None:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
+                pass
             self._connected = True
             self._fire_on_connect(flags={}, reason_code=0, properties=None)
             self._start_pump()
@@ -132,18 +152,30 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
 
     async def _message_pump(self) -> None:
         assert self._client is not None
+        client = self._client
         try:
-            messages = self._client.messages
-            if callable(messages):
-                messages = messages()
-            async for message in messages:
+            # messages() is an async generator; may also yield PubRelPackets.
+            # aiomqtt v3 is sans-io: the app must PUBACK/PUBREC/PUBCOMP QoS≥1
+            # deliveries or the broker's max_inflight window stalls.
+            async for message in client.messages():
                 if self._stopping:
                     break
                 topic = getattr(message, "topic", None)
-                topic_s = str(topic) if topic is not None else ""
+                packet_id = getattr(message, "packet_id", None)
+                if topic is None:
+                    # PubRel (QoS 2): complete the handshake.
+                    if packet_id is not None:
+                        await client.pubcomp(packet_id)
+                    continue
+                topic_s = str(topic)
                 payload = getattr(message, "payload", b"")
                 qos = int(getattr(message, "qos", 0) or 0)
                 retain = bool(getattr(message, "retain", False))
+                if packet_id is not None:
+                    if qos == 1:
+                        await client.puback(packet_id)
+                    elif qos == 2:
+                        await client.pubrec(packet_id)
                 self._dispatch_message(
                     IncomingMessage(topic=topic_s, payload=payload, qos=qos, retain=retain)
                 )
@@ -187,8 +219,12 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
                 data = b"" if payload is None else payload
                 if isinstance(data, str):
                     data = data.encode("utf-8")
-                # v3 uses positional bytes payload.
-                await client.publish(topic, data, qos=qos, retain=retain)
+                # v3 publish: QoS IntEnum + packet_id required for QoS≥1.
+                qos_enum = _qos_enum(qos)
+                kwargs: dict[str, Any] = {"qos": qos_enum, "retain": retain}
+                if int(qos) > 0:
+                    kwargs["packet_id"] = next(client.packet_ids)
+                await client.publish(topic, data, **kwargs)
                 self._fire_on_publish(mid, reason_code=0)
             except Exception:  # noqa: BLE001
                 self._fire_on_publish(mid, reason_code=128)
@@ -204,11 +240,8 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
 
         async def _subscribe():
             try:
-                # v3 renamed qos -> max_qos
-                try:
-                    await client.subscribe(topic, max_qos=qos)
-                except TypeError:
-                    await client.subscribe(topic, qos=qos)
+                # v3 Subscription.max_qos requires mqtt5.QoS, not bare int.
+                await client.subscribe(topic, max_qos=_qos_enum(qos))
                 self._fire_on_subscribe(mid, [qos], None)
             except Exception:  # noqa: BLE001
                 self._fire_on_subscribe(mid, [128], None)

@@ -11,12 +11,13 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from mqtt_client_bench.adapters.registry import (
     EXPERIMENTAL_CLIENTS,
     adapter_identity,
     create_adapter,
+    get_adapter_class,
     unsupported_for_client,
 )
 from mqtt_client_bench.broker import (
@@ -360,15 +361,27 @@ def run_point(
         }
 
     if load_profile and point.get("load_fraction") is not None:
-        if point.get("topology") == "application_rtt":
-            capacity = load_profile.get("rtt_capacity_msgs_per_s")
-            capacity_kind = "rtt"
-        else:
-            capacity = load_profile.get("capacity_msgs_per_s")
-            capacity_kind = "publish"
+        capacity_kind = "rtt" if point.get("topology") == "application_rtt" else "publish"
+        protocol = str(point.get("protocol", "MQTTv311"))
+        try:
+            capacity = capacity_from_load_profile(
+                load_profile, protocol=protocol, kind=capacity_kind
+            )
+        except ValueError as exc:
+            return {
+                "schema_version": 1,
+                "run_id": run_id,
+                "point": point,
+                "client": client,
+                "client_path": client_path,
+                "status": "inconclusive",
+                "reasons": [str(exc)],
+                "workers": [],
+            }
         if capacity:
             point["target_rate"] = float(capacity) * float(point["load_fraction"])
             point["calibration_kind"] = capacity_kind
+            point["calibration_protocol"] = protocol
     if point.get("load_fraction") is not None and not point.get("target_rate"):
         # Without a calibrated capacity the workers would silently fall back to
         # an arbitrary absolute rate, breaking cross-client comparability.
@@ -1021,11 +1034,14 @@ def run_scenario(
     output: Optional[str] = None,
     load_profile_path: Optional[str] = None,
     seed: int = 42,
+    point_filter: Optional[Callable[[dict], bool]] = None,
 ) -> dict:
     scenario = SCENARIO_BY_NAME[name]
     if runs is None:
         runs = default_runs(profile)
     points = expand_scenario(scenario, profile)
+    if point_filter is not None:
+        points = [p for p in points if point_filter(p)]
     if network:
         for p in points:
             p["network"] = network
@@ -1104,6 +1120,42 @@ def run_scenario(
     return payload
 
 
+def protocols_for_client(client: str) -> List[str]:
+    """Ordered MQTT protocol variants the adapter can speak."""
+    caps = get_adapter_class(client).capabilities()
+    protocols: List[str] = []
+    if caps.mqtt_v311:
+        protocols.append("MQTTv311")
+    if caps.mqtt_v5:
+        protocols.append("MQTTv5")
+    return protocols
+
+
+def capacity_from_load_profile(
+    load_profile: dict,
+    *,
+    protocol: str,
+    kind: str,
+) -> Optional[float]:
+    """Resolve publish or RTT capacity for a concrete MQTT protocol.
+
+    Prefer ``protocol_capacities[protocol]``. Legacy top-level fields apply only
+    to MQTTv311 (or when protocol_capacities is absent and protocol is v311).
+    """
+    key = "rtt_capacity_msgs_per_s" if kind == "rtt" else "capacity_msgs_per_s"
+    buckets = load_profile.get("protocol_capacities")
+    if isinstance(buckets, dict) and buckets:
+        if protocol not in buckets:
+            raise ValueError(f"load_profile_missing_protocol:{protocol}")
+        bucket = buckets.get(protocol) or {}
+        value = bucket.get(key)
+        return float(value) if value is not None else None
+    if protocol == "MQTTv311":
+        value = load_profile.get(key)
+        return float(value) if value is not None else None
+    raise ValueError(f"load_profile_missing_protocol:{protocol}")
+
+
 def _validate_load_profile(load_profile: dict, *, client: str, client_path: Optional[str], broker: dict) -> None:
     identity = adapter_identity(client, client_path)
     expected_client = load_profile.get("client")
@@ -1119,6 +1171,9 @@ def _validate_load_profile(load_profile: dict, *, client: str, client_path: Opti
     if profile_broker.get("image_digest") and broker.get("image_digest"):
         if profile_broker["image_digest"] != broker["image_digest"]:
             raise ValueError("load profile broker digest mismatch")
+    buckets = load_profile.get("protocol_capacities")
+    if buckets is not None and not isinstance(buckets, dict):
+        raise ValueError("load profile protocol_capacities must be a mapping")
 
 
 def run_suite(suite: str, **kwargs) -> dict:
@@ -1211,23 +1266,53 @@ def calibrate(
     Publish capacity sizes ``puback_latency_qos1``. RTT capacity sizes
     ``application_rtt_qos1`` — the two regimes are not interchangeable: an RTT
     loop pays two publishes and two deliveries per completed sample.
+
+    For dual-protocol clients, only the QoS1 publish point and RTT capacity are
+    measured per supported protocol (not the full QoS 0/1/2 sweep ×2).
     """
-    pub_result = run_scenario(
-        "pub_qos_sweep_telemetry",
-        client=client,
-        client_path=client_path,
-        profile=profile,
-        runs=default_runs(profile),
-    )
-    capacity = capacity_from_qos_sweep(pub_result)
-    rtt_result = run_scenario(
-        "rtt_capacity_qos1",
-        client=client,
-        client_path=client_path,
-        profile=profile,
-        runs=default_runs(profile),
-    )
-    rtt_capacity = capacity_from_scenario(rtt_result)
+    protocols = protocols_for_client(client)
+    if not protocols:
+        raise ValueError(f"client {client!r} supports neither MQTTv311 nor MQTTv5")
+
+    runs = default_runs(profile)
+    protocol_capacities: Dict[str, dict] = {}
+    raw_by_protocol: Dict[str, dict] = {}
+    last_pub: Optional[dict] = None
+    last_rtt: Optional[dict] = None
+
+    for proto in protocols:
+        pub_result = run_scenario(
+            "pub_qos_sweep_telemetry",
+            client=client,
+            client_path=client_path,
+            profile=profile,
+            runs=runs,
+            point_filter=lambda p, protocol=proto: (
+                int(p.get("qos_publish", -1)) == 1 and str(p.get("protocol", "MQTTv311")) == protocol
+            ),
+        )
+        rtt_result = run_scenario(
+            "rtt_capacity_qos1",
+            client=client,
+            client_path=client_path,
+            profile=profile,
+            runs=runs,
+            point_filter=lambda p, protocol=proto: str(p.get("protocol", "MQTTv311")) == protocol,
+        )
+        capacity = capacity_from_qos_sweep(pub_result)
+        rtt_capacity = capacity_from_scenario(rtt_result)
+        protocol_capacities[proto] = {
+            "capacity_msgs_per_s": capacity,
+            "rtt_capacity_msgs_per_s": rtt_capacity,
+            "fractions": _fraction_map(capacity),
+            "rtt_fractions": _fraction_map(rtt_capacity),
+        }
+        raw_by_protocol[proto] = {"publish": pub_result, "rtt": rtt_result}
+        last_pub, last_rtt = pub_result, rtt_result
+
+    primary = "MQTTv311" if "MQTTv311" in protocol_capacities else protocols[0]
+    capacity = protocol_capacities[primary]["capacity_msgs_per_s"]
+    rtt_capacity = protocol_capacities[primary]["rtt_capacity_msgs_per_s"]
     identity = adapter_identity(client, client_path)
     payload = {
         "schema_version": 1,
@@ -1237,13 +1322,14 @@ def calibrate(
         "profile": profile,
         "capacity_msgs_per_s": capacity,
         "rtt_capacity_msgs_per_s": rtt_capacity,
-        "broker": pub_result.get("broker"),
-        "environment": pub_result.get("environment"),
+        "protocol_capacities": protocol_capacities,
+        "broker": (last_pub or {}).get("broker"),
+        "environment": (last_pub or {}).get("environment"),
         "scenario": "pub_qos_sweep_telemetry",
         "rtt_scenario": "rtt_capacity_qos1",
         "fractions": _fraction_map(capacity),
         "rtt_fractions": _fraction_map(rtt_capacity),
-        "raw": {"publish": pub_result, "rtt": rtt_result},
+        "raw": raw_by_protocol,
     }
     write_json(output, payload)
     return payload

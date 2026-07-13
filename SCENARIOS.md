@@ -10,14 +10,25 @@ Ce document décrit **ce que mesure chaque scénario**, comment le banc est câb
 | **Latence** | Quelle latence à X % de *sa* capacité ? | Open-loop à fractions calibrées (`load_fraction`) | Distribution de latence (PUBACK ou RTT appli) |
 | **Intégrité** | Manque / doublon / désordre ? | Débit borné + en-tête séquence | Compteurs d’intégrité (pas un ranking de débit) |
 
-Calibration (`calibrate`) : pour chaque client, on mesure une capacité publish et une capacité RTT, puis les scénarios open-loop dérivent `target_rate = capacity × load_fraction`. Sans profil calibré compatible, les points à fraction sont refusés.
+Calibration (`calibrate`) : pour chaque client et **chaque protocole MQTT supporté**, on mesure une capacité publish QoS1 et une capacité RTT, stockées dans `protocol_capacities`. Les scénarios open-loop dérivent `target_rate = capacity[protocol] × load_fraction`. Sans profil calibré compatible (même client / version / protocole), les points à fraction sont refusés.
 
 Profils temporels (`PROFILE_SPECS`) :
 
 | Profil | Mesure / warmup / drain | Runs | Comparable |
 |---|---|---|---|
-| `standard` | 20 s / 5 s / 10 s | 3 | oui |
+| `standard` | 12 s / 3 s / 6 s | 3 | oui |
 | `smoke` | 3 s / 1 s / 2 s | 1 | non (`non_comparable`) |
+
+### Dual protocole (`dual_protocol`)
+
+Un sous-ensemble **core** minimal est expandé en `MQTTv311` **et** `MQTTv5` :
+
+- `pub_qos_sweep_telemetry`, `sub_exact_telemetry`
+- `puback_latency_qos1`, `rtt_capacity_qos1`, `application_rtt_qos1`
+
+Les classements / la matrice HTML utilisent des lignes `scenario · protocol` — **jamais** de comparaison cross-protocole. `aiomqtt3` (v5-only) se compare aux autres sur les lignes `MQTTv5` ; `amqtt` saute le v5.
+
+Open-loop (`puback` / `application_rtt`) : fractions **`0.50` et `0.90`** seulement (budget).
 
 ## Topologies
 
@@ -142,7 +153,7 @@ Conséquence : si gmqtt et awscrt collent tous deux à ~30k, ce n’est pas forc
 ### `puback_latency_qos1`
 
 - **But** : latence PUBACK en open-loop à fractions de la **capacité publish** du client.
-- **Topologie** : `publisher_only` · fractions `0.25 / 0.50 / 0.75 / 0.90`.
+- **Topologie** : `publisher_only` · fractions `0.50 / 0.90` · tag `dual_protocol`.
 - **Exige** : `--load-profile` (ou calibration auto en `compare`).
 - **Invalidation** : `open_loop_rate_out_of_tolerance` si le débit réalisé dévie > 2 % de la cible.
 
@@ -156,7 +167,7 @@ Conséquence : si gmqtt et awscrt collent tous deux à ~30k, ce n’est pas forc
 ### `application_rtt_qos1`
 
 - **But** : latence RTT applicative open-loop aux fractions de **cette** capacité RTT.
-- **Topologie** : `application_rtt` · fractions `0.25 … 0.90`.
+- **Topologie** : `application_rtt` · fractions `0.50 / 0.90` · tag `dual_protocol`.
 - **Exige** : `TCP_NODELAY` bout-en-bout (broker + client) ; sinon artefact Nagle ~84 ms/paire.
 - **Refus** : `awscrt` → `not_implemented:tcp_nodelay`.
 

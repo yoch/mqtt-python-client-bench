@@ -45,9 +45,9 @@ class Scenario:
         return data
 
 
-# Comparable profile budgets. Chosen so a full core×5-client campaign fits a
-# night (~4–6 h) while keeping a usable median (3 runs) and enough samples
-# (20 s measure at thousands msg/s ⇒ tens of thousands of messages).
+# Comparable profile budgets. Sized so core×clients (with dual-protocol points)
+# still fits a night while keeping a usable median (3 runs). At thousands of
+# msg/s, 12 s measure still yields tens of thousands of samples.
 PROFILE_SPECS: Dict[str, Dict[str, Any]] = {
     "smoke": {
         "duration_s": 3.0,
@@ -57,13 +57,16 @@ PROFILE_SPECS: Dict[str, Dict[str, Any]] = {
         "non_comparable": True,
     },
     "standard": {
-        "duration_s": 20.0,
-        "warmup_s": 5.0,
-        "drain_s": 10.0,
+        "duration_s": 12.0,
+        "warmup_s": 3.0,
+        "drain_s": 6.0,
         "default_runs": 3,
         "non_comparable": False,
     },
 }
+
+# Scenarios tagged dual_protocol are expanded once per entry.
+_DUAL_PROTOCOLS = ("MQTTv311", "MQTTv5")
 
 
 def default_runs(profile: str) -> int:
@@ -114,13 +117,13 @@ SCENARIOS: List[Scenario] = [
     Scenario(
         name="pub_qos_sweep_telemetry",
         suite="core",
-        tags=("representative",),
+        tags=("representative", "dual_protocol"),
         topology="publisher_only",
         description="Publisher-only capacity for QoS 0/1/2 with telemetry payload.",
         payload="telemetry256",
         cadence="capacity",
         variants=tuple({"qos_publish": q} for q in (0, 1, 2)),
-        estimated_minutes=4.0,
+        estimated_minutes=5.0,
     ),
     Scenario(
         name="pub_segment_threshold_16k",
@@ -185,7 +188,7 @@ SCENARIOS: List[Scenario] = [
     Scenario(
         name="sub_exact_telemetry",
         suite="core",
-        tags=("representative",),
+        tags=("representative", "dual_protocol"),
         topology="subscriber_ingress",
         description="Ingress capacity: multi-publisher emqtt-bench to one exact topic.",
         qos_publish=0,
@@ -196,7 +199,7 @@ SCENARIOS: List[Scenario] = [
         subscription="exact",
         loadgen_clients=32,
         subscribers=1,
-        estimated_minutes=3.0,
+        estimated_minutes=4.0,
     ),
     Scenario(
         name="sub_hierarchy_telemetry",
@@ -277,19 +280,19 @@ SCENARIOS: List[Scenario] = [
     Scenario(
         name="puback_latency_qos1",
         suite="core",
-        tags=("representative",),
+        tags=("representative", "dual_protocol"),
         topology="publisher_only",
         description="Open-loop PUBACK latency at calibrated load fractions.",
         qos_publish=1,
         payload="telemetry256",
         cadence="loaded75",
-        variants=tuple({"load_fraction": f} for f in (0.25, 0.50, 0.75, 0.90)),
-        estimated_minutes=6.0,
+        variants=tuple({"load_fraction": f} for f in (0.50, 0.90)),
+        estimated_minutes=5.0,
     ),
     Scenario(
         name="rtt_capacity_qos1",
         suite="core",
-        tags=("diagnostic",),
+        tags=("diagnostic", "dual_protocol"),
         topology="application_rtt",
         description=(
             "Closed-loop application RTT capacity (same client as initiator and "
@@ -301,12 +304,12 @@ SCENARIOS: List[Scenario] = [
         cadence="capacity",
         outstanding=32,
         subscribers=1,
-        estimated_minutes=3.0,
+        estimated_minutes=4.0,
     ),
     Scenario(
         name="application_rtt_qos1",
         suite="core",
-        tags=("representative",),
+        tags=("representative", "dual_protocol"),
         topology="application_rtt",
         description=(
             "Open-loop application RTT latency at fractions of that client's "
@@ -319,8 +322,8 @@ SCENARIOS: List[Scenario] = [
         cadence="loaded75",
         outstanding=32,
         subscribers=1,
-        variants=tuple({"load_fraction": f} for f in (0.25, 0.50, 0.75, 0.90)),
-        estimated_minutes=6.0,
+        variants=tuple({"load_fraction": f} for f in (0.50, 0.90)),
+        estimated_minutes=5.0,
     ),
     # --- full suite ---
     Scenario(
@@ -617,6 +620,21 @@ def list_scenarios(suite: Optional[str] = None) -> List[Scenario]:
     return [s for s in SCENARIOS if s.suite == suite]
 
 
+def _with_protocol_matrix(points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Cross each point with MQTTv311 and MQTTv5 for dual_protocol scenarios."""
+    out: List[Dict[str, Any]] = []
+    for point in points:
+        # Variant already pinned a non-default protocol: keep as-is (no cross).
+        if point.get("protocol") not in (None, "MQTTv311"):
+            out.append(point)
+            continue
+        for proto in _DUAL_PROTOCOLS:
+            crossed = dict(point)
+            crossed["protocol"] = proto
+            out.append(crossed)
+    return out
+
+
 def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[str, Any]]:
     """Expand a scenario into concrete run points with profile-adjusted timings."""
     if profile not in PROFILE_SPECS:
@@ -652,6 +670,8 @@ def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[
         resolved["tags"] = list(resolved.get("tags") or scenario.tags)
         resolved["description"] = scenario.description
         points.append(resolved)
+    if "dual_protocol" in scenario.tags:
+        points = _with_protocol_matrix(points)
     return points
 
 

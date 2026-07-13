@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Bounded campaign: calibrate (publish + RTT capacity) + representative core
-# (3 runs) + 2 ABBA + report.
+# Bounded campaign: calibrate (publish + RTT capacity per MQTT protocol) +
+# representative core (3 runs, standard 12/3/6) + 2 ABBA + report.
+# Dual-protocol scenarios expand MQTTv311×MQTTv5 automatically.
+# After pulling dual-protocol changes, re-run calibrate for every client.
 # Fail closed: any step error aborts the rest.
 set -euo pipefail
 cd "$(dirname "$0")/.."

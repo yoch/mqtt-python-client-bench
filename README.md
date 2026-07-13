@@ -52,12 +52,14 @@ Wrappers of Paho/gmqtt (`fastapi-mqtt`, `jmqtt`, …) are intentionally excluded
 
 | Scenario family | Comparable across | Notes |
 |---|---|---|
-| Publisher capacity / QoS0–1 | stable clients with matching caps | QoS2 excluded for gmqtt |
+| Dual-protocol core (pub qos sweep, sub_exact, puback, RTT) | clients at the **same MQTT protocol** | Expanded as `MQTTv311` and `MQTTv5` rows; never mix protocols in a ranking cell |
+| Other publisher capacity / QoS0–1 | stable clients with matching caps | still MQTTv311-only; QoS2 excluded for gmqtt |
 | `pub_qos1_inflight` | paho, aiomqtt | requires `max_inflight` |
-| Application RTT | stable clients with RTT calibration | same lib on both ends; fractions of `rtt_capacity_qos1`; awscrt refused (no `TCP_NODELAY`) |
+| Application RTT | same protocol + RTT calibration | fractions of that protocol’s `rtt_capacity`; awscrt refused (no `TCP_NODELAY`) |
 | `sub_callback_matching` | **paho only** | native `message_callback_add` |
 | Fleet idle | sync clients only | async_bridged refused (1 loop/thread per conn) |
 | MQTT v5 properties | paho, gmqtt, aiomqtt, awscrt, zmqtt | amqtt / aiomqtt3 constraints apply |
+| `aiomqtt3` rankings | **MQTTv5 peers only** | v5-only client; calibrate via `protocol_capacities.MQTTv5` |
 | Netem (`lan`/`wan`/`edge`) | diagnostic only | marked `non_comparable` on loopback |
 | Smoke profile | never | always `non_comparable` |
 
@@ -107,7 +109,7 @@ Experimental: `.[zmqtt]` or `.[aiomqtt3]` (separate environments).
 
 Useful flags:
 
-- `--profile smoke|standard` — smoke is short and marked `non_comparable` (default: **standard**: 20 s measure / 5 s warmup / 3 runs; smoke: 3 s / 1 s / 1 run)
+- `--profile smoke|standard` — smoke is short and marked `non_comparable` (default: **standard**: 12 s measure / 3 s warmup / 3 runs; smoke: 3 s / 1 s / 1 run)
 - `--client …` — system under test
 - `--client-path` — optional checkout/worktree for A/B of the same library
 - `--broker host:port` — external broker (`managed_broker=false`)
