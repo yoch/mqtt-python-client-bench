@@ -711,6 +711,7 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(data["properties"]["schema_version"]["const"], 1)
         self.assertIn("client", data["properties"])
         self.assertIn("awscrt", data["properties"]["client"]["enum"])
+        self.assertIn("paho-fork", data["properties"]["client"]["enum"])
         self.assertIn("yoch/mqtt-python-client-bench", data["$id"])
 
 
@@ -788,8 +789,11 @@ class ReportTests(unittest.TestCase):
             results = root / "results"
             site = root / "site"
             results.mkdir()
-            (results / "paho-pub-qos-smoke.json").write_text(json.dumps(sample), encoding="utf-8")
+            (results / "paho-pub-qos.json").write_text(json.dumps(sample), encoding="utf-8")
             (results / "suite-core.json").write_text(json.dumps(suite), encoding="utf-8")
+            # Ephemeral local artefacts must not be loaded into the site.
+            (results / "_scratch.json").write_text(json.dumps(sample), encoding="utf-8")
+            (results / "probe-smoke.json").write_text(json.dumps(sample), encoding="utf-8")
             docs = load_results(results)
             self.assertEqual(len(docs), 2)
             kinds = {d.kind for d in docs}
@@ -808,7 +812,7 @@ class ReportTests(unittest.TestCase):
             suite_html = next(p for p in (site / "runs").glob("*.html") if "suite" in p.name).read_text(
                 encoding="utf-8"
             )
-            self.assertIn('href="paho-pub-qos-smoke.html"', suite_html)
+            self.assertIn('href="paho-pub-qos.html"', suite_html)
             self.assertIn("pub_qos_sweep_telemetry", suite_html)
             self.assertFalse(any(site.rglob("*.json")))
 
