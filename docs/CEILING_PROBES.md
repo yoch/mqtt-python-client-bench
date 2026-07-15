@@ -91,3 +91,88 @@ Un seul cran d’offre :
 | **INCONCLUSIVE** | Loadgen &lt; moitié de l’offre, barrier/worker errors, probe `$SYS` absente, ou signaux contradictoires. |
 
 Hors scope : changer le cpuset broker, remplacer Mosquitto, inclure ces points dans le ranking core.
+
+## Gate NanoMQ (2026-07-14) — NO-GO
+
+Hypothèse testée : un broker multi-thread (NanoMQ 0.22.10) sur le même cpuset
+`1,5` lèverait le plafond Mosquitto mono-thread (surtout `blob1m` /
+`container_cpu_high`).
+
+Setup gate (fair) :
+- Mosquitto compose du repo, port `11883`, cpuset `1,5`
+- NanoMQ `emqx/nanomq:0.22.10`, `--network host`, port `21883`,
+  `-t 2 -T 2 -n 8` (2 taskq threads, parallel=8)
+- emqtt-bench pub + sub, parse **recv** (pas le compteur pub QoS0 ×2)
+
+| Offre / payload | Mosquitto recv med | NanoMQ recv med |
+|---|---|---|
+| 32k · 256 B QoS0 | ~33k | ~2.6k |
+| 64k · 256 B QoS0 | ~29k (plafond) | ~2.6k |
+| 128k · 256 B QoS0 | ~25k | ~2.4k |
+| blob1m · c=4 | ~127 | ~130 |
+| blob1m · c=8 | ~169 | ~133 |
+
+Critère GO du plan (≥ 1.5× Mosquitto sur plafond 256 B **ou** blob1m) :
+**non atteint**. NanoMQ n’améliore pas le débit livré sous ce harness (souvent
+pire en fan-out 256 B ; blob1m au mieux à égalité, CPU Nano ~2× plus haut).
+
+**Conséquence** : pas de profil broker `nanomq` dans le code. Les trous
+ranking `container_cpu_high` / `broker_limited` restent un plafond Mosquitto
+structurel ; les distinguer via `broker_ceiling_ingress` /
+`client_ceiling_ingress` (ce document), pas via un swap de broker.
+
+Raw : `logs/gate-nanomq-2t-summary.txt`.
+
+## Analyse : pourquoi NanoMQ « perd » ici alors que les benches publics le placent devant
+
+Les chiffres publics ([EMQ Mosquitto vs NanoMQ](https://www.emqx.com/en/blog/open-mqtt-benchmarking-comparison-mosquitto-vs-nanomq)) ne mesurent **pas** la même chose que notre gate.
+
+### Écart de méthodo
+
+| Dimension | Benches publics EMQ | Notre gate / `broker_ceiling_ingress` |
+|---|---|---|
+| Hardware | AWS c5.4xlarge **16 vCPU** | Host local i7-3770, broker pin **2 CPU** (`1,5`) |
+| Outil | XMeter (JMeter) | emqtt-bench |
+| Scénario phare NanoMQ | **Fan-out** 5 pubs → 1000 subs (egress 250k) | **Fan-in** N pubs → **1** sub ref |
+| Fan-in public | Shared sub + **500** consumers | 1 consumer exact topic |
+| Payload | 16 B QoS1 | 256 B / 1 MiB QoS0 |
+| Charge « enterprise » | Dizaines de k connexions / topics | ~32–128 clients loadgen |
+
+Sur le basic set public, Mosquitto et NanoMQ sont **similaires**. NanoMQ tire son épingle du jeu quand le multi-cœur parallélise beaucoup de sessions sortantes (fan-out) ou beaucoup de paires pub/sub (p2p 50k topics).
+
+### Diagnostics locaux (2026-07-14, host-net, NanoMQ `-S 65535`)
+
+Fan-in 32 pubs → 1 sub, 256 B QoS0 (topologie gate) :
+
+| Broker | recv med |
+|---|---|
+| Mosquitto | ~30–32k (suit l’offre) |
+| NanoMQ 2 threads (cpuset 1,5) | ~4.5–5.5k |
+| NanoMQ 8 threads (unpinned) | ~1.7–5.3k |
+
+Même constat avec un subscriber **Paho** Python (plus lent, mais même ordre) : Mosquitto ~7.7k > NanoMQ wide ~6.5k > NanoMQ 2t ~4.8k. Ce n’est donc pas seulement `emqtt-bench -A once`.
+
+À **faible** fan-in (4 pubs → 1 sub, offre 4k) : les trois brokers livrent ~4k — pas de régression NanoMQ.
+
+Fan-out 8 pubs × 100 subs, 16 B (proche de l’esprit public) :
+
+| Broker | recv agrégé med | vs Mosq |
+|---|---|---|
+| Mosquitto | ~65k | — |
+| NanoMQ 2t | ~85k | **+31 %** |
+| NanoMQ 8t | ~56k | −14 % (contention sur ce CPU) |
+
+→ Sur **fan-out**, NanoMQ 2t **bat** Mosquitto, cohérent avec le narratif public. Notre critère GO (1.5× sur le plafond **fan-in 1-sub**) était mal aligné avec là où NanoMQ excelle.
+
+### Ce qui bloque concrètement
+
+1. **Topologie** : le plafond utile du harness (`broker_ceiling_ingress`, beaucoup d’ingress vers une ref sub) stress le chemin **many writers → one session queue**. Mosquitto mono-thread y est efficace ; le modèle actor NanoMQ sérialise / contensionne davantage vers un seul subscriber.
+2. **Hardware / pin** : 2 cœurs ne reproduisent pas le gain 16 vCPU des benches EMQ ; plus de threads NanoMQ n’a pas sauvé le fan-in 1-sub et a parfois nui.
+3. **Métrique gate** : on jugeait le **recv d’un seul sub**, pas l’egress fan-out multiplié — métrique défavorable à NanoMQ et peu représentative des pubs marketing.
+4. **blob1m** : plafonds proches (~130–170 msg/s) — bound mémoire/CPU payload, pas le multi-thread messaging.
+
+### Implications pour le bench client
+
+- Un swap NanoMQ **n’aurait pas** levé les `container_cpu_high` / trous ranking mesurés en many-to-one / gros payload sous Mosquitto pin 2 CPU.
+- Si on veut un broker « ceiling » pour pousser les clients plus loin, il faudrait soit un scénario **fan-out / shared-sub** (où NanoMQ aide), soit accepter que le plafond Mosquitto many-to-one est le référentiel réaliste du harness actuel.
+- Les benches publics restent crédibles dans **leur** cadre ; ils ne contredisent pas le NO-GO du plan une fois la topologie alignée.
