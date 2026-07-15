@@ -654,7 +654,12 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
 
 def load_results(input_dir: Path) -> List[ResultDoc]:
     docs: List[ResultDoc] = []
-    paths = sorted(input_dir.glob("*.json"))
+    # Skip ephemeral local artefacts (gitignored ``_*.json`` / smoke probes).
+    paths = sorted(
+        path
+        for path in input_dir.glob("*.json")
+        if not path.name.startswith("_") and not path.name.endswith("-smoke.json")
+    )
     for path in paths:
         data = _load_json(path)
         if data is None:

@@ -21,6 +21,10 @@ generalized behind a per-library adapter layer.
 | `amqtt` | [Yakifo/amqtt](https://github.com/Yakifo/amqtt) | asyncio client only (MQTT 3.1.1; v5 refused) |
 | `awscrt` | [awslabs/aws-crt-python](https://github.com/awslabs/aws-crt-python) | AWS Common Runtime (`aws-c-mqtt`) — **native** engine, not pure Python |
 
+Published A/B column **`paho-fork`**: same Paho adapter against a local
+checkout (`--client paho --client-path /path/to/fork`), relabeled in results for
+side-by-side matrix comparison. Not a separate adapter.
+
 ### Experimental catalogue (separate rankings)
 
 | Client | Repository | Notes |
