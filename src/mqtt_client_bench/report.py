@@ -35,7 +35,7 @@ def _esc(value: Any) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
-_CLIENT_ORDER = ("awscrt", "gmqtt", "paho", "amqtt", "aiomqtt", "zmqtt", "aiomqtt3")
+_CLIENT_ORDER = ("awscrt", "gmqtt", "paho", "amqtt", "aiomqtt", "zmqtt", "aiomqtt3", "paho-fork")
 
 # Rate-capped / functional / niche scenarios: primary msg/s either echoes an
 # injected ceiling or is only meaningful for one client (paho-native callbacks).
@@ -46,6 +46,8 @@ _CHART_EXCLUDED_SCENARIOS = frozenset(
         "e2e_integrity",
         "sub_callback_matching",
         "remaining_length_boundaries",
+        "broker_ceiling_ingress",
+        "client_ceiling_ingress",
     }
 )
 _CHART_EXCLUDED_ORDER = (
@@ -53,6 +55,8 @@ _CHART_EXCLUDED_ORDER = (
     "e2e_integrity",
     "sub_callback_matching",
     "remaining_length_boundaries",
+    "broker_ceiling_ingress",
+    "client_ceiling_ingress",
 )
 
 # Failures that reflect how the SUT behaved under the offered load (or its
@@ -142,6 +146,7 @@ def _protocol_from_row_id(row_id: str) -> str:
 # same colour anywhere on the site.
 _CLIENT_COLORS = {
     "paho": "#0f6e56",
+    "paho-fork": "#1a9b74",
     "gmqtt": "#245b7a",
     "aiomqtt": "#9a5b12",
     "amqtt": "#6b4f7a",
@@ -211,7 +216,7 @@ def _performance_matrix_html(
       <section class="panel">
         <div class="panel-head">
           <h2>Performance matrix</h2>
-          <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols. Best result in each row is highlighted, unless every client ties (rate-capped scenario). Rate-capped / niche checks (<code>duplex_gateway</code>, <code>e2e_integrity</code>, <code>sub_callback_matching</code>, <code>remaining_length_boundaries</code>) are listed last and omitted from the chart above. Client load misses and capability gaps are listed in Client issues at the bottom.</p>
+          <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols. Best result in each row is highlighted, unless every client ties (rate-capped scenario). Rate-capped / niche / probe checks (<code>duplex_gateway</code>, <code>e2e_integrity</code>, <code>sub_callback_matching</code>, <code>remaining_length_boundaries</code>, ceiling probes) are listed last and omitted from the chart above. Client load misses and capability gaps are listed in Client issues at the bottom.</p>
         </div>
         <div class="table-wrap table-wrap-sticky-col">
           <table class="matrix">
