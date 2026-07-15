@@ -218,6 +218,8 @@ class AdapterRegistryTests(unittest.TestCase):
         self.assertIn("awscrt", STABLE_CLIENTS)
         self.assertIn("zmqtt", EXPERIMENTAL_CLIENTS)
         self.assertIn("aiomqtt3", EXPERIMENTAL_CLIENTS)
+        self.assertIn("paho-fork", EXPERIMENTAL_CLIENTS)
+        self.assertNotIn("paho-fork", STABLE_CLIENTS)
 
     def test_implemented_clients_accept_core_points(self):
         point = {"payload": "telemetry256", "qos_publish": 0, "protocol": "MQTTv311"}

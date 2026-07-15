@@ -13,6 +13,7 @@ from mqtt_client_bench.adapters.awscrt import AwscrtAdapter
 from mqtt_client_bench.adapters.base import AdapterCapabilities, MqttClientAdapter
 from mqtt_client_bench.adapters.gmqtt import GmqttAdapter
 from mqtt_client_bench.adapters.paho import PahoAdapter
+from mqtt_client_bench.adapters.paho_fork import PahoForkAdapter
 from mqtt_client_bench.adapters.zmqtt import ZmqttAdapter
 
 _ADAPTERS: Dict[str, Type] = {
@@ -23,6 +24,7 @@ _ADAPTERS: Dict[str, Type] = {
     "awscrt": AwscrtAdapter,
     "zmqtt": ZmqttAdapter,
     "aiomqtt3": Aiomqtt3Adapter,
+    "paho-fork": PahoForkAdapter,
 }
 
 CLIENT_NAMES = tuple(_ADAPTERS.keys())
@@ -36,6 +38,7 @@ EXPERIMENTAL_CLIENTS = tuple(
 # Module prefixes purged when injecting a client_path checkout.
 _CLIENT_MODULE_PREFIXES = {
     "paho": ("paho",),
+    "paho-fork": ("paho",),
     "gmqtt": ("gmqtt",),
     "aiomqtt": ("aiomqtt",),
     "aiomqtt3": ("aiomqtt", "mqtt5"),
