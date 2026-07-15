@@ -21,16 +21,13 @@ generalized behind a per-library adapter layer.
 | `amqtt` | [Yakifo/amqtt](https://github.com/Yakifo/amqtt) | asyncio client only (MQTT 3.1.1; v5 refused) |
 | `awscrt` | [awslabs/aws-crt-python](https://github.com/awslabs/aws-crt-python) | AWS Common Runtime (`aws-c-mqtt`) — **native** engine, not pure Python |
 
-Published A/B column **`paho-fork`**: same Paho adapter against a local
-checkout (`--client paho --client-path /path/to/fork`), relabeled in results for
-side-by-side matrix comparison. Not a separate adapter.
-
 ### Experimental catalogue (separate rankings)
 
 | Client | Repository | Notes |
 |---|---|---|
 | `zmqtt` | [faststream-community/zMQTT](https://github.com/faststream-community/zMQTT) | Pure asyncio MQTT 3.1.1/5 (Alpha) — `pip install 'mqtt-client-bench[zmqtt]'` |
 | `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | aiomqtt **v3** alpha (mqtt5 sans-io, MQTT5 only). **Cannot** share an env with `aiomqtt` v2 |
+| `paho-fork` | [yoch/paho.mqtt.python](https://github.com/yoch/paho.mqtt.python) | Fork of Eclipse Paho (same adapter as `paho`); measure with `--client-path` + `--suite experimental` |
 
 ```bash
 python -m mqtt_client_bench.run clients -v
@@ -50,7 +47,7 @@ Wrappers of Paho/gmqtt (`fastapi-mqtt`, `jmqtt`, …) are intentionally excluded
 |---|---|
 | `core` | Stable publication suite (experimental clients **refused**) |
 | `full` | Extended stable scenarios |
-| `experimental` | Same contracts as `core`, for `zmqtt` / `aiomqtt3` rankings |
+| `experimental` | Same contracts as `core`, for `zmqtt` / `aiomqtt3` / `paho-fork` rankings |
 
 ### Comparability matrix (high level)
 
