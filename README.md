@@ -27,7 +27,8 @@ generalized behind a per-library adapter layer.
 |---|---|---|
 | `zmqtt` | [faststream-community/zMQTT](https://github.com/faststream-community/zMQTT) | Pure asyncio MQTT 3.1.1/5 (Alpha) — `pip install 'mqtt-client-bench[zmqtt]'` |
 | `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | aiomqtt **v3** alpha (mqtt5 sans-io, MQTT5 only). **Cannot** share an env with `aiomqtt` v2 |
-| `paho-fork` | [yoch/paho.mqtt.python](https://github.com/yoch/paho.mqtt.python) | Fork of Eclipse Paho (same adapter as `paho`); measure with `--client-path` + `--suite experimental` |
+| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (alpha ≥0.1.0a3, `publish_nowait` on bridge loop) — `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
+| `mqttium-compat` | same | Paho VERSION2 façade only (`mqttium.compat.paho`) — ranked separately from `mqttium` |
 
 ```bash
 python -m mqtt_client_bench.run clients -v
@@ -47,7 +48,7 @@ Wrappers of Paho/gmqtt (`fastapi-mqtt`, `jmqtt`, …) are intentionally excluded
 |---|---|
 | `core` | Stable publication suite (experimental clients **refused**) |
 | `full` | Extended stable scenarios |
-| `experimental` | Same contracts as `core`, for `zmqtt` / `aiomqtt3` / `paho-fork` rankings |
+| `experimental` | Same contracts as `core`, for `zmqtt` / `aiomqtt3` / `mqttium` / `mqttium-compat` rankings |
 
 ### Comparability matrix (high level)
 
@@ -63,6 +64,7 @@ Wrappers of Paho/gmqtt (`fastapi-mqtt`, `jmqtt`, …) are intentionally excluded
 | `aiomqtt3` rankings | **MQTTv5 peers only** | v5-only client; calibrate via `protocol_capacities.MQTTv5` |
 | Netem (`lan`/`wan`/`edge`) | diagnostic only | marked `non_comparable` on loopback |
 | Smoke profile | never | always `non_comparable` |
+| I/O peer groups | within the same `io_model` | `sync` (paho, mqttium-compat) ≠ `asyncio_bridged` (aiomqtt, gmqtt, mqttium, …) ≠ `crt_event_loop` (awscrt); `mqttium` ≠ `mqttium-compat` |
 
 ## Quick start
 
@@ -93,7 +95,7 @@ python -m mqtt_client_bench.run broker down
 ```
 
 Optional extras: `.[gmqtt]`, `.[aiomqtt]`, `.[amqtt]`, `.[awscrt]`, or `.[all]`.
-Experimental: `.[zmqtt]` or `.[aiomqtt3]` (separate environments).
+Experimental: `.[zmqtt]`, `.[aiomqtt3]`, or `.[mqttium]` (aiomqtt3 needs a separate env).
 
 ## Commands
 
@@ -170,11 +172,26 @@ feeds the primary throughput.
 
 Async libraries use a sync facade (`AsyncioBridge`). That cost is assumed and
 documented; scenarios where it is not representative (`fleet`, native callback
-matching) are refused for bridged clients. All bridged adapters share the same
-submission discipline: `publish()` allocates a synthetic mid, schedules the
-coroutine on the loop (`create_task`, non-blocking) and completion is reported
-via `on_publish` — no adapter pays a per-publish blocking bridge round-trip
-that its peers do not.
+matching) are refused for bridged clients. Bridged adapters share one submission
+discipline: `publish()` allocates a synthetic mid, enqueues work through a
+**coalesced** cross-thread wake (one `call_soon_threadsafe` per burst), and
+reports completion via `on_publish`. QoS0 paths that can publish synchronously
+on the loop use `schedule_call` (no `asyncio.Task` per message: mqttium
+`publish_nowait`, gmqtt `_connection.publish`); await-only APIs keep
+`schedule_coro`. No adapter pays a per-publish *blocking* bridge round-trip
+that its peers do not. Rankings remain peer-grouped by `io_model` (sync vs
+asyncio_bridged vs CRT); do not treat paho and aiomqtt as interchangeable.
+
+`mqttium` uses ``AsyncClient.publish_nowait`` on the bridge event-loop thread
+(PyPI ≥0.1.0a3; loop-bound, not cross-thread). Older wheels fall back to
+``await publish(..., nowait=True)``. The Paho façade remains a separate client
+id (`mqttium-compat`). Bench ``max_queued`` maps to
+``max_pending_outbound_messages`` (``EngineConfig.max_queued`` was removed in
+0.1.0a2). On a3 the façade does not expose ``max_outbound_inflight``; the
+compat adapter rebuilds the inner ``AsyncClient`` before connect so QoS≥1
+scenarios stay comparable. Campaign helpers:
+`scripts/run_mqttium_a3_campaign.sh`,
+`scripts/run_asyncio_bridged_qos0_campaign.sh`.
 
 Mosquitto provides a local broker on `127.0.0.1:11883` (TCP) and
 `127.0.0.1:11884` (TLS — established TLS, no TLS 1.3 guarantee claimed).
@@ -235,7 +252,7 @@ src/mqtt_client_bench/
   run.py              CLI
   harness.py          orchestration / barriers / drain
   scenarios.py        catalogue
-  adapters/           paho, gmqtt, aiomqtt, amqtt, awscrt, zmqtt, aiomqtt3
+  adapters/           paho, gmqtt, aiomqtt, amqtt, awscrt, zmqtt, aiomqtt3, mqttium, mqttium-compat
   roles/              worker processes
 docker-compose.yml    Mosquitto
 mosquitto/ certs/     broker config + TLS material

@@ -218,8 +218,10 @@ class AdapterRegistryTests(unittest.TestCase):
         self.assertIn("awscrt", STABLE_CLIENTS)
         self.assertIn("zmqtt", EXPERIMENTAL_CLIENTS)
         self.assertIn("aiomqtt3", EXPERIMENTAL_CLIENTS)
-        self.assertIn("paho-fork", EXPERIMENTAL_CLIENTS)
-        self.assertNotIn("paho-fork", STABLE_CLIENTS)
+        self.assertIn("mqttium", EXPERIMENTAL_CLIENTS)
+        self.assertIn("mqttium-compat", EXPERIMENTAL_CLIENTS)
+        self.assertNotIn("mqttium", STABLE_CLIENTS)
+        self.assertNotIn("mqttium-compat", STABLE_CLIENTS)
 
     def test_implemented_clients_accept_core_points(self):
         point = {"payload": "telemetry256", "qos_publish": 0, "protocol": "MQTTv311"}
@@ -341,6 +343,39 @@ class BridgedAdapterTests(unittest.TestCase):
         self.assertEqual(len(connected), 1)
         self.assertEqual(published[0][2], 7)
         self.assertEqual(subscribed[0][2], 3)
+
+    def test_schedule_coro_coalesces_wake(self):
+        import asyncio
+        import time
+
+        from mqtt_client_bench.adapters.async_bridge import AsyncioBridge
+
+        bridge = AsyncioBridge()
+        bridge.start()
+        done = []
+        wakes = {"n": 0}
+        original = bridge._drain_pending
+
+        def counting_drain():
+            wakes["n"] += 1
+            original()
+
+        bridge._drain_pending = counting_drain  # type: ignore[method-assign]
+
+        async def _work(i):
+            done.append(i)
+
+        for i in range(32):
+            bridge.schedule_coro(_work(i))
+        deadline = time.time() + 2.0
+        while len(done) < 32 and time.time() < deadline:
+            time.sleep(0.01)
+        bridge.stop()
+        self.assertEqual(sorted(done), list(range(32)))
+        # One coalesced wake for the burst (may be 1; allow a few if the drain
+        # races a second append before clearing the flag).
+        self.assertGreaterEqual(wakes["n"], 1)
+        self.assertLessEqual(wakes["n"], 8)
 
     def test_alloc_mid_cycles(self):
         from mqtt_client_bench.adapters.async_bridge import BridgedAdapterBase
@@ -690,8 +725,72 @@ class CeilingProbeTests(unittest.TestCase):
         sys_counters = {"dropped_delta": 20000}
         validity = validate_run(point, [], loadgen, [], sys_counters=sys_counters, loadgen_ref_sub=ref_sub)
         self.assertEqual(validity["bottleneck"], "broker_limited")
-        self.assertIn("sys_publish_dropped", validity["reasons"])
+        self.assertEqual(validity["status"], "inconclusive")
+        self.assertTrue(
+            any(str(r).startswith("sys_publish_dropped") for r in validity["reasons"]),
+            validity["reasons"],
+        )
         self.assertIn("delivery_below_half_offer", validity["reasons"])
+
+    def test_validate_run_sys_drops_fail_closed_subscriber_ingress(self):
+        """Core ranking runs must not stay valid when Mosquitto sheds publishes."""
+        from mqtt_client_bench.harness import validate_run
+
+        point = {
+            "topology": "subscriber_ingress",
+            "cadence": "capacity",
+            "duration_s": 20.0,
+        }
+        workers = [
+            {
+                "ok": True,
+                "role": "subscriber",
+                "msgs_per_s": 16000.0,
+                "subscriber_delivered": 320000,
+            }
+        ]
+        loadgen = {
+            "nominal_rate": 32000.0,
+            "effective_offer_msgs_per_s": 32000.0,
+            "observed_pub_rate": 28000.0,
+            "parsed": {"last_rate": 28000.0, "last_total": 560000, "median_rate": 28000.0},
+        }
+        # > 1% of 32000*20 = 6400
+        sys_counters = {"dropped_delta": 42699}
+        validity = validate_run(point, workers, loadgen, [], sys_counters=sys_counters)
+        self.assertEqual(validity["status"], "inconclusive")
+        self.assertEqual(validity["bottleneck"], "broker_limited")
+        self.assertTrue(
+            any(str(r).startswith("sys_publish_dropped:") for r in validity["reasons"]),
+            validity["reasons"],
+        )
+
+    def test_validate_run_delivery_below_half_subscriber_ingress(self):
+        from mqtt_client_bench.harness import validate_run
+
+        point = {
+            "topology": "subscriber_ingress",
+            "cadence": "capacity",
+            "duration_s": 20.0,
+        }
+        workers = [
+            {
+                "ok": True,
+                "role": "subscriber",
+                "msgs_per_s": 14000.0,
+                "subscriber_delivered": 280000,
+            }
+        ]
+        loadgen = {
+            "nominal_rate": 32000.0,
+            "effective_offer_msgs_per_s": 32000.0,
+            "observed_pub_rate": 30000.0,
+            "parsed": {"last_rate": 30000.0, "last_total": 600000, "median_rate": 30000.0},
+        }
+        validity = validate_run(point, workers, loadgen, [], sys_counters={"dropped_delta": 0})
+        self.assertEqual(validity["status"], "inconclusive")
+        self.assertIn("delivery_below_half_offer", validity["reasons"])
+        self.assertEqual(validity["bottleneck"], "sut_limited")
 
     def test_sys_counters_delta(self):
         from mqtt_client_bench.sys_probe import sys_counters_delta
@@ -713,7 +812,8 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(data["properties"]["schema_version"]["const"], 1)
         self.assertIn("client", data["properties"])
         self.assertIn("awscrt", data["properties"]["client"]["enum"])
-        self.assertIn("paho-fork", data["properties"]["client"]["enum"])
+        self.assertIn("mqttium", data["properties"]["client"]["enum"])
+        self.assertIn("mqttium-compat", data["properties"]["client"]["enum"])
         self.assertIn("yoch/mqtt-python-client-bench", data["$id"])
 
 
@@ -921,8 +1021,10 @@ class ReportTests(unittest.TestCase):
                 matrix_body.index("sub_callback_matching · MQTTv311"),
                 matrix_body.index("remaining_length_boundaries · MQTTv311"),
             )
-            # Matrix header order matches chart: gmqtt before paho.
-            self.assertLess(matrix_body.index(">gmqtt<"), matrix_body.index(">paho<"))
+            # Matrix header order matches chart: gmqtt before paho (io_model badges OK).
+            self.assertLess(matrix_body.index("gmqtt"), matrix_body.index("paho"))
+            self.assertIn("asyncio_bridged", matrix_body)
+            self.assertIn("sync", matrix_body)
             # Compare docs must not inflate the Clients hero stat.
             self.assertRegex(index, r'stat-label">Clients</p>\s*<p class="stat-value">2</p>')
 

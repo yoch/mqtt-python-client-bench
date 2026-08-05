@@ -196,7 +196,7 @@ class AmqttAdapter(BridgedAdapterBase):
             except Exception:  # noqa: BLE001
                 self._fire_on_publish(mid, reason_code=128)
 
-        self._bridge.create_task(_publish())
+        self.schedule_coro(_publish())
         return PublishResult(rc=0, mid=mid)
 
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
@@ -212,5 +212,5 @@ class AmqttAdapter(BridgedAdapterBase):
             except Exception:  # noqa: BLE001
                 self._fire_on_subscribe(mid, [128], None)
 
-        self._bridge.create_task(_subscribe())
+        self.schedule_coro(_subscribe())
         return SubscribeResult(rc=0, mid=mid)
