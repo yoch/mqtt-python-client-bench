@@ -263,16 +263,17 @@ def validate_run(
             if float(observed) < 0.5 * float(offer):
                 reasons.append("loadgen_below_half_nominal")
 
-    # $SYS publish drops over the measure window (inform bottleneck; do not
-    # auto-invalidate core ranking runs — QoS0 drops can be expected under load).
+    # $SYS publish drops over the measure window. Fail closed: a run with
+    # material broker-side drops must not stay "valid" and poison medians
+    # (seen on subscriber_ingress when Mosquitto sheds under CPU pressure).
     dropped_delta = (sys_counters or {}).get("dropped_delta") if sys_counters else None
     drop_threshold = 100
     if offer and float(offer) < float("inf") and duration_s > 0:
         drop_threshold = max(100, int(0.01 * float(offer) * duration_s))
     sys_drops = dropped_delta is not None and int(dropped_delta) > drop_threshold
     diagnostic = "diagnostic" in (point.get("tags") or ()) or topology == "broker_ceiling"
-    if sys_drops and diagnostic:
-        reasons.append("sys_publish_dropped")
+    if sys_drops:
+        reasons.append(f"sys_publish_dropped:{int(dropped_delta)}")
 
     # Delivered rate vs effective offer (ingress / broker ceiling).
     delivered_rate = None
@@ -303,7 +304,10 @@ def validate_run(
         and point.get("cadence") not in ("burst", "microburst")
     ):
         delivery_ratio = float(delivered_rate) / float(offer)
-        if diagnostic and delivery_ratio < 0.5:
+        # Half-offer delivery under ingress/ceiling is not a trustworthy SUT score.
+        if delivery_ratio < 0.5 and (
+            diagnostic or topology in ("subscriber_ingress", "broker_ceiling")
+        ):
             reasons.append("delivery_below_half_offer")
 
     status = "valid" if not reasons else "inconclusive"
@@ -312,6 +316,9 @@ def validate_run(
         bottleneck = "broker_limited"
     elif any(r.startswith("loadgen_") for r in reasons):
         bottleneck = "loadgen_limited"
+    elif any(str(r).startswith("delivery_below_half_offer") for r in reasons):
+        # Ingress delivered ≪ offer without $SYS drops: treat as SUT-limited score.
+        bottleneck = "sut_limited"
     elif not reasons:
         # Near the configured offer: the point is offer-capped, not a SUT score.
         if delivery_ratio is not None and delivery_ratio >= 0.90:

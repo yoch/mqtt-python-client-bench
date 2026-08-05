@@ -188,11 +188,25 @@ class GmqttAdapter(BridgedAdapterBase):
         # outstanding window and structurally bias gmqtt against its peers.
         synth_mid = self.alloc_mid()
 
+        # QoS0: connection.publish is synchronous on the loop thread — avoid a
+        # Task per message (same discipline as mqttium schedule_call).
+        if int(qos) == 0:
+
+            def _publish_qos0() -> None:
+                try:
+                    client._connection.publish(message)
+                    self._fire_on_publish(synth_mid, reason_code=0)
+                except Exception:  # noqa: BLE001
+                    self._fire_on_publish(synth_mid, reason_code=128)
+
+            self.schedule_call(_publish_qos0)
+            return PublishResult(rc=0, mid=synth_mid)
+
         async def _publish():
             real_mid = None
             try:
                 real_mid, package = client._connection.publish(message)
-                if qos > 0 and real_mid is not None:
+                if real_mid is not None:
                     # Register before storing so the PUBACK hook (same loop
                     # thread) can translate the real packet id back.
                     self._real_to_synth[int(real_mid)] = synth_mid
@@ -208,7 +222,7 @@ class GmqttAdapter(BridgedAdapterBase):
                     self._real_to_synth.pop(int(real_mid), None)
                 self._fire_on_publish(synth_mid, reason_code=128)
 
-        self._bridge.create_task(_publish())
+        self.schedule_coro(_publish())
         return PublishResult(rc=0, mid=synth_mid)
 
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:

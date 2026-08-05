@@ -4,18 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Callable, Coroutine, Dict, List, Optional, TypeVar
+from typing import Any, Callable, Coroutine, Deque, Dict, List, Optional, TypeVar
 
 T = TypeVar("T")
 
 
 class AsyncioBridge:
-    """Run coroutines on a dedicated asyncio loop from sync role workers."""
+    """Run coroutines on a dedicated asyncio loop from sync role workers.
+
+Hot-path publish uses ``schedule_coro`` (QoS≥1 / await APIs) or ``schedule_call``
+(QoS0 sync loop work): items are queued under a lock and a single coalesced
+``call_soon_threadsafe`` wakes a loop-side drainer. That avoids one
+``run_coroutine_threadsafe`` (cross-thread Future) per message while keeping
+the sync-worker + outstanding-window contract. QoS0 adapters that can publish
+synchronously on the loop (mqttium ``publish_nowait``, gmqtt
+``_connection.publish``) use ``schedule_call`` so they do not pay an
+``asyncio.Task`` per message.
+    """
 
     def __init__(self) -> None:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
+        self._pending: Deque[Coroutine[Any, Any, Any]] = deque()
+        self._pending_calls: Deque[Callable[[], None]] = deque()
+        self._pending_lock = threading.Lock()
+        self._drain_scheduled = False
 
     @property
     def running(self) -> bool:
@@ -51,6 +66,10 @@ class AsyncioBridge:
         thread = self._thread
         if loop is None or thread is None:
             return
+        with self._pending_lock:
+            self._pending.clear()
+            self._pending_calls.clear()
+            self._drain_scheduled = False
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=10)
         self._loop = None
@@ -62,7 +81,7 @@ class AsyncioBridge:
         if threading.current_thread() is self._thread:
             raise RuntimeError(
                 "AsyncioBridge.run() called from the bridge loop thread; "
-                "schedule work with create_task() instead to avoid deadlock"
+                "schedule work with create_task()/schedule_coro() instead to avoid deadlock"
             )
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=timeout)
@@ -71,9 +90,70 @@ class AsyncioBridge:
         return self._thread is not None and threading.current_thread() is self._thread
 
     def create_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Future:
+        """Schedule one coroutine via ``run_coroutine_threadsafe`` (legacy / rare paths).
+
+        Prefer ``schedule_coro`` on the publish hot path so many messages share one
+        cross-thread wake.
+        """
         if self._loop is None:
             raise RuntimeError("asyncio bridge is not running")
         return asyncio.run_coroutine_threadsafe(coro, self._loop)
+
+    def schedule_coro(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Enqueue ``coro`` and coalesce a single loop wake to spawn local tasks."""
+        if self._loop is None:
+            raise RuntimeError("asyncio bridge is not running")
+        if threading.current_thread() is self._thread:
+            # Already on the loop thread: spawn directly (no cross-thread wake).
+            asyncio.create_task(coro)
+            return
+        wake = False
+        with self._pending_lock:
+            self._pending.append(coro)
+            if not self._drain_scheduled:
+                self._drain_scheduled = True
+                wake = True
+        if wake:
+            self._loop.call_soon_threadsafe(self._drain_pending)
+
+    def schedule_call(self, fn: Callable[[], None]) -> None:
+        """Enqueue a sync loop-thread callback (no ``asyncio.Task`` per item).
+
+        Same coalesced wake as ``schedule_coro``, for QoS0 publish paths that
+        only need ``publish_nowait`` + ``on_publish`` on the owning loop.
+        """
+        if self._loop is None:
+            raise RuntimeError("asyncio bridge is not running")
+        if threading.current_thread() is self._thread:
+            fn()
+            return
+        wake = False
+        with self._pending_lock:
+            self._pending_calls.append(fn)
+            if not self._drain_scheduled:
+                self._drain_scheduled = True
+                wake = True
+        if wake:
+            self._loop.call_soon_threadsafe(self._drain_pending)
+
+    def _drain_pending(self) -> None:
+        """Loop-thread callback: run sync calls, then spawn a task per coro."""
+        while True:
+            with self._pending_lock:
+                calls = list(self._pending_calls)
+                self._pending_calls.clear()
+                if not self._pending and not calls:
+                    self._drain_scheduled = False
+                    return
+                batch = list(self._pending)
+                self._pending.clear()
+            for fn in calls:
+                try:
+                    fn()
+                except Exception:  # noqa: BLE001
+                    pass
+            for coro in batch:
+                asyncio.create_task(coro)
 
 
 def topic_matches_sub(sub: str, topic: str) -> bool:
@@ -159,6 +239,16 @@ class BridgedAdapterBase:
             mid = self._next_mid
             self._next_mid = 1 if self._next_mid >= 65535 else self._next_mid + 1
             return mid
+
+    def schedule_coro(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Hot-path: enqueue work with a coalesced cross-thread wake."""
+        self._ensure_bridge()
+        self._bridge.schedule_coro(coro)
+
+    def schedule_call(self, fn: Callable[[], None]) -> None:
+        """Hot-path sync callback on the bridge loop (no Task per item)."""
+        self._ensure_bridge()
+        self._bridge.schedule_call(fn)
 
     def message_callback_add(self, topic: str, callback: Callable[..., Any]) -> None:
         self._topic_callbacks[topic] = callback

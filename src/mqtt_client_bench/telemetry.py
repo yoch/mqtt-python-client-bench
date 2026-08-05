@@ -190,7 +190,7 @@ def environment_metadata() -> dict:
     import socket
 
     installed: dict = {}
-    for pkg in ("paho", "gmqtt", "aiomqtt", "amqtt", "awscrt", "zmqtt"):
+    for pkg in ("paho", "gmqtt", "aiomqtt", "amqtt", "awscrt", "zmqtt", "mqttium"):
         try:
             mod = __import__(pkg if pkg != "paho" else "paho.mqtt.client")
             if pkg == "paho":

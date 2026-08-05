@@ -35,7 +35,17 @@ def _esc(value: Any) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
-_CLIENT_ORDER = ("awscrt", "gmqtt", "paho", "amqtt", "aiomqtt", "zmqtt", "aiomqtt3", "paho-fork")
+_CLIENT_ORDER = (
+    "awscrt",
+    "gmqtt",
+    "paho",
+    "amqtt",
+    "aiomqtt",
+    "zmqtt",
+    "aiomqtt3",
+    "mqttium",
+    "mqttium-compat",
+)
 
 # Rate-capped / functional / niche scenarios: primary msg/s either echoes an
 # injected ceiling or is only meaningful for one client (paho-native callbacks).
@@ -78,6 +88,8 @@ _ENVIRONMENT_REASON_PREFIXES = (
     "loadgen_emitted_nothing",
     "loadgen_below_half_nominal",
     "barrier_failed",
+    "sys_publish_dropped",
+    "delivery_below_half_offer",
 )
 
 # Values within this relative tolerance of the row/series maximum are treated
@@ -109,6 +121,10 @@ def _short_reason(reason: str) -> str:
         return reason[len(_CLIENT_CAPABILITY_PREFIX) :]
     if reason.startswith("container_cpu_high:"):
         return "broker_cpu"
+    if reason.startswith("sys_publish_dropped"):
+        return "broker_drops"
+    if reason.startswith("delivery_below_half_offer"):
+        return "delivery_lt_half_offer"
     if reason.startswith("worker_error:"):
         return "worker_error"
     if reason.startswith("barrier_failed"):
@@ -146,7 +162,8 @@ def _protocol_from_row_id(row_id: str) -> str:
 # same colour anywhere on the site.
 _CLIENT_COLORS = {
     "paho": "#0f6e56",
-    "paho-fork": "#1a9b74",
+    "mqttium": "#1a9b74",
+    "mqttium-compat": "#5a8f7a",
     "gmqtt": "#245b7a",
     "aiomqtt": "#9a5b12",
     "amqtt": "#6b4f7a",
@@ -155,6 +172,19 @@ _CLIENT_COLORS = {
     "aiomqtt3": "#4a5a78",
 }
 _FALLBACK_PALETTE = ["#5c6b64", "#7a6a4f", "#4f6b7a", "#7a4f5c"]
+
+# Peer-group annotation for matrix headers (sync vs bridged vs CRT).
+_CLIENT_IO_MODEL = {
+    "paho": "sync",
+    "mqttium-compat": "sync",
+    "gmqtt": "asyncio_bridged",
+    "aiomqtt": "asyncio_bridged",
+    "amqtt": "asyncio_bridged",
+    "zmqtt": "asyncio_bridged",
+    "aiomqtt3": "asyncio_bridged",
+    "mqttium": "asyncio_bridged",
+    "awscrt": "crt_event_loop",
+}
 
 
 def _sort_clients(clients: Sequence[str]) -> List[str]:
@@ -176,7 +206,13 @@ def _client_colors(clients: Sequence[str]) -> Dict[str, str]:
 
 def _client_swatch(name: str, colors: Dict[str, str]) -> str:
     color = colors.get(name, "#5c6b64")
-    return f'<span class="swatch" style="background:{_esc(color)}"></span>{_esc(name)}'
+    io_model = _CLIENT_IO_MODEL.get(name)
+    badge = (
+        f' <span class="io-badge" title="I/O model peer group">{_esc(io_model)}</span>'
+        if io_model
+        else ""
+    )
+    return f'<span class="swatch" style="background:{_esc(color)}"></span>{_esc(name)}{badge}'
 
 
 def _performance_matrix_html(
@@ -216,7 +252,7 @@ def _performance_matrix_html(
       <section class="panel">
         <div class="panel-head">
           <h2>Performance matrix</h2>
-          <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols. Best result in each row is highlighted, unless every client ties (rate-capped scenario). Rate-capped / niche / probe checks (<code>duplex_gateway</code>, <code>e2e_integrity</code>, <code>sub_callback_matching</code>, <code>remaining_length_boundaries</code>, ceiling probes) are listed last and omitted from the chart above. Client load misses and capability gaps are listed in Client issues at the bottom.</p>
+          <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols. Best result in each row is highlighted, unless every client ties (rate-capped scenario). Peer groups matter: compare <code>sync</code>, <code>asyncio_bridged</code>, and <code>crt_event_loop</code> clients within the same I/O model (badges under each name). <code>mqttium</code> (native) and <code>mqttium-compat</code> are not substitutes. Rate-capped / niche / probe checks are listed last and omitted from the chart above.</p>
         </div>
         <div class="table-wrap table-wrap-sticky-col">
           <table class="matrix">
@@ -281,13 +317,90 @@ def _client_signals_html(docs: Sequence[ResultDoc], colors: Dict[str, str]) -> s
       <section class="panel panel-signal">
         <div class="panel-head">
           <h2>Client issues</h2>
-          <p class="hint">SUT-attributable problems kept out of the throughput median on purpose: missed open-loop targets / protocol failures under load, and points refused for missing adapter capabilities. Environment issues (broker CPU, loadgen, barriers) stay in All results only.</p>
+          <p class="hint">SUT-attributable problems kept out of the throughput median on purpose: missed open-loop targets / protocol failures under load, and points refused for missing adapter capabilities. Broker drops / CPU saturation invalidate runs (see Environment warnings above) and must not poison medians.</p>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
                 <th>Kind</th>
+                <th>Client</th>
+                <th>Scenario</th>
+                <th>Signal</th>
+                <th class="num">Failed runs</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {"".join(body)}
+            </tbody>
+          </table>
+        </div>
+      </section>
+"""
+
+
+def _environment_warnings_html(docs: Sequence[ResultDoc]) -> str:
+    """Large, explicit banner when broker/loadgen invalidated ranking runs."""
+    rows: List[tuple] = []
+    drop_docs = 0
+    cpu_docs = 0
+    for doc in docs:
+        if doc.kind != "scenario":
+            continue
+        env = doc.environment_reasons or {}
+        if not env:
+            continue
+        if "broker_drops" in env:
+            drop_docs += 1
+        if "broker_cpu" in env:
+            cpu_docs += 1
+        detail = ", ".join(f"{name}×{count}" for name, count in sorted(env.items()))
+        rows.append(
+            (
+                doc.client or "?",
+                doc.scenario or doc.title,
+                detail,
+                doc.inconclusive_runs,
+                doc.total_runs,
+                doc.slug,
+            )
+        )
+    if not rows:
+        return ""
+
+    body = []
+    for client, scenario, detail, failed, total, slug in sorted(rows, key=lambda r: (r[0], r[1])):
+        body.append(
+            f"<tr>"
+            f"<td class=\"mono\">{_esc(client)}</td>"
+            f"<td class=\"mono\">{_esc(scenario)}</td>"
+            f"<td class=\"mono\">{_esc(detail)}</td>"
+            f"<td class=\"num\">{_esc(failed)}/{_esc(total)}</td>"
+            f"<td><a href=\"runs/{_esc(slug)}.html\">detail</a></td>"
+            f"</tr>"
+        )
+    summary_bits = []
+    if drop_docs:
+        summary_bits.append(f"{drop_docs} result file(s) with broker $SYS publish drops")
+    if cpu_docs:
+        summary_bits.append(f"{cpu_docs} with Mosquitto CPU ≥85%")
+    summary = "; ".join(summary_bits) if summary_bits else f"{len(rows)} environment-limited result file(s)"
+
+    return f"""
+      <section class="panel panel-warning" role="alert">
+        <div class="panel-head">
+          <h2>WARNING — Environment invalidations — do not trust affected medians</h2>
+          <p class="hint warning-lead">
+            { _esc(summary) }. Runs with material Mosquitto <code>$SYS</code> publish drops
+            or broker CPU saturation are <strong>inconclusive</strong> (fail-closed):
+            their throughput must not enter ranking medians. Re-run those scenarios on an idle host.
+          </p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
                 <th>Client</th>
                 <th>Scenario</th>
                 <th>Signal</th>
@@ -822,6 +935,7 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
     ]
     overview_payload = {"scenarios": chart_scenarios, "series": overview_series}
     matrix_html = _performance_matrix_html(matrix_scenarios, scenario_clients, by_key, colors)
+    env_warnings_html = _environment_warnings_html(docs)
     signals_html = _client_signals_html(docs, colors)
 
     non_comparable_n = sum(1 for doc in docs if doc.non_comparable)
@@ -874,6 +988,8 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
         <p class="meta">generated { _esc(generated_at) }</p>
         {stats_html}
       </section>
+
+      {env_warnings_html}
 
       <section class="panel">
         <div class="panel-head">
