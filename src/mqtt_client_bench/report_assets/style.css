@@ -11,8 +11,8 @@
   --ok: #0f6e56;
   --shadow: 0 18px 40px rgba(28, 42, 36, 0.08);
   --radius: 18px;
-  --font-display: "Fraunces", Georgia, serif;
-  --font-body: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --font-display: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
 }
 
 * {
@@ -284,11 +284,40 @@ a {
 
 .chart-wrap {
   position: relative;
-  height: 320px;
 }
 
-.chart-wrap-wide {
-  height: 420px;
+.chart-scroll {
+  overflow-x: auto;
+  padding-bottom: 0.25rem;
+}
+
+.chart-svg {
+  display: block;
+  height: auto;
+  max-width: 100%;
+  min-width: 100%;
+}
+
+.chart-svg .grid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+
+.chart-svg .axis-line {
+  stroke: rgba(28, 42, 36, 0.35);
+  stroke-width: 1;
+}
+
+.chart-svg .whisker {
+  stroke: rgba(28, 42, 36, 0.55);
+  stroke-width: 1.5;
+}
+
+.chart-svg text.axis,
+.chart-svg text.cat {
+  fill: var(--muted);
+  font-family: var(--font-body);
+  font-size: 11px;
 }
 
 table.matrix {
@@ -418,4 +447,123 @@ table.matrix .swatch {
   .chart-wrap {
     height: 260px;
   }
+}
+
+/* ---- Peer-group matrix, empty-cell states, navigation ---- */
+
+.site-nav {
+  display: flex;
+  gap: 1rem;
+  margin-top: 0.35rem;
+}
+
+.site-nav a {
+  color: var(--muted);
+  font-size: 0.9rem;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+
+.site-nav a:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+table.matrix th.group-head {
+  text-align: center;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ink);
+  border-bottom: 2px solid var(--accent-soft);
+  padding-bottom: 0.25rem;
+}
+
+table.matrix th.group-head .group-sub {
+  display: block;
+  font-weight: 400;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+/* A number the harness did not attribute to the client itself. */
+table.matrix td.suspect {
+  text-decoration: underline dotted rgba(154, 91, 18, 0.8);
+  text-underline-offset: 3px;
+}
+
+table.matrix td.empty {
+  color: var(--muted);
+  font-weight: 600;
+  cursor: help;
+}
+
+td.empty-refused,
+.legend-glyph.empty-refused {
+  color: #6b5c7a;
+}
+
+td.empty-failed,
+.legend-glyph.empty-failed {
+  color: var(--bad);
+}
+
+td.empty-environment,
+.legend-glyph.empty-environment {
+  color: var(--warn);
+}
+
+td.empty-missing,
+.legend-glyph.empty-missing {
+  color: rgba(92, 107, 100, 0.6);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.legend-glyph {
+  display: inline-block;
+  min-width: 1rem;
+  text-align: center;
+  font-weight: 700;
+}
+
+.legend-list {
+  list-style: none;
+  padding-left: 0;
+}
+
+.legend-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.io-badge.badge-exp {
+  background: #f4e6cf;
+  color: var(--warn);
+}
+
+.prose {
+  line-height: 1.65;
+  color: var(--ink);
+  max-width: 68ch;
+}
+
+.prose code {
+  font-size: 0.9em;
 }

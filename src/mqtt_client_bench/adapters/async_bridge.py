@@ -11,6 +11,12 @@ from typing import Any, Callable, Coroutine, Deque, Dict, List, Optional, TypeVa
 T = TypeVar("T")
 
 
+# Upper bound on concurrently awaited publish coroutines. Must exceed any
+# scenario's ``outstanding`` window (max 100 in ``pub_qos1_inflight``) so the
+# pool never becomes the throughput limit; workers are only created on demand.
+MAX_BRIDGE_WORKERS = 256
+
+
 class AsyncioBridge:
     """Run coroutines on a dedicated asyncio loop from sync role workers.
 
@@ -19,18 +25,30 @@ Hot-path publish uses ``schedule_coro`` (QoS≥1 / await APIs) or ``schedule_cal
 ``call_soon_threadsafe`` wakes a loop-side drainer. That avoids one
 ``run_coroutine_threadsafe`` (cross-thread Future) per message while keeping
 the sync-worker + outstanding-window contract. QoS0 adapters that can publish
-synchronously on the loop (mqttium ``publish_nowait``, gmqtt
-``_connection.publish``) use ``schedule_call`` so they do not pay an
-``asyncio.Task`` per message.
+synchronously on the loop (mqttium ``publish_nowait``, gmqtt ``publish``) use
+``schedule_call`` so they do not pay an ``asyncio.Task`` per message.
+
+``schedule_coro`` hands each coroutine to a **reused** worker task rather than
+spawning one ``asyncio.Task`` per message. Otherwise clients whose only publish
+API is ``await``-based (aiomqtt, amqtt, zmqtt, aiomqtt3) would pay a Task
+allocation per message that ``schedule_call`` clients do not — a harness tax set
+by API shape rather than by the library's own cost. Workers are created lazily up
+to ``MAX_BRIDGE_WORKERS``, so concurrency still matches the outstanding window.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_workers: int = MAX_BRIDGE_WORKERS) -> None:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._pending: Deque[Coroutine[Any, Any, Any]] = deque()
         self._pending_calls: Deque[Callable[[], None]] = deque()
         self._pending_lock = threading.Lock()
         self._drain_scheduled = False
+        # Loop-thread-only state for the worker pool.
+        self._max_workers = max(1, int(max_workers))
+        self._workers: List[asyncio.Task] = []
+        self._idle_waiters: Deque[asyncio.Future] = deque()
+        self._ready: Deque[Coroutine[Any, Any, Any]] = deque()
+        self._pool_closing = False
 
     @property
     def running(self) -> bool:
@@ -55,6 +73,10 @@ synchronously on the loop (mqttium ``publish_nowait``, gmqtt
                 loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             loop.close()
 
+        self._pool_closing = False
+        self._workers = []
+        self._idle_waiters = deque()
+        self._ready = deque()
         self._thread = threading.Thread(target=_run, name="mqtt-bench-asyncio", daemon=True)
         self._thread.start()
         if not ready.wait(timeout=5):
@@ -67,9 +89,13 @@ synchronously on the loop (mqttium ``publish_nowait``, gmqtt
         if loop is None or thread is None:
             return
         with self._pending_lock:
+            # Close undelivered coroutines so they do not raise "never awaited".
+            for coro in self._pending:
+                coro.close()
             self._pending.clear()
             self._pending_calls.clear()
             self._drain_scheduled = False
+        loop.call_soon_threadsafe(self._close_pool)
         loop.call_soon_threadsafe(loop.stop)
         thread.join(timeout=10)
         self._loop = None
@@ -104,8 +130,8 @@ synchronously on the loop (mqttium ``publish_nowait``, gmqtt
         if self._loop is None:
             raise RuntimeError("asyncio bridge is not running")
         if threading.current_thread() is self._thread:
-            # Already on the loop thread: spawn directly (no cross-thread wake).
-            asyncio.create_task(coro)
+            # Already on the loop thread: dispatch directly (no cross-thread wake).
+            self._dispatch(coro)
             return
         wake = False
         with self._pending_lock:
@@ -137,7 +163,7 @@ synchronously on the loop (mqttium ``publish_nowait``, gmqtt
             self._loop.call_soon_threadsafe(self._drain_pending)
 
     def _drain_pending(self) -> None:
-        """Loop-thread callback: run sync calls, then spawn a task per coro."""
+        """Loop-thread callback: run sync calls, then dispatch coros to workers."""
         while True:
             with self._pending_lock:
                 calls = list(self._pending_calls)
@@ -153,7 +179,60 @@ synchronously on the loop (mqttium ``publish_nowait``, gmqtt
                 except Exception:  # noqa: BLE001
                     pass
             for coro in batch:
-                asyncio.create_task(coro)
+                self._dispatch(coro)
+
+    def _dispatch(self, coro: Coroutine[Any, Any, Any]) -> None:
+        """Hand one coroutine to an idle worker, a new worker, or the backlog."""
+        while self._idle_waiters:
+            waiter = self._idle_waiters.popleft()
+            if not waiter.done():  # a cancelled worker leaves a done future behind
+                waiter.set_result(coro)
+                return
+        if len(self._workers) < self._max_workers:
+            task = asyncio.ensure_future(self._worker(coro))
+            self._workers.append(task)
+            return
+        # Pool saturated: the outstanding-window gate in the role worker bounds
+        # this backlog, so it cannot grow without limit.
+        self._ready.append(coro)
+
+    async def _worker(self, first: Coroutine[Any, Any, Any]) -> None:
+        """Run coroutines forever, waiting for a hand-off when idle."""
+        coro: Optional[Coroutine[Any, Any, Any]] = first
+        while True:
+            if coro is not None:
+                try:
+                    await coro
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001
+                    pass
+                coro = None
+            if self._pool_closing:
+                return
+            if self._ready:
+                coro = self._ready.popleft()
+                continue
+            waiter: asyncio.Future = asyncio.get_running_loop().create_future()
+            self._idle_waiters.append(waiter)
+            try:
+                coro = await waiter
+            except asyncio.CancelledError:
+                return
+
+    def _close_pool(self) -> None:
+        """Loop-thread teardown: cancel workers and drop queued work."""
+        self._pool_closing = True
+        for waiter in self._idle_waiters:
+            if not waiter.done():
+                waiter.cancel()
+        self._idle_waiters.clear()
+        for coro in self._ready:
+            coro.close()
+        self._ready.clear()
+        for task in self._workers:
+            task.cancel()
+        self._workers.clear()
 
 
 def topic_matches_sub(sub: str, topic: str) -> bool:

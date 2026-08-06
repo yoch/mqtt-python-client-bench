@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -56,7 +57,15 @@ from mqtt_client_bench.scenarios import (
     list_scenarios,
 )
 from mqtt_client_bench.sys_probe import SysCountersProbe, sys_counters_delta
-from mqtt_client_bench.telemetry import TelemetrySampler, allocate_cpuset, environment_metadata
+from mqtt_client_bench.telemetry import (
+    TelemetrySampler,
+    allocate_cpuset,
+    environment_metadata,
+    loadavg,
+    scaling_governor,
+    pin_current_process,
+    temporarily_pinned,
+)
 from mqtt_client_bench.workloads import (
     PAYLOAD_SPECS,
     callback_match_loadgen_topic,
@@ -69,9 +78,199 @@ from mqtt_client_bench.workloads import (
 )
 
 
+# Extra wait so the last $SYS tick (sys_interval = 1 s) lands before the
+# after-snapshot is taken.
+SYS_SETTLE_S = 1.5
+
+# Topologies where a single SUT publisher is the *only* source of PUBLISHes, so
+# the broker's received-publish counter can be compared with what the adapter
+# reported as completed. Excluded on purpose: anything where emqtt-bench also
+# publishes (subscriber_ingress, duplex_gateway, broker_ceiling), and
+# application_rtt, where initiator and responder both publish and neither role
+# reports completed_success.
+SUT_ONLY_PUBLISH_TOPOLOGIES = (
+    "publisher_only",
+    "publisher_with_oracle",
+    "fanout",
+)
+
+# $SYS counters are integers refreshed once per second, so the delta carries up
+# to ~1 s of quantisation error at each end. The gate is deliberately loose: it
+# is meant to catch an adapter reporting completions for messages that never
+# reached the broker (QoS0 counted at an in-process queue), not to audit
+# individual messages.
+BROKER_RECONCILE_MIN_RATIO = 0.80
+
+# Broker headroom. Above this the run still produces a number, but that number
+# is partly the broker's limit, so it must not enter a client ranking. The
+# higher container_cpu_high threshold stays as the hard saturation signal.
+BROKER_CPU_HEADROOM_PCT = 70.0
+
+# Load average per CPU above which the machine is not quiet enough for a
+# comparable number. The bench pins its own roles, so moderate unrelated load is
+# tolerable; a run queue longer than one task per CPU is not. Kept conservative
+# on purpose: a false positive costs a full re-run of the campaign.
+HOST_LOADAVG_PER_CPU_MAX = 1.0
+
+# A session outage may take at most this share of the measure window, so there is
+# always traffic before it and a replayed backlog after it. Proportional rather
+# than absolute, so short smoke windows stay usable for iteration.
+MAX_OUTAGE_SHARE_OF_WINDOW = 0.5
+
+
 def make_run_id() -> str:
     # Fixed 8-char ascii id to keep topic sizes stable.
     return secrets.token_hex(4)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def host_state_snapshot() -> dict:
+    """Machine state at T0, so a reader can tell runs apart after the fact.
+
+    Campaign results are produced client by client over hours; without this a
+    published median carries no evidence of the conditions it was taken under.
+    """
+    return {
+        "scaling_governor": scaling_governor(),
+        "loadavg": loadavg(),
+        "cpu_count": os.cpu_count(),
+    }
+
+
+def host_state_reasons(host_state: Optional[dict]) -> List[str]:
+    """Environment invariants that must hold for a run to be comparable."""
+    reasons: List[str] = []
+    if not host_state:
+        return reasons
+    governor = host_state.get("scaling_governor")
+    if governor and governor != "performance":
+        reasons.append(f"cpu_governor_not_performance:{governor}")
+    load = host_state.get("loadavg") or []
+    cpus = int(host_state.get("cpu_count") or os.cpu_count() or 1)
+    if load and float(load[0]) > HOST_LOADAVG_PER_CPU_MAX * cpus:
+        reasons.append(f"host_busy_at_start:{float(load[0]):.1f}")
+    return reasons
+
+
+def cost_per_message(worker_results: List[dict], telemetry_samples: List[dict]) -> Optional[dict]:
+    """Total SUT CPU and peak RSS per message pushed through the pipeline.
+
+    Throughput alone cannot answer "what does this client cost"; two clients at
+    the same msgs/s can differ several-fold in CPU.
+
+    CPU comes from each worker's own ``process_time`` across its measure window,
+    not from the orchestrator's telemetry samples: those span warmup and drain
+    too, which would fold work outside the window into a ratio whose denominator
+    counts only in-window messages.
+
+    The denominator is the number of *logical* messages — publisher completions
+    when there is a publisher, subscriber deliveries otherwise. Summing both
+    would count each message twice in a pub+sub topology and halve the result.
+    """
+    cpu_ns = 0
+    saw_cpu = False
+    published = 0
+    delivered = 0
+    for worker in worker_results:
+        value = worker.get("cpu_ns_in_window")
+        if value is not None:
+            saw_cpu = True
+            cpu_ns += int(value)
+        if worker.get("role") == "publisher":
+            published += int(worker.get("completed_in_window") or 0)
+        elif worker.get("role") == "subscriber":
+            delivered += int(worker.get("subscriber_delivered") or 0)
+    if not saw_cpu:
+        return None
+    messages = published or delivered
+    if messages <= 0:
+        return None
+    rss_peak_kb = 0
+    for sample in telemetry_samples:
+        for stats in (sample.get("processes") or {}).values():
+            if stats and stats.get("rss_kb"):
+                rss_peak_kb = max(rss_peak_kb, int(stats["rss_kb"]))
+    return {
+        "cpu_ns_in_window": cpu_ns,
+        "messages": messages,
+        "published": published,
+        "delivered": delivered,
+        "cpu_us_per_message": (cpu_ns / 1000.0) / messages,
+        "rss_peak_kb": rss_peak_kb or None,
+    }
+
+
+def _samples_in_window(
+    telemetry_samples: List[dict], measure_window: Optional[tuple]
+) -> List[dict]:
+    """Telemetry samples taken inside the measure window.
+
+    The sampler runs across warmup, measure and drain. Judging broker headroom on
+    all of it would let a warmup ramp spike invalidate a run whose measured
+    window was perfectly quiet. Falls back to every sample when the window is
+    unknown (older callers) or when filtering would leave nothing to judge.
+    """
+    if not measure_window or not telemetry_samples:
+        return telemetry_samples
+    start, end = measure_window
+    inside = [
+        s
+        for s in telemetry_samples
+        if s.get("ts") is not None and start <= float(s["ts"]) <= end
+    ]
+    return inside or telemetry_samples
+
+
+def reconcile_broker_publishes(
+    point: dict,
+    worker_results: List[dict],
+    sys_counters: Optional[dict],
+) -> dict:
+    """Compare adapter-reported completions with the broker's received count.
+
+    Returns ``{"applicable", "reason", "completed", "broker_received", "ratio"}``.
+    ``reason`` is None when the run reconciles (or when the check does not apply).
+    """
+    result = {
+        "applicable": False,
+        "reason": None,
+        "completed": None,
+        "broker_received": None,
+        "ratio": None,
+    }
+    if point.get("topology") not in SUT_ONLY_PUBLISH_TOPOLOGIES:
+        return result
+    completed = 0
+    saw_publisher = False
+    for worker in worker_results:
+        if worker.get("role") == "publisher":
+            saw_publisher = True
+            completed += int(worker.get("completed_success") or 0)
+    if not saw_publisher:
+        return result
+    result["applicable"] = True
+    result["completed"] = completed
+    if not sys_counters or sys_counters.get("error"):
+        result["reason"] = "publisher_completions_unconfirmed"
+        return result
+    received = sys_counters.get("publish_received_delta")
+    if received is None:
+        result["reason"] = "publisher_completions_unconfirmed"
+        return result
+    result["broker_received"] = int(received)
+    if completed <= 0:
+        return result
+    ratio = float(received) / float(completed)
+    result["ratio"] = ratio
+    # Only the lower side is a gate. A ratio slightly above 1 is expected: the
+    # $SYS window is bounded by 1 s counter ticks at each end and by the drain,
+    # so it is a little wider than the publisher's own accounting window.
+    if ratio < BROKER_RECONCILE_MIN_RATIO:
+        result["reason"] = f"broker_received_below_completed:{ratio:.2f}"
+    return result
 
 
 def mqtt_version_for_point(point: dict) -> int:
@@ -142,10 +341,16 @@ def unsupported_features(point: dict, client: str = "paho") -> List[str]:
         missing.append("receive_maximum")
     if point.get("retained_count") is not None:
         missing.append("retained_count")
-    if point.get("outage_s") is not None:
-        missing.append("session_outage")
     if point.get("submit_count") is not None:
         missing.append("queue_rejection_protocol")
+    outage_s = point.get("outage_s")
+    if outage_s is not None:
+        # The outage has to sit *inside* the measure window with traffic on both
+        # sides, otherwise there is no backlog to replay and the run silently
+        # measures nothing. Refuse instead of publishing a degenerate point.
+        duration_s = float(point.get("duration_s") or 0.0)
+        if float(outage_s) > duration_s * MAX_OUTAGE_SHARE_OF_WINDOW:
+            missing.append(f"outage_exceeds_window:{outage_s}s_in_{duration_s}s")
     if point.get("properties_profile") in ("topic_alias", "subscription_identifier"):
         missing.append(f"properties_profile:{point['properties_profile']}")
     if point.get("connect_mode") in ("tls_resume", "tcp_concurrent"):
@@ -170,13 +375,14 @@ def validate_run(
     telemetry_samples: List[dict],
     sys_counters: Optional[dict] = None,
     loadgen_ref_sub: Optional[dict] = None,
+    measure_window: Optional[tuple] = None,
 ) -> dict:
     reasons = []
     for result in worker_results:
         if not result.get("ok", False):
+            # worker_error already carries the error string; a second bare reason
+            # for the same failure double-counted it in the report's tables.
             reasons.append(f"worker_error:{result.get('error', 'unknown')}")
-        if result.get("error") == "warmup_drain_timeout":
-            reasons.append("warmup_drain_timeout")
         failed = int(result.get("completed_failed") or result.get("protocol_failed") or 0)
         if failed:
             reasons.append("protocol_failed")
@@ -232,11 +438,30 @@ def validate_run(
         elif (recv_parsed.get("last_total") in (None, 0)) and (pub_parsed.get("last_total") or 0) > 0:
             reasons.append("no_delivery_despite_load")
 
-    # Telemetry saturation heuristics.
-    for sample in telemetry_samples[-5:]:
+    # Telemetry saturation heuristics. Peak broker CPU is computed over the whole
+    # run (not just the tail) and reported as a first-class field so a reader can
+    # see how much headroom the broker had for any published number.
+    broker_cpu_max: Optional[float] = None
+    saturated_containers = set()
+    for sample in _samples_in_window(telemetry_samples, measure_window):
         for name, stats in (sample.get("containers") or {}).items():
-            if stats and stats.get("cpu_pct") is not None and stats["cpu_pct"] >= 85.0:
-                reasons.append(f"container_cpu_high:{name}")
+            if not stats or stats.get("cpu_pct") is None:
+                continue
+            cpu = float(stats["cpu_pct"])
+            if broker_cpu_max is None or cpu > broker_cpu_max:
+                broker_cpu_max = cpu
+            if cpu >= 85.0:
+                saturated_containers.add(name)
+    for name in sorted(saturated_containers):
+        reasons.append(f"container_cpu_high:{name}")
+    # Headroom gate: below hard saturation the number is still partly the
+    # broker's, so it must not enter a client ranking.
+    if (
+        broker_cpu_max is not None
+        and not saturated_containers
+        and broker_cpu_max >= BROKER_CPU_HEADROOM_PCT
+    ):
+        reasons.append(f"broker_headroom_low:{broker_cpu_max:.0f}")
     # Managed-broker runs must observe the broker; a silently dead stats probe
     # would mislabel broker-limited runs as sut_limited.
     watched_any = False
@@ -310,9 +535,18 @@ def validate_run(
         ):
             reasons.append("delivery_below_half_offer")
 
+    # Does the broker confirm what the adapter claimed to have published?
+    reconciliation = reconcile_broker_publishes(point, worker_results, sys_counters)
+    if reconciliation["reason"]:
+        reasons.append(reconciliation["reason"])
+
     status = "valid" if not reasons else "inconclusive"
     bottleneck = "bottleneck_unattributed"
-    if any(r.startswith("container_cpu_high:") and "mosquitto" in r for r in reasons) or sys_drops:
+    if reconciliation["reason"]:
+        bottleneck = "broker_unconfirmed"
+    elif any(r.startswith("container_cpu_high:") and "mosquitto" in r for r in reasons) or sys_drops:
+        bottleneck = "broker_limited"
+    elif broker_cpu_max is not None and broker_cpu_max >= BROKER_CPU_HEADROOM_PCT:
         bottleneck = "broker_limited"
     elif any(r.startswith("loadgen_") for r in reasons):
         bottleneck = "loadgen_limited"
@@ -333,6 +567,8 @@ def validate_run(
         "effective_offer_msgs_per_s": offer,
         "delivered_rate": delivered_rate,
         "delivery_offer_ratio": delivery_ratio,
+        "broker_cpu_max_pct": sanitize_number(broker_cpu_max),
+        "broker_reconciliation": reconciliation,
     }
 
 
@@ -353,12 +589,17 @@ def run_point(
     run_id = make_run_id()
     point = dict(point)
     point["run_id"] = run_id
+    started_at = _utc_now()
+    host_state = host_state_snapshot()
 
     missing = unsupported_features(point, client=client)
     if missing:
         return {
             "schema_version": 1,
             "run_id": run_id,
+            "started_at": started_at,
+            "finished_at": _utc_now(),
+            "host_state": host_state,
             "point": point,
             "client": client,
             "client_path": client_path,
@@ -378,6 +619,9 @@ def run_point(
             return {
                 "schema_version": 1,
                 "run_id": run_id,
+                "started_at": started_at,
+                "finished_at": _utc_now(),
+                "host_state": host_state,
                 "point": point,
                 "client": client,
                 "client_path": client_path,
@@ -396,6 +640,9 @@ def run_point(
         return {
             "schema_version": 1,
             "run_id": run_id,
+            "started_at": started_at,
+            "finished_at": _utc_now(),
+            "host_state": host_state,
             "point": point,
             "client": client,
             "client_path": client_path,
@@ -410,6 +657,9 @@ def run_point(
         return {
             "schema_version": 1,
             "run_id": run_id,
+            "started_at": started_at,
+            "finished_at": _utc_now(),
+            "host_state": host_state,
             "point": point,
             "status": "inconclusive",
             "reasons": [f"network_unavailable:{net_result.get('reason')}"],
@@ -447,7 +697,8 @@ def run_point(
             **{k: point.get(k) for k in (
                 "qos_publish", "qos_subscribe", "payload", "cadence", "inflight", "max_queued",
                 "outstanding", "duration_s", "warmup_s", "drain_s", "protocol", "properties_profile",
-                "load_fraction", "target_rate", "session_persistent", "callback_filters",
+                "load_fraction", "target_rate", "session_persistent", "outage_s",
+                "outage_at_s", "callback_filters",
                 "overlapping_callbacks", "subscription", "topic_topology", "subscription_count",
                 "keepalive", "batch_size",
             ) if k in point or point.get(k) is not None},
@@ -562,10 +813,15 @@ def run_point(
 
         elif topology == "connect":
             # Lightweight in-orchestrator connect probe using a child publisher with duration 0 replaced.
-            result = _run_connect_churn(point, client, client_path, host, endpoint_port, use_tls, certs)
+            # Pinned to the SUT cores: this is SUT work running in our own process.
+            with temporarily_pinned(cpusets.get("sut")):
+                result = _run_connect_churn(point, client, client_path, host, endpoint_port, use_tls, certs)
             return {
                 "schema_version": 1,
                 "run_id": run_id,
+                "started_at": started_at,
+                "finished_at": _utc_now(),
+                "host_state": host_state,
                 "point": point,
                 "client": client,
                 "client_path": client_path,
@@ -577,10 +833,14 @@ def run_point(
             }
 
         elif topology == "fleet":
-            result = _run_fleet_idle(point, client, client_path, host, endpoint_port, use_tls, certs)
+            with temporarily_pinned(cpusets.get("sut")):
+                result = _run_fleet_idle(point, client, client_path, host, endpoint_port, use_tls, certs)
             return {
                 "schema_version": 1,
                 "run_id": run_id,
+                "started_at": started_at,
+                "finished_at": _utc_now(),
+                "host_state": host_state,
                 "point": point,
                 "client": client,
                 "client_path": client_path,
@@ -595,6 +855,9 @@ def run_point(
             return {
                 "schema_version": 1,
                 "run_id": run_id,
+                "started_at": started_at,
+                "finished_at": _utc_now(),
+                "host_state": host_state,
                 "point": point,
                 "status": "inconclusive",
                 "reasons": [f"unsupported_topology:{topology}"],
@@ -741,7 +1004,11 @@ def run_point(
         )
         sampler.start()
 
-        need_sys = topology in ("subscriber_ingress", "broker_ceiling") and not burst_ingress
+        # $SYS is sampled for every managed-broker run, not just ingress: publisher
+        # capacity is the core of the ranking and was never confronted with what
+        # the broker actually received. Burst ingress is excluded because its
+        # offer is deliberately bounded and bursty, so counters are not meaningful.
+        need_sys = managed_broker and not burst_ingress
         if need_sys:
             try:
                 sys_probe = SysCountersProbe(host, endpoint_port, client_id=f"sys-{run_id}")
@@ -783,6 +1050,11 @@ def run_point(
             # Brief quiet so the subscriber can drain late warmup deliveries.
             time.sleep(min(1.0, float(point.get("drain_s", 2))))
 
+        if sys_probe is not None:
+            # Symmetric to the settle before sys_after: the last $SYS tick can be
+            # up to sys_interval old, so without this the tail of warmup lands
+            # inside the delta and inflates the broker-received count.
+            time.sleep(SYS_SETTLE_S)
         sys_before = sys_probe.snapshot() if sys_probe is not None else None
 
         # Phase 2: measure — fresh ingress loadgen when applicable.
@@ -793,6 +1065,9 @@ def run_point(
 
         failures = barrier.broadcast("T_MEASURE")
         barrier_failed = barrier_failed or failures > 0
+        # Wall-clock bounds of the measure window, so broker CPU can be judged on
+        # the window that produced the number rather than on warmup ramp spikes.
+        measure_started_wall = time.time()
         if burst_ingress and loadgen is not None:
             loadgen.start()
 
@@ -810,7 +1085,13 @@ def run_point(
                     worker_hang = True
                     w.kill()
 
+        measure_ended_wall = time.time()
         telemetry_samples = sampler.stop()
+        if sys_probe is not None:
+            # $SYS counters only refresh every sys_interval (1 s in our config).
+            # Let one more tick land so the delta covers the whole run instead of
+            # truncating the tail.
+            time.sleep(SYS_SETTLE_S)
         sys_after = sys_probe.snapshot() if sys_probe is not None else None
         if sys_probe is not None:
             sys_probe.stop()
@@ -850,7 +1131,11 @@ def run_point(
             telemetry_samples,
             sys_counters=sys_counters if isinstance(sys_counters, dict) else None,
             loadgen_ref_sub=loadgen_ref_sub_stats,
+            measure_window=(measure_started_wall, measure_ended_wall),
         )
+        for reason in host_state_reasons(host_state):
+            validity["status"] = "inconclusive"
+            validity["reasons"].append(reason)
         if worker_hang:
             validity["status"] = "inconclusive"
             validity["reasons"].append("worker_hang")
@@ -904,6 +1189,9 @@ def run_point(
         return {
             "schema_version": 1,
             "run_id": run_id,
+            "started_at": started_at,
+            "finished_at": _utc_now(),
+            "host_state": host_state,
             "point": point,
             "client": client,
             "client_path": client_path,
@@ -914,6 +1202,9 @@ def run_point(
             "secondary_msgs_per_s": secondary,
             "delivery_offer_ratio": validity.get("delivery_offer_ratio"),
             "effective_offer_msgs_per_s": validity.get("effective_offer_msgs_per_s"),
+            "broker_cpu_max_pct": validity.get("broker_cpu_max_pct"),
+            "broker_reconciliation": validity.get("broker_reconciliation"),
+            "cost_per_message": cost_per_message(worker_results, telemetry_samples),
             "workers": worker_results,
             "loadgen": loadgen_stats,
             "loadgen_ref_sub": loadgen_ref_sub_stats,
@@ -1029,6 +1320,160 @@ def _run_fleet_idle(point, client_name, client_path, host, port, tls, certs) -> 
     }
 
 
+def _scenario_payload(
+    *,
+    name: str,
+    profile: str,
+    runs: int,
+    seed: int,
+    client: str,
+    client_path: Optional[str],
+    meta: dict,
+    all_results: List[dict],
+    cpusets: Dict[str, str],
+    extra: Optional[dict] = None,
+) -> dict:
+    """Build the per-client result document consumed by the report."""
+    payload = {
+        "schema_version": 1,
+        "scenario": name,
+        "profile": profile,
+        "runs": runs,
+        "seed": seed,
+        "client": client,
+        "client_path": str(Path(client_path).resolve()) if client_path else None,
+        "client_identity": adapter_identity(client, client_path),
+        "broker": meta,
+        "results": all_results,
+        "environment": environment_metadata(),
+        "cpusets": cpusets,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def run_matrix(
+    name: str,
+    clients: List[str],
+    *,
+    profile: str = "standard",
+    runs: Optional[int] = None,
+    broker: Optional[str] = None,
+    network: Optional[str] = None,
+    output_dir: Optional[str] = None,
+    client_paths: Optional[Dict[str, str]] = None,
+    load_profiles: Optional[Dict[str, str]] = None,
+    seed: int = 42,
+) -> dict:
+    """Run several clients interleaved **within each point**, not one after another.
+
+    The published matrix used to come from separate per-client campaigns run
+    hours apart, so any thermal drift or background load between them entered the
+    ranking as if it were a difference between libraries. Here every client is
+    measured on the same point back to back, and the client order rotates between
+    repetitions so no client always runs first on a freshly idle machine.
+
+    Writes the same ``<client>-<scenario>.json`` documents as ``run_scenario`` so
+    the report and existing tooling are unchanged.
+    """
+    scenario = SCENARIO_BY_NAME[name]
+    if runs is None:
+        runs = default_runs(profile)
+    if len(clients) < 2:
+        raise ValueError("run_matrix needs at least two clients; use `run` for one")
+    client_paths = client_paths or {}
+    points = expand_scenario(scenario, profile)
+    if network:
+        for p in points:
+            p["network"] = network
+
+    try:
+        cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile=profile)
+    except RuntimeError:
+        if profile == "standard":
+            raise
+        cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile="smoke")
+    pin_current_process(cpusets.get("orch"))
+
+    managed = broker is None
+    if managed:
+        meta = broker_up(wait=True, cpuset=cpusets.get("broker"))
+        host, port, tls_port = meta["host"], meta["port"], meta["tls_port"]
+    else:
+        host, port = parse_broker_endpoint(broker)
+        tls_port = DEFAULT_TLS_PORT
+        wait_for_broker(host, port, timeout_s=10)
+        meta = {"managed_broker": False, "host": host, "port": port, "tls_port": tls_port}
+
+    profiles: Dict[str, Optional[dict]] = {}
+    for client in clients:
+        path = (load_profiles or {}).get(client)
+        loaded = read_json(path) if path else None
+        if loaded is not None:
+            _validate_load_profile(loaded, client=client, client_path=client_paths.get(client), broker=meta)
+        profiles[client] = loaded
+
+    rng = random.Random(seed)
+    ordered_points = list(points)
+    rng.shuffle(ordered_points)
+
+    per_client: Dict[str, List[dict]] = {c: [] for c in clients}
+    with tempfile.TemporaryDirectory(prefix="mqtt-bench-matrix-") as tmp:
+        work_dir = Path(tmp)
+        for point in ordered_points:
+            runs_by_client: Dict[str, List[dict]] = {c: [] for c in clients}
+            for run_idx in range(runs):
+                # Rotate so position within the point is counterbalanced.
+                rotation = clients[run_idx % len(clients):] + clients[: run_idx % len(clients)]
+                for slot, client in enumerate(rotation):
+                    if run_idx or slot:
+                        time.sleep(ABBA_COOLDOWN_S)
+                    result = run_point(
+                        point,
+                        client=client,
+                        client_path=client_paths.get(client),
+                        host=host,
+                        port=port,
+                        tls_port=tls_port,
+                        profile=profile,
+                        work_dir=work_dir,
+                        cpusets=cpusets,
+                        load_profile=profiles.get(client),
+                        managed_broker=managed,
+                    )
+                    result["run_index"] = run_idx
+                    result["matrix_slot"] = slot
+                    result["matrix_rotation"] = list(rotation)
+                    runs_by_client[client].append(result)
+            for client in clients:
+                per_client[client].append(
+                    {
+                        "point": point,
+                        "runs": runs_by_client[client],
+                        "summary": summarize_valid_runs(runs_by_client[client]),
+                    }
+                )
+
+    documents = {}
+    for client in clients:
+        documents[client] = _scenario_payload(
+            name=name,
+            profile=profile,
+            runs=runs,
+            seed=seed,
+            client=client,
+            client_path=client_paths.get(client),
+            meta=meta,
+            all_results=per_client[client],
+            cpusets=cpusets,
+            extra={"interleaved_with": [c for c in clients if c != client]},
+        )
+        if output_dir:
+            write_json(str(Path(output_dir) / f"{client}-{name}.json"), documents[client])
+    return {"scenario": name, "clients": list(clients), "documents": documents}
+
+
 def run_scenario(
     name: str,
     *,
@@ -1059,6 +1504,7 @@ def run_scenario(
         if profile == "standard":
             raise
         cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile="smoke")
+    pin_current_process(cpusets.get("orch"))
 
     managed = broker is None
     if managed:
@@ -1107,21 +1553,17 @@ def run_scenario(
                 }
             )
 
-    identity = adapter_identity(client, client_path)
-    payload = {
-        "schema_version": 1,
-        "scenario": name,
-        "profile": profile,
-        "runs": runs,
-        "seed": seed,
-        "client": client,
-        "client_path": str(Path(client_path).resolve()) if client_path else None,
-        "client_identity": identity,
-        "broker": meta,
-        "results": all_results,
-        "environment": environment_metadata(),
-        "cpusets": cpusets,
-    }
+    payload = _scenario_payload(
+        name=name,
+        profile=profile,
+        runs=runs,
+        seed=seed,
+        client=client,
+        client_path=client_path,
+        meta=meta,
+        all_results=all_results,
+        cpusets=cpusets,
+    )
     if output:
         write_json(output, payload)
     return payload
@@ -1367,6 +1809,7 @@ def compare_clients(
         cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile=profile)
     except RuntimeError:
         cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile="smoke")
+    pin_current_process(cpusets.get("orch"))
 
     meta = broker_up(wait=True, cpuset=cpusets.get("broker"))
     host, port, tls_port = meta["host"], meta["port"], meta["tls_port"]

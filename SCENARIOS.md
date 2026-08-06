@@ -1,71 +1,106 @@
-# Conception des scénarios
+# Scenario design
 
-Ce document décrit **ce que mesure chaque scénario**, comment le banc est câblé (topologie, cadence, métrique primaire), et ce qui est comparable ou non. La source de vérité du catalogue reste `src/mqtt_client_bench/scenarios.py` ; le harness est dans `harness.py`.
+This document describes **what each scenario measures**, how the bench is wired
+(topology, cadence, primary metric), and what is comparable or not. The catalogue
+itself is the source of truth: `src/mqtt_client_bench/scenarios.py`; the harness
+lives in `harness.py`.
 
-## Modèle de mesure (trois protocoles, jamais mélangés)
+## Measurement model (three protocols, never mixed)
 
-| Protocole | Question posée | Comment on charge | Métrique primaire |
+| Protocol | Question | How load is applied | Primary metric |
 |---|---|---|---|
-| **Capacité** | Quel débit max le client tient ? | Closed-loop : fenêtre `outstanding` bornée, pas de pacing | `completed_success` / s dans `[T0, T1)` |
-| **Latence** | Quelle latence à X % de *sa* capacité ? | Open-loop à fractions calibrées (`load_fraction`) | Distribution de latence (PUBACK ou RTT appli) |
-| **Intégrité** | Manque / doublon / désordre ? | Débit borné + en-tête séquence | Compteurs d’intégrité (pas un ranking de débit) |
+| **Capacity** | What throughput does the client sustain? | Closed loop: bounded `outstanding` window, no pacing | `completed_success` / s within `[T0, T1)` |
+| **Latency** | What latency at X % of *its own* capacity? | Open loop at calibrated fractions (`load_fraction`) | Latency distribution (PUBACK or application RTT) |
+| **Integrity** | Missing / duplicate / out of order? | Bounded rate + sequence header | Integrity counters (not a throughput ranking) |
 
-Calibration (`calibrate`) : pour chaque client et **chaque protocole MQTT supporté**, on mesure une capacité publish QoS1 et une capacité RTT, stockées dans `protocol_capacities`. Les scénarios open-loop dérivent `target_rate = capacity[protocol] × load_fraction`. Sans profil calibré compatible (même client / version / protocole), les points à fraction sont refusés.
+Calibration (`calibrate`): for each client and **each supported MQTT protocol**,
+a QoS1 publish capacity and an RTT capacity are measured and stored under
+`protocol_capacities`. Open-loop scenarios derive
+`target_rate = capacity[protocol] × load_fraction`. Without a compatible
+calibration profile (same client / version / protocol), fraction points are refused.
 
-Profils temporels (`PROFILE_SPECS`) :
+Timing profiles (`PROFILE_SPECS`):
 
-| Profil | Mesure / warmup / drain | Runs | Comparable |
+| Profile | Measure / warmup / drain | Runs | Comparable |
 |---|---|---|---|
-| `standard` | 12 s / 3 s / 6 s | 3 | oui |
-| `smoke` | 3 s / 1 s / 2 s | 1 | non (`non_comparable`) |
+| `standard` | 12 s / 3 s / 6 s | 3 | yes |
+| `smoke` | 3 s / 1 s / 2 s | 1 | no (`non_comparable`) |
 
-### Dual protocole (`dual_protocol`)
+### Dual protocol (`dual_protocol`)
 
-Un sous-ensemble **core** minimal est expandé en `MQTTv311` **et** `MQTTv5` :
+A minimal **core** subset is expanded into both `MQTTv311` **and** `MQTTv5`:
 
 - `pub_qos_sweep_telemetry`, `sub_exact_telemetry`
 - `puback_latency_qos1`, `rtt_capacity_qos1`, `application_rtt_qos1`
 
-Les classements / la matrice HTML utilisent des lignes `scenario · protocol` — **jamais** de comparaison cross-protocole. `aiomqtt3` (v5-only) se compare aux autres sur les lignes `MQTTv5` ; `amqtt` saute le v5.
+Rankings and the HTML matrix use `scenario · protocol` rows — **never** a
+cross-protocol comparison. `aiomqtt3` (v5 only) is compared with peers on the
+`MQTTv5` rows; `amqtt` skips v5.
 
-Open-loop (`puback` / `application_rtt`) : fractions **`0.50` et `0.90`** seulement (budget).
+Open loop (`puback` / `application_rtt`): fractions **`0.50` and `0.90`** only (budget).
+
+### Fairness invariants enforced by the catalogue
+
+- **In-flight window.** Every capacity point sets `inflight = outstanding`, so
+  clients that expose `max_inflight` run the same effective pipelining window as
+  clients that do not expose it and are bounded only by the harness gate. Only
+  `pub_qos1_inflight` sweeps the window on purpose (and keeps
+  `require_max_inflight`, so clients without the knob are refused rather than
+  measured at a different window). `max_queued` is kept clear of the gate so it
+  is never the binding constraint.
+- **Broker reconciliation.** For single-publisher topologies the broker's `$SYS`
+  received-publish counter is compared against what the adapter reported as
+  completed; a run whose completions the broker cannot confirm is
+  `inconclusive` (`broker_received_below_completed`), not a published number.
+- **Broker headroom.** Peak broker CPU is recorded per run
+  (`broker_cpu_max_pct`); above 70 % the run is `broker_limited` and does not
+  enter a ranking, and 85 % remains the hard saturation signal.
 
 ## Topologies
 
-| Topologie | Acteurs | Rôle du débit primaire |
+| Topology | Actors | What the primary rate means |
 |---|---|---|
-| `publisher_only` | 1 publisher SUT | Completions publish du SUT |
-| `publisher_with_oracle` | 1 publisher SUT + N subscribers (même lib) | Publish (intégrité côté sub) |
-| `subscriber_ingress` | 1 subscriber SUT + **emqtt-bench** (N clients) | Messages **délivrés** au subscriber |
-| `application_rtt` | initiator SUT + responder (même lib, cpuset `orch`) | Paires requête/réponse complètes |
-| `duplex_gateway` | publisher SUT + subscriber SUT + inject emqtt-bench | Débit publisher (commands à 200/s) |
-| `connect` | Probe dans l’orchestrateur | Latence / succès de connect |
-| `fleet` | N connexions idle | Coût keepalive / RSS / CPU |
+| `publisher_only` | 1 SUT publisher | SUT publish completions |
+| `publisher_with_oracle` | 1 SUT publisher + N subscribers (same library) | Publish rate (integrity checked subscriber-side) |
+| `fanout` | 1 SUT publisher + N subscribers | Publish rate under broker fan-out cost |
+| `subscriber_ingress` | 1 SUT subscriber + **emqtt-bench** (N clients) | Messages **delivered** to the subscriber |
+| `application_rtt` | SUT initiator + responder (same library, `orch` cpuset) | Completed request/response pairs |
+| `duplex_gateway` | SUT publisher + SUT subscriber + emqtt-bench injection | Publisher throughput (commands at 200/s) |
+| `broker_ceiling` | emqtt-bench pub + emqtt-bench sub, no Python SUT | Reference subscriber receive rate |
+| `connect` | Probe inside the orchestrator (pinned to the `sut` cpuset) | Connect latency / success |
+| `fleet` | N idle connections (orchestrator, `sut` cpuset) | Keepalive / RSS / CPU cost |
 
 ## Cadences
 
-| Cadence | Comportement |
+| Cadence | Behaviour |
 |---|---|
-| `capacity` | Closed-loop max (pas de `target_rate`) |
-| `loaded75` / fractions | Open-loop ; le point porte `load_fraction` → `target_rate` calibré |
-| `steady50` | Open-loop à 50 % d’une base (défaut 2000 → **1000 msg/s**) |
-| `burst` | Ingress : burst borné (`-L`), puis silence ; recovery via drain |
-| `microburst` | Comme burst avec `-L 1000` |
-| `periodic10` | Ingress à **10 msg/s** agrégés |
+| `capacity` | Closed-loop maximum (no `target_rate`) |
+| `loaded75` / fractions | Open loop; the point carries `load_fraction` → calibrated `target_rate` |
+| `steady50` | Open loop at 50 % of a base (default 2000 → **1000 msg/s**) |
+| `burst` | Ingress: bounded burst (`-L`), then silence; recovery observed during drain |
+| `microburst` | Like burst with `-L 1000` |
+| `periodic10` | Ingress at **10 msg/s** aggregate |
 
-## Offre ingress (emqtt-bench) — point d’attention
+## Ingress offer (emqtt-bench) — a caveat
 
-Pour `subscriber_ingress` en capacité, le harness vise ~**40 000** msg/s agrégés (`target = 40000`), avec `loadgen_clients` (souvent 32).
+For `subscriber_ingress` capacity the harness targets ~**40,000** msg/s aggregate
+(`target = 40000`) with `loadgen_clients` (often 32). Note this value lives in
+`harness.py`, not in the catalogue.
 
-L’intervalle emqtt-bench est entier en ms (`-I ≥ 1`), donc :
+The emqtt-bench interval is an integer number of milliseconds (`-I ≥ 1`), so:
 
 ```text
 nominal_rate ≈ clients × 1000 / I
 ```
 
-Avec 32 clients et `I = 1`, le **nominal enregistré est 32 000**, même si la cible déclarée est 40 000. En pratique emqtt-bench (`-F` inflight) peut **émettre davantage** (~64k observés) ; le débit **délivré** au subscriber peut plafonner plus bas (client *ou* Mosquitto → une seule connexion).
+With 32 clients and `I = 1`, the **recorded nominal is 32,000**, even though the
+declared target is 40,000. In practice emqtt-bench (`-F` inflight) can **emit
+more** (~64k observed), while the rate **delivered** to the subscriber may cap
+lower (client *or* Mosquitto → a single connection).
 
-Conséquence : si gmqtt et awscrt collent tous deux à ~30k, ce n’est pas forcément « mêmes perfs », ce peut être un **plafond d’offre / broker**. Pour chercher les vraies limites client, il faut monter `loadgen_clients` **et** vérifier que le broker n’est pas saturé.
+Consequence: if gmqtt and awscrt both sit at ~30k, that is not necessarily "the
+same performance" — it can be an **offer or broker ceiling**. To find real client
+limits, raise `loadgen_clients` **and** check that the broker is not saturated.
 
 ---
 
@@ -73,103 +108,103 @@ Conséquence : si gmqtt et awscrt collent tous deux à ~30k, ce n’est pas forc
 
 ### `pub_payload_sweep_qos0`
 
-- **But** : capacité publisher QoS0 selon la taille de payload.
-- **Topologie** : `publisher_only` · **Cadence** : `capacity`.
-- **Variants** : `empty0`, `binary64`, `telemetry256`, `event1k`, `record16k`, `block64k`, `blob1m`.
-- **Primaire** : completions publish / s.
-- **Lecture** : courbe taille → débit ; `blob1m` peut aussi saturer CPU broker / réseau.
+- **Goal**: QoS0 publisher capacity across payload sizes.
+- **Topology**: `publisher_only` · **Cadence**: `capacity`.
+- **Variants**: `empty0`, `binary64`, `telemetry256`, `event1k`, `record16k`, `block64k`, `blob1m`.
+- **Primary**: publish completions / s.
+- **Reading**: size → throughput curve; `blob1m` can also saturate broker CPU / network.
 
 ### `pub_qos_sweep_telemetry`
 
-- **But** : capacité publisher pour QoS 0 / 1 / 2, payload fixe `telemetry256`.
-- **Topologie** : `publisher_only` · **Cadence** : `capacity`.
-- **Variants** : `qos_publish ∈ {0,1,2}`.
-- **Primaire** : completions / s (QoS0 = remis au transport ; QoS1 = PUBACK ; QoS2 = PUBCOMP).
-- **Refus** : clients sans QoS2 correct (`gmqtt`, `awscrt` → `not_implemented:qos2`).
+- **Goal**: publisher capacity for QoS 0 / 1 / 2, fixed `telemetry256` payload.
+- **Topology**: `publisher_only` · **Cadence**: `capacity` · tag `dual_protocol`.
+- **Variants**: `qos_publish ∈ {0,1,2}`.
+- **Primary**: completions / s (QoS0 = handed to transport; QoS1 = PUBACK; QoS2 = PUBCOMP).
+- **Refusals**: clients without correct QoS2 (`gmqtt`, `awscrt` → `not_implemented:qos2`).
 
 ### `pub_qos1_inflight`
 
-- **But** : effet de la fenêtre inflight client sur la capacité QoS1.
-- **Topologie** : `publisher_only` · **Cadence** : `capacity`.
-- **Variants** : `inflight ∈ {1,20,100}` (+ `max_queued = 10×`, `outstanding = max(n,8)`).
-- **Exige** : `max_inflight` / `max_queued` côté adapter (`require_max_*`).
-- **Refus** : gmqtt, awscrt, amqtt, etc. sans knobs → `not_implemented:max_inflight`.
+- **Goal**: effect of the client in-flight window on QoS1 capacity.
+- **Topology**: `publisher_only` · **Cadence**: `capacity` · tag `diagnostic`.
+- **Variants**: `inflight ∈ {1,20,100}` (+ `max_queued = 10×`, `outstanding = max(n,8)`).
+- **Requires**: `max_inflight` / `max_queued` adapter support (`require_max_*`).
+- **Refusals**: gmqtt, awscrt, amqtt and others without the knobs → `not_implemented:max_inflight`.
 
 ### `remaining_length_boundaries`
 
-- **But** : transitions exactes de largeur d’encodage MQTT *Remaining Length* (1 vs 2 octets).
-- **Topologie** : `publisher_only` · **Cadence** : `capacity`.
-- **Variants** : payloads `rl_126` … `rl_16384` (taille choisie pour viser ces seuils).
-- **Lecture** : diagnostic protocole / encodeur, pas ranking produit.
+- **Goal**: exact MQTT *Remaining Length* encoding-width transitions (1 vs 2 bytes).
+- **Topology**: `publisher_only` · **Cadence**: `capacity` · tag `diagnostic`.
+- **Variants**: payloads `rl_126` … `rl_16384` (sized to hit those thresholds).
+- **Reading**: protocol/encoder diagnostic, not a product ranking.
 
 ### `sub_exact_telemetry`
 
-- **But** : capacité d’**ingress** : N publishers externes → 1 topic exact → 1 subscriber SUT.
-- **Topologie** : `subscriber_ingress` · **Cadence** : `capacity`.
-- **Loadgen** : 32 clients emqtt-bench, QoS0, `telemetry256`.
-- **Primaire** : messages délivrés au callback subscriber / s.
-- **Lecture** : comparer au **`effective_offer_msgs_per_s`** (= `nominal_rate`, ~32k avec `-c 32 -I 1`). Ne pas prendre `parsed.median_rate` QoS0 pour l’offre — emqtt-bench double-compte `pub` (voir [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md)). Si délivré ≈ offre, le point est **offer-limited**.
-- **`$SYS`** : `sys_counters` (drops/sent) enregistrés sur la fenêtre de mesure.
+- **Goal**: **ingress** capacity: N external publishers → 1 exact topic → 1 SUT subscriber.
+- **Topology**: `subscriber_ingress` · **Cadence**: `capacity` · tag `dual_protocol`.
+- **Loadgen**: 32 emqtt-bench clients, QoS0, `telemetry256`.
+- **Primary**: messages delivered to the subscriber callback / s.
+- **Reading**: compare with **`effective_offer_msgs_per_s`** (= `nominal_rate`, ~32k at `-c 32 -I 1`). Do not use QoS0 `parsed.median_rate` as the offer — emqtt-bench double-counts `pub` (see [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md)). If delivered ≈ offer, the point is **offer-limited**.
+- **`$SYS`**: `sys_counters` (drops/sent) recorded over the measure window.
 
 ### `sub_hierarchy_telemetry`
 
-- **But** : même ingress, mais abonnement wildcard broker (`+` ou `#`) sur topologie `fleet4k_uniform`.
-- **Variants** : `subscription=plus` et `subscription=hash`.
-- **Primaire** : délivrances / s.
-- **Lecture** : coût matching broker + client ; même caveat de plafond d’offre que `sub_exact`.
+- **Goal**: same ingress, but with a broker wildcard subscription (`+` or `#`) over the `fleet4k_uniform` topology.
+- **Variants**: `subscription=plus` and `subscription=hash`.
+- **Primary**: deliveries / s.
+- **Reading**: broker + client matching cost; same offer-ceiling caveat as `sub_exact`.
 
 ### `sub_callback_matching`
 
-- **But** : coût du matching **local** `message_callback_add` (Paho).
-- **Topologie** : `subscriber_ingress` · abonnement broker `#`, topics `cb/<i>/…` côté loadgen.
-- **Variants** : `callback_filters ∈ {1,16,256}`.
-- **Refus** : clients sans `native_message_callback_add` (tout sauf paho dans le catalogue stable).
+- **Goal**: cost of **local** `message_callback_add` matching (Paho).
+- **Topology**: `subscriber_ingress` · broker subscription `#`, loadgen publishes on `cb/<i>/…` · tag `diagnostic`.
+- **Variants**: `callback_filters ∈ {1,16,256}`.
+- **Refusals**: clients without `native_message_callback_add` (everything except paho in the stable catalogue).
 
 ### `duplex_gateway`
 
-- **But** : charge « gateway » : le SUT publie de la télémétrie **et** reçoit des commandes injectées.
-- **Topologie** : `duplex_gateway` (pub + sub sur cpuset `sut`).
-- **Inject** : emqtt-bench → `bench/<run>/commands` à **200 msg/s** agrégés (2 clients).
-- **Variants** : cadence publisher `steady50` ou `burst`.
-- **Primaire** : débit publisher (souvent plafonné par la cadence) ; **pas** un ranking de capacité pure.
-- **Rapport** : exclu du chart de throughput (scénario rate-capped).
+- **Goal**: "gateway" load: the SUT publishes telemetry **and** receives injected commands.
+- **Topology**: `duplex_gateway` (pub + sub on the `sut` cpuset).
+- **Injection**: emqtt-bench → `bench/<run>/commands` at **200 msg/s** aggregate (2 clients).
+- **Variants**: publisher cadence `steady50` or `burst`.
+- **Primary**: publisher throughput (usually capped by the cadence); **not** a pure capacity ranking.
+- **Report**: excluded from the throughput chart (rate-capped scenario). Note this exclusion lives in the report layer, not in the catalogue.
 
 ### `burst_recovery`
 
-- **But** : tenue / récupération sous burst d’ingress puis silence.
-- **Topologie** : `subscriber_ingress` · **Cadence** : `burst` · sub `#` · fleet.
-- **Loadgen** : démarre à `T_MEASURE`, `-L ≈ target × duration`, `I=1`.
-- **Primaire** : débit délivré pendant la fenêtre ; drain pour le backlog.
-- **Lecture** : même famille de plafond que les autres ingress capacité.
+- **Goal**: behaviour and recovery under an ingress burst followed by silence.
+- **Topology**: `subscriber_ingress` · **Cadence**: `burst` · `#` subscription · fleet topics.
+- **Loadgen**: starts at `T_MEASURE`, `-L ≈ target × duration`, `I=1`.
+- **Primary**: delivered rate during the window; drain exposes the backlog.
+- **Reading**: same ceiling family as the other ingress capacity scenarios.
 
 ### `e2e_integrity`
 
-- **But** : intégrité de séquence (header `PMQ1`) publisher → subscriber même lib.
-- **Topologie** : `publisher_with_oracle` · **Cadence** : `steady50` (~**1000** msg/s).
-- **Variants** : QoS 0/1/2 + payload vide QoS0 ; `force_header=True`.
-- **Primaire** : débit atteint (toujours ~cap) ; le fond est missing/dup/ooo.
-- **Rapport** : exclu du chart de throughput.
+- **Goal**: sequence integrity (`PMQ1` header) publisher → subscriber, same library.
+- **Topology**: `publisher_with_oracle` · **Cadence**: `steady50` (~**1000** msg/s) · tag `functional`.
+- **Variants**: QoS 0/1/2 + empty QoS0 payload; `force_header=True`.
+- **Primary**: achieved throughput (always ~capped); the substance is missing/dup/ooo.
+- **Report**: excluded from the throughput chart (report-layer exclusion).
 
 ### `puback_latency_qos1`
 
-- **But** : latence PUBACK en open-loop à fractions de la **capacité publish** du client.
-- **Topologie** : `publisher_only` · fractions `0.50 / 0.90` · tag `dual_protocol`.
-- **Exige** : `--load-profile` (ou calibration auto en `compare`).
-- **Invalidation** : `open_loop_rate_out_of_tolerance` si le débit réalisé dévie > 2 % de la cible.
+- **Goal**: open-loop PUBACK latency at fractions of the client's **publish capacity**.
+- **Topology**: `publisher_only` · fractions `0.50 / 0.90` · tag `dual_protocol`.
+- **Requires**: `--load-profile` (or automatic calibration in `compare`).
+- **Invalidation**: `open_loop_rate_out_of_tolerance` when the achieved rate deviates > 2 % from target.
 
 ### `rtt_capacity_qos1`
 
-- **But** : capacité closed-loop de paires RTT applicatives (même lib des deux côtés).
-- **Topologie** : `application_rtt` · **Cadence** : `capacity` · `outstanding=32`.
-- **Primaire** : paires complètes / s → baseline pour `application_rtt_qos1`.
-- **Note** : amplifie le coût stack (deux publish + deux deliveries par échantillon).
+- **Goal**: closed-loop capacity of application RTT pairs (same library on both sides).
+- **Topology**: `application_rtt` · **Cadence**: `capacity` · `outstanding=32` · tags `diagnostic`, `dual_protocol`.
+- **Primary**: completed pairs / s → baseline for `application_rtt_qos1`.
+- **Note**: amplifies stack cost (two publishes and two deliveries per sample).
 
 ### `application_rtt_qos1`
 
-- **But** : latence RTT applicative open-loop aux fractions de **cette** capacité RTT.
-- **Topologie** : `application_rtt` · fractions `0.50 / 0.90` · tag `dual_protocol`.
-- **Exige** : `TCP_NODELAY` bout-en-bout (broker + client) ; sinon artefact Nagle ~84 ms/paire.
-- **Refus** : `awscrt` → `not_implemented:tcp_nodelay`.
+- **Goal**: open-loop application RTT latency at fractions of **that** RTT capacity.
+- **Topology**: `application_rtt` · fractions `0.50 / 0.90` · tag `dual_protocol`.
+- **Requires**: end-to-end `TCP_NODELAY` (broker + client); otherwise a Nagle artefact of ~84 ms/pair.
+- **Refusals**: `awscrt` → `not_implemented:tcp_nodelay`.
 
 ---
 
@@ -177,137 +212,166 @@ Conséquence : si gmqtt et awscrt collent tous deux à ~30k, ce n’est pas forc
 
 ### `pub_segment_threshold_16k` / `pub_segment_block_64k` / `pub_segment_blob_1m`
 
-- **But** : capacité publisher sur tailles « segmentées » (16 KiB / 64 KiB / 1 MiB), QoS0.
-- **Topologie** : `publisher_only` · **Cadence** : `capacity`.
-- **Lecture** : diagnostic fragmentation / copies ; un point chacun.
+- **Goal**: publisher capacity at "segmented" sizes (16 KiB / 64 KiB / 1 MiB), QoS0.
+- **Topology**: `publisher_only` · **Cadence**: `capacity`.
+- **Reading**: fragmentation / copy diagnostic; one point each.
 
 ### `payload_stress`
 
-- **But** : stress payload (8 MiB, str encoding, gros QoS1).
-- **Variants** : `blob8m` QoS0, `telemetry256_str` QoS0, `block64k`/`blob1m` QoS1.
+- **Goal**: payload stress (8 MiB, str encoding, large QoS1).
+- **Variants**: `blob8m` QoS0, `telemetry256_str` QoS0, `block64k`/`blob1m` QoS1.
 
 ### `topic_stress`
 
-- **But** : stress topiques (profondeur, longueur, unicode) + matching callbacks extrême.
-- **Topologie** : `subscriber_ingress` · 16 clients loadgen.
-- **Variants** : `deep32`, `long_topic_{256,1024}`, `unicode`, `callback_filters=4096`, overlapping × 8.
+- **Goal**: topic stress (depth, length, unicode) plus extreme callback matching.
+- **Topology**: `subscriber_ingress` · 16 loadgen clients.
+- **Variants**: `deep32`, `long_topic_{256,1024}`, `unicode`, `callback_filters=4096`, overlapping × 8.
 
 ### `sub_multi_subscribe`
 
-- **But** : N abonnements exacts sur un seul client.
-- **Variants** : `subscription_count ∈ {16,256}` · `subscription=multi_exact`.
+- **Goal**: N exact subscriptions on a single client.
+- **Variants**: `subscription_count ∈ {16,256}` · `subscription=multi_exact`.
 
 ### `fanin_scaling`
 
-- **But** : scaling fan-in publishers → 1 subscriber.
-- **Modes** :
-  - `constant_aggregate` : débit agrégé cible fixe (~40k), clients 1 / 16 / 128 ;
-  - `per_publisher` : ~1000 msg/s **par** client → agrégat = `clients × 1000`.
-- **Lecture** : connexion storm vs débit ; utile pour voir si le plafond bouge avec N.
+- **Goal**: fan-in scaling, publishers → 1 subscriber.
+- **Modes**:
+  - `constant_aggregate`: fixed aggregate target (~40k), 1 / 16 / 128 clients;
+  - `per_publisher`: ~1000 msg/s **per** client → aggregate = `clients × 1000`.
+- **Reading**: connection storm vs throughput; useful to see whether the ceiling moves with N.
 
 ### `fanout_scaling`
 
-- **But** : 1 publisher SUT → N subscribers (même lib).
-- **Topologie** : `publisher_with_oracle` · **Variants** : `subscribers ∈ {1,8,32}`.
-- **Primaire** : côté publisher (coût fan-out broker + N stacks client).
+- **Goal**: 1 SUT publisher → N subscribers (same library).
+- **Topology**: `publisher_with_oracle` · **Variants**: `subscribers ∈ {1,8,32}`.
+- **Primary**: publisher side (broker fan-out cost + N client stacks).
 
 ### `periodic_and_microburst`
 
-- **But** : formes de trafic extrêmes (très lent / micro-burst).
-- **Variants** : `periodic10` (10/s), `microburst` (`-L 1000`).
+- **Goal**: extreme traffic shapes (very slow / micro-burst).
+- **Variants**: `periodic10` (10/s), `microburst` (`-L 1000`).
 
 ### `mqttv5_properties`
 
-- **But** : coût des propriétés PUBLISH v5 « réalistes » vs v3.1.1 / v5 sans props.
-- **Topologie** : `publisher_with_oracle`.
-- **Variants** : `MQTTv311/none`, `MQTTv5/none`, `MQTTv5/realistic`.
+- **Goal**: cost of "realistic" v5 PUBLISH properties vs v3.1.1 / v5 without properties.
+- **Topology**: `publisher_with_oracle`.
+- **Variants**: `MQTTv311/none`, `MQTTv5/none`, `MQTTv5/realistic`.
 
 ### `mqttv5_rich`
 
-- **But** : propriétés lourdes ; variantes `topic_alias` / `subscription_identifier` souvent refusées (`not_implemented:*`) jusqu’à implémentation adapter.
+- **Goal**: heavy properties. The `topic_alias` / `subscription_identifier` variants are usually refused (`not_implemented:*`) until the adapters implement them.
 
 ### `qos_asymmetric`
 
-- **But** : paires QoS pub/sub asymétriques à débit borné (`steady50`).
-- **Variants** : (1,0), (2,1), (0,1).
+- **Goal**: asymmetric pub/sub QoS pairs at bounded rate (`steady50`).
+- **Variants**: (1,0), (2,1), (0,1).
+
+### `session_resume_qos1`
+
+- **Goal**: does a persistent session actually replay the QoS 1 backlog that piled up while the subscriber was away?
+- **Topology**: `publisher_with_oracle` · **Cadence**: `steady50` (~1000 msg/s) · tag `functional`.
+- **Outage**: the subscriber issues a plain `DISCONNECT` mid-window, stays offline for `outage_s`, then reconnects with the same client id and `clean_session=0` — **without re-subscribing**, since replaying the subscription would defeat the point. MQTT retains session state whenever Clean Session = 0, and Mosquitto keeps it in memory even with `persistence false` (that setting only disables the on-disk copy; sessions are lost on *broker restart*, which this scenario never does).
+- **Requires**: an adapter that can `connect()` again after `disconnect()` (`AdapterCapabilities.reconnect`); otherwise the point is refused with `not_implemented:reconnect`.
+- **Primary**: publisher throughput, pinned by the cadence — **not** a ranking. The substance is the integrity counters plus `delivered_after_resume` and `session_present_on_resume` on the subscriber worker.
+- **Reading**: `missing ≈ outage_s × rate` means the session was **not** resumed and the backlog was dropped. `delivered_after_resume = 0` means nothing at all came back after reconnect. Both are results, not run failures, so the run stays `valid` and the counters carry the verdict.
+- **Caveat**: a loss here is not automatically a verdict on the library — it can equally be the bench adapter rebuilding its client on reconnect. Attribute before quoting.
+- **Report**: excluded from the throughput chart (rate-capped).
+
+### `reconnect_ordering`
+
+- **Goal**: message loss and ordering across a reconnect, at two outage lengths.
+- **Topology**: same as above · **Variants**: `outage_s ∈ {1.0, 3.0}`.
+- **Primary**: `out_of_order` and `duplicates` from `integrity_counts`, on top of `missing`.
+- **Report**: excluded from the throughput chart.
+
+#### Outage variants deliberately left out
+
+The graceful disconnect above needs no privilege and stays comparable everywhere.
+Two stronger outages were considered and are **not** implemented:
+
+| Variant | Extra coverage | Why it is not here |
+|---|---|---|
+| Abrupt drop (`SO_LINGER=0` + `close()` → RST) | QoS 1 messages unacknowledged *at* the break, and their DUP retransmission | Needs access to the live socket. Paho exposes it publicly; asyncio clients hide it behind a transport, so it would have to become an adapter capability with reduced client coverage. |
+| Silent blackhole (`network.blackhole()`) | How long a client takes to notice a dead link | Needs `tc` + `CAP_NET_ADMIN`, so it cannot run everywhere — and it mostly measures the configured keepalive rather than the library. |
 
 ### `network_matrix`
 
-- **But** : même charge publish sous profils netem `localhost` / `lan` / `wan` / `edge`.
-- **Marquage** : tout `network ≠ localhost` → `non_comparable` (diagnostic machine/kernel).
+- **Goal**: the same publish load under `localhost` / `lan` / `wan` / `edge` netem profiles.
+- **Marking**: any `network ≠ localhost` → `non_comparable` (machine/kernel diagnostic).
 
 ### `tls_steady_state`
 
-- **But** : capacité publish QoS1 sur TLS **déjà établi** (pas handshake de masse).
-- **Topologie** : `publisher_only` · `tls=True`.
+- **Goal**: QoS1 publish capacity over an **already established** TLS session (not mass handshakes).
+- **Topology**: `publisher_only` · `tls=True`.
 
 ### `connect_latency_and_churn`
 
-- **But** : latence connect TCP/TLS et orages de connexions.
-- **Topologie** : `connect`.
-- **Variants** : serial TCP/TLS, `tls_resume`, concurrent 32/256.
-- **Refus partiels** : certaines variantes `not_implemented:*` selon adapter.
+- **Goal**: TCP/TLS connect latency and connection storms.
+- **Topology**: `connect` (runs inside the orchestrator, pinned to the `sut` cpuset).
+- **Variants**: serial TCP/TLS, `tls_resume`, concurrent 32/256.
+- **Partial refusals**: some variants are `not_implemented:*` depending on the adapter.
 
 ### `client_fleet_idle`
 
-- **But** : coût d’une flotte idle (keepalive 30 s) : RSS / CPU.
-- **Topologie** : `fleet` · tailles 1 / 32 / 256.
-- **Refus** : clients `async_bridged` (1 loop/thread par conn) → `fleet_async_bridged`.
+- **Goal**: cost of an idle fleet (30 s keepalive): RSS / CPU.
+- **Topology**: `fleet` · sizes 1 / 32 / 256.
+- **Refusals**: `async_bridged` clients (one loop/thread per connection) → `fleet_async_bridged`.
 
 ### `broker_ceiling_ingress`
 
-- **But** : sonde plafond **Mosquitto** sans SUT Python (emqtt pub + emqtt sub).
-- **Suite** : `full` · tags `diagnostic` · `non_comparable`.
-- **Variants** : `loadgen_clients ∈ {32,64,128}` → offre effective 32k / 64k / 128k (`I=1`).
-- **Primaire** : rate `recv` du sub de référence.
-- **Runbook** : [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md).
+- **Goal**: **Mosquitto** ceiling probe without a Python SUT (emqtt pub + emqtt sub).
+- **Suite**: `full` · tags `diagnostic` · `non_comparable`.
+- **Variants**: `loadgen_clients ∈ {32,64,128}` → effective offer 32k / 64k / 128k (`I=1`).
+- **Primary**: reference subscriber `recv` rate.
+- **Runbook**: [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md).
 
 ### `client_ceiling_ingress`
 
-- **But** : même grille d’offre, subscriber SUT — le client casse-t-il avant le broker ?
-- **Topologie** : `subscriber_ingress` · même offre que `broker_ceiling_ingress`.
-- **Primaire** : delivered SUT vs `effective_offer` + `$SYS`.
-- **Runbook** : [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md).
+- **Goal**: same offer grid with a SUT subscriber — does the client break before the broker?
+- **Topology**: `subscriber_ingress` · same offer as `broker_ceiling_ingress`.
+- **Primary**: SUT delivered vs `effective_offer` + `$SYS`.
+- **Runbook**: [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md).
 
 ---
 
-## Scénarios `planned` (catalogue seulement)
+## `planned` scenarios (catalogue only)
 
-Non exécutés par les suites ; forcés → `not_implemented:planned_scenario` :
+Not executed by the suites; forcing one yields `not_implemented:planned_scenario`:
 
-| Nom | Intention |
+| Name | Intent |
 |---|---|
-| `mqttv5_flow_control` | Interaction `Receive Maximum` broker vs inflight client |
-| `queue_rejection` | Comptage accepts/rejects sous pression de file |
-| `retained_bootstrap` | Snapshot retained massif (très sensible au broker) |
-| `session_resume_qos1` | Session persistante + outage court + drain attendu |
+| `mqttv5_flow_control` | Broker `Receive Maximum` vs client in-flight interaction |
+| `queue_rejection` | Accept/reject accounting under queue pressure |
+| `retained_bootstrap` | Massive retained snapshot (very broker-sensitive) |
 
 ---
 
 ## Suite `experimental`
 
-Même contrat de mesure que `core`, mais classements séparés pour clients expérimentaux (`zmqtt`, `aiomqtt3`). Voir README.
+Same measurement contract as `core`, but with separate rankings for experimental
+clients (`zmqtt`, `aiomqtt3`, `mqttium`, `mqttium-compat`). See the README.
 
 ---
 
-## Comment lire un résultat
+## How to read a result
 
-1. Regarder `status` / `reasons` (refus capability, broker CPU, open-loop hors tolérance).
-2. Regarder `bottleneck` (`sut_limited` / `broker_limited` / `loadgen_limited` / `offer_limited`) — heuristique, pas une vérité absolue.
-3. Pour l’ingress : comparer le primaire à `loadgen.effective_offer_msgs_per_s` (ou `nominal_rate`). **Ne pas** traiter `parsed.median_rate` QoS0 comme msgs/s réels (double-comptage emqtt-bench).
-4. Ne pas classer `duplex_gateway` / `e2e_integrity` comme des courses de débit : ils sont **volontairement plafonnés**.
-5. Latence : ne comparer que des points à la **même fraction** et avec calibration du **même** client.
-6. Plafonds broker/client : voir [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md) (`broker_ceiling_ingress`, `client_ceiling_ingress`).
+1. Look at `status` / `reasons` (capability refusal, broker CPU, open loop out of tolerance, broker reconciliation).
+2. Look at `bottleneck` (`sut_limited` / `broker_limited` / `broker_unconfirmed` / `loadgen_limited` / `offer_limited`) — a heuristic, not absolute truth.
+3. For ingress: compare the primary metric with `loadgen.effective_offer_msgs_per_s` (or `nominal_rate`). Do **not** treat QoS0 `parsed.median_rate` as real msgs/s (emqtt-bench double counting).
+4. Do not read `duplex_gateway` / `e2e_integrity` as throughput races: they are **deliberately rate-capped**.
+5. Latency: only compare points at the **same fraction** and calibrated from the **same** client.
+6. Broker/client ceilings: see [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md) (`broker_ceiling_ingress`, `client_ceiling_ingress`).
+7. Rankings are only meaningful within a peer group: same `io_model`, same MQTT protocol, and stable clients separate from experimental ones.
 
-## Fichiers liés
+## Related files
 
-| Fichier | Rôle |
+| File | Role |
 |---|---|
-| `src/mqtt_client_bench/scenarios.py` | Déclarations + profiles + expansion |
-| `src/mqtt_client_bench/harness.py` | Orchestration, loadgen, validation |
+| `src/mqtt_client_bench/scenarios.py` | Declarations + profiles + expansion |
+| `src/mqtt_client_bench/harness.py` | Orchestration, loadgen, validation, broker reconciliation |
 | `src/mqtt_client_bench/loadgen.py` | emqtt-bench, `nominal_rate`, parsing |
-| `src/mqtt_client_bench/sys_probe.py` | Probe `$SYS` dropped/sent |
-| `src/mqtt_client_bench/workloads.py` | Payloads, topics, header intégrité |
-| `src/mqtt_client_bench/roles/` | Workers publisher / subscriber / RTT / responder |
-| `docs/CEILING_PROBES.md` | Runbook plafonds broker / client |
-| `README.md` | Vue d’ensemble du banc et commandes CLI |
+| `src/mqtt_client_bench/sys_probe.py` | `$SYS` probe: dropped / sent / received |
+| `src/mqtt_client_bench/workloads.py` | Payloads, topics, integrity header |
+| `src/mqtt_client_bench/roles/` | publisher / subscriber / RTT / responder workers |
+| `docs/CEILING_PROBES.md` | Broker / client ceiling runbook |
+| `README.md` | Bench overview and CLI commands |

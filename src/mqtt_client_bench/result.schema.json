@@ -67,7 +67,52 @@
                 "loadgen": { "type": ["object", "null"] },
                 "telemetry": { "type": "array" },
                 "non_comparable": { "type": "boolean" },
-                "protocol_effective": { "type": "string" }
+                "protocol_effective": { "type": "string" },
+                "bottleneck": {
+                  "type": "string",
+                  "enum": [
+                    "sut_limited",
+                    "broker_limited",
+                    "broker_unconfirmed",
+                    "loadgen_limited",
+                    "offer_limited",
+                    "bottleneck_unattributed"
+                  ]
+                },
+                "broker_cpu_max_pct": { "type": ["number", "null"] },
+                "broker_reconciliation": {
+                  "type": ["object", "null"],
+                  "description": "Adapter-reported completions vs the broker's $SYS received-publish counter.",
+                  "properties": {
+                    "applicable": { "type": "boolean" },
+                    "reason": { "type": ["string", "null"] },
+                    "completed": { "type": ["integer", "null"] },
+                    "broker_received": { "type": ["integer", "null"] },
+                    "ratio": { "type": ["number", "null"] }
+                  }
+                },
+                "cost_per_message": {
+                  "type": ["object", "null"],
+                  "description": "Total SUT CPU over the measure window per logical message.",
+                  "properties": {
+                    "cpu_ns_in_window": { "type": "integer" },
+                    "messages": { "type": "integer" },
+                    "published": { "type": "integer" },
+                    "delivered": { "type": "integer" },
+                    "cpu_us_per_message": { "type": ["number", "null"] },
+                    "rss_peak_kb": { "type": ["integer", "null"] }
+                  }
+                },
+                "started_at": { "type": "string" },
+                "finished_at": { "type": "string" },
+                "host_state": {
+                  "type": ["object", "null"],
+                  "properties": {
+                    "scaling_governor": { "type": ["string", "null"] },
+                    "loadavg": { "type": "array" },
+                    "cpu_count": { "type": ["integer", "null"] }
+                  }
+                }
               }
             }
           },

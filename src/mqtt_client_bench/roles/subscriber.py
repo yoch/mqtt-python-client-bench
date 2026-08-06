@@ -63,6 +63,10 @@ def main(argv=None) -> int:
         "lock": threading.Lock(),
         "sub_mids": set(),
         "granted_ok": True,
+        # Session-resume bookkeeping.
+        "delivered_after_resume": 0,
+        "session_present_on_resume": None,
+        "reconnect_error": None,
     }
 
     filters = _subscription_filters(cfg, run_id)
@@ -73,9 +77,17 @@ def main(argv=None) -> int:
     )
 
     def _record_delivery_locked(msg, now: int) -> None:
-        """Count one application delivery. Caller must hold state['lock']."""
+        """Count one application delivery. Caller must hold state['lock'].
+
+        One-way delivery latency is ``now - header.send_ns`` across two
+        processes. That is only valid because CPython's ``perf_counter_ns`` maps
+        to ``CLOCK_MONOTONIC`` on Linux, whose epoch is system-wide; the numbers
+        would be meaningless on a platform with a per-process epoch.
+        """
         state["subscriber_delivered"] += 1
-        if state["phase"] == "measure":
+        if state["phase"] == "resume":
+            state["delivered_after_resume"] += 1
+        if state["phase"] in ("measure", "resume"):
             state["delivered_in_window"] += 1
             state["bytes_in_window"] += len(msg.payload or b"")
             payload = msg.payload or b""
@@ -112,6 +124,8 @@ def main(argv=None) -> int:
         rc = int(getattr(reason_code, "value", reason_code))
         if rc != 0:
             return
+        if state["phase"] == "outage":
+            state["session_present_on_resume"] = _session_present(flags)
         state["connected"].set()
 
     def on_subscribe(client, userdata, mid, reason_code_list, properties=None):
@@ -241,9 +255,24 @@ def main(argv=None) -> int:
     with state["lock"]:
         state["callback_invocations"] = 0
         state["phase"] = "measure"
+    # See the publisher: CPU is measured over the window it is divided by.
+    cpu_ns_start = time.process_time_ns()
     t0 = time.perf_counter()
-    time.sleep(duration_s)
+    outage_s = float(cfg.get("outage_s") or 0.0)
+    if outage_s > 0:
+        # Go offline mid-window so the publisher keeps producing on both sides of
+        # the gap; the backlog queued during the outage is what resume replays.
+        outage_at_s = float(cfg.get("outage_at_s") or (duration_s / 3.0))
+        outage_at_s = max(0.0, min(outage_at_s, max(duration_s - outage_s - 0.5, 0.0)))
+        time.sleep(outage_at_s)
+        _run_outage_cycle(adapter, state, cfg, outage_s)
+        remaining = duration_s - (time.perf_counter() - t0)
+        if remaining > 0:
+            time.sleep(remaining)
+    else:
+        time.sleep(duration_s)
     t1 = time.perf_counter()
+    cpu_ns_in_window = time.process_time_ns() - cpu_ns_start
 
     # Snapshot measure-window counters before drain so rates match duration_s.
     with state["lock"]:
@@ -284,12 +313,84 @@ def main(argv=None) -> int:
         "payload_bytes_in_window": bytes_in_window,
         "payload_bytes_per_s": bytes_in_window / window,
         "callback_invocations": callback_invocations,
+        "cpu_ns_in_window": cpu_ns_in_window,
         "sequences": sequences[:200000],
         "latencies_ns": latencies[:50000],
         **identity,
     }
+    if outage_s > 0:
+        with state["lock"]:
+            result.update(
+                {
+                    "outage_s": outage_s,
+                    "delivered_after_resume": state["delivered_after_resume"],
+                    "session_present_on_resume": state["session_present_on_resume"],
+                    "reconnect_error": state["reconnect_error"],
+                    "reconnect_ok": state["reconnect_error"] is None,
+                }
+            )
+        if state["reconnect_error"] is not None:
+            result["ok"] = False
+            result["error"] = state["reconnect_error"]
     write_json(cfg["result_path"], result)
     return 0
+
+
+def _session_present(flags) -> bool | None:
+    """Read the CONNACK session-present flag, whatever shape the adapter uses.
+
+    Paho VERSION2 passes a ``ConnectFlags`` object; bridged adapters pass a dict,
+    and gmqtt uses the paho v1 spelling with a space. Returns None when the
+    adapter does not report it at all — informational only, never a gate: the
+    trustworthy signal is whether the backlog was actually drained.
+    """
+    value = getattr(flags, "session_present", None)
+    if value is not None:
+        return bool(value)
+    if isinstance(flags, dict):
+        for key in ("session_present", "session present"):
+            if key in flags:
+                return bool(flags[key])
+    return None
+
+
+def _run_outage_cycle(adapter, state, cfg, outage_s: float) -> None:
+    """Disconnect, stay offline while the publisher keeps going, then resume.
+
+    A graceful DISCONNECT is enough: MQTT retains session state whenever Clean
+    Session = 0, so the broker queues QoS 1 messages for the offline subscriber
+    and replays them on reconnect. No re-subscribe here — replaying the
+    subscription would defeat the point of the persistent session.
+    """
+    state["phase"] = "outage"
+    state["connected"].clear()
+    # Only the MQTT connection goes down. Tearing down the I/O machinery as well
+    # (loop_stop) would kill the bridged adapters' event loop, and their internal
+    # objects stay bound to it — that is a harness artefact, not a client trait.
+    try:
+        adapter.disconnect()
+    except Exception as exc:  # noqa: BLE001
+        state["reconnect_error"] = f"disconnect_failed:{exc}"
+        return
+
+    time.sleep(outage_s)
+
+    try:
+        adapter.connect(cfg["host"], int(cfg["port"]), keepalive=int(cfg.get("keepalive", 60)))
+        # Paho's network thread exits on a clean disconnect, so the CONNACK would
+        # never be processed without this. For bridged adapters loop_start() is
+        # `_ensure_bridge()`, a no-op while the loop is alive.
+        try:
+            adapter.loop_start()
+        except Exception:  # noqa: BLE001 - already running
+            pass
+    except Exception as exc:  # noqa: BLE001
+        state["reconnect_error"] = f"reconnect_failed:{exc}"
+        return
+    if not state["connected"].wait(30):
+        state["reconnect_error"] = "reconnect_timeout"
+        return
+    state["phase"] = "resume"
 
 
 def _subscription_filters(cfg, run_id):

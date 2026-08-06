@@ -40,6 +40,11 @@ class AdapterCapabilities:
     # inter-client rankings for sub_callback_matching.
     native_message_callback_add: bool = False
     v5_publish_properties: bool = False
+    # Whether connect() may be called again on the same adapter instance after a
+    # disconnect, resuming a persistent session. Required by the session-resume
+    # scenarios; an adapter that cannot do it is refused rather than measured
+    # against a fresh session.
+    reconnect: bool = True
     stability: str = "stable"  # stable | experimental
     io_model: str = "sync"  # sync | asyncio_bridged | crt_event_loop
     implementation_language: str = "python"  # python | native
@@ -68,6 +73,8 @@ class AdapterCapabilities:
             missing.append("max_inflight")
         if point.get("require_max_queued") and not self.max_queued:
             missing.append("max_queued")
+        if point.get("outage_s") is not None and not self.reconnect:
+            missing.append("reconnect")
         if int(point.get("callback_filters", 0) or 0) > 0 and not self.native_message_callback_add:
             missing.append("native_message_callback_add")
         if point.get("topology") == "fleet" and self.async_bridged:

@@ -12,7 +12,7 @@ from pathlib import Path
 from mqtt_client_bench.adapters.registry import CLIENT_NAMES, list_clients
 from mqtt_client_bench.broker import broker_down, broker_up, ensure_certs
 from mqtt_client_bench.control import write_json
-from mqtt_client_bench.harness import calibrate, compare_clients, run_scenario, run_suite
+from mqtt_client_bench.harness import calibrate, compare_clients, run_matrix, run_scenario, run_suite
 from mqtt_client_bench.network import PROFILES
 from mqtt_client_bench.report import build_site
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, default_runs, estimate_suite, list_scenarios
@@ -114,6 +114,67 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_matrix(args: argparse.Namespace) -> int:
+    clients = [c.strip() for c in args.clients.split(",") if c.strip()]
+    if len(clients) < 2:
+        print("error: --clients needs at least two names, e.g. paho,gmqtt", file=sys.stderr)
+        return 2
+    unknown = [c for c in clients if c not in CLIENT_NAMES]
+    if unknown:
+        print(f"error: unknown client(s): {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    if args.scenario and args.scenario not in SCENARIO_BY_NAME:
+        print(f"error: unknown scenario {args.scenario}", file=sys.stderr)
+        return 2
+
+    if args.scenario:
+        scenarios = [args.scenario]
+    else:
+        scenarios = [s.name for s in list_scenarios(args.suite) if "planned" not in s.tags]
+
+    load_profiles = {}
+    if args.load_profile_dir:
+        root = Path(args.load_profile_dir)
+        for client in clients:
+            candidate = root / f"{client}-load.json"
+            if candidate.exists():
+                load_profiles[client] = str(candidate)
+
+    for name in scenarios:
+        print(f"==> {name} ({', '.join(clients)} interleaved)", flush=True)
+        result = run_matrix(
+            name,
+            clients,
+            profile=args.profile,
+            runs=args.runs,
+            broker=args.broker,
+            network=args.network,
+            output_dir=args.output_dir,
+            load_profiles=load_profiles,
+            seed=args.seed,
+        )
+        for client, doc in result["documents"].items():
+            medians = [
+                block["summary"].get("median")
+                for block in doc["results"]
+                if block["summary"].get("median") is not None
+            ]
+            valid = sum(
+                1
+                for block in doc["results"]
+                for run in block["runs"]
+                if run.get("status") == "valid"
+            )
+            total = sum(len(block["runs"]) for block in doc["results"])
+            # smoke runs are non_comparable, so they never produce a median.
+            best = f"{max(medians):,.0f}" if medians else "n/a"
+            print(
+                f"    {client:<16} points={len(doc['results'])} "
+                f"valid_runs={valid}/{total} best_median={best}"
+            )
+    return 0
+
+
 def cmd_calibrate(args: argparse.Namespace) -> int:
     payload = calibrate(
         args.output,
@@ -192,6 +253,25 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--output")
     run_p.add_argument("--seed", type=int, default=42)
     run_p.set_defaults(func=cmd_run)
+
+    matrix_p = sub.add_parser(
+        "matrix",
+        help="Run several clients interleaved within each point (recommended for published rankings)",
+    )
+    matrix_p.add_argument("--clients", required=True, help="Comma-separated clients, e.g. paho,gmqtt,aiomqtt")
+    matrix_p.add_argument("--scenario", help="Single scenario; omit to run a whole suite")
+    matrix_p.add_argument("--suite", choices=["core", "full", "experimental"], default="core")
+    matrix_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
+    matrix_p.add_argument("--runs", type=int)
+    matrix_p.add_argument("--broker", help="External broker host:port")
+    matrix_p.add_argument("--network", choices=sorted(PROFILES.keys()))
+    matrix_p.add_argument(
+        "--load-profile-dir",
+        help="Directory of <client>-load.json calibrations (needed by load_fraction scenarios)",
+    )
+    matrix_p.add_argument("--output-dir", default="results", help="Where to write <client>-<scenario>.json")
+    matrix_p.add_argument("--seed", type=int, default=42)
+    matrix_p.set_defaults(func=cmd_matrix)
 
     cal_p = sub.add_parser("calibrate", help="Create open-loop load profile from baseline capacity")
     cal_p.add_argument("--client", choices=list(CLIENT_NAMES), default="paho")
