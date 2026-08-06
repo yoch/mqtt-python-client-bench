@@ -1454,8 +1454,57 @@ def run_matrix(
                         "summary": summarize_valid_runs(runs_by_client[client]),
                     }
                 )
+            # Checkpoint after every point. A campaign runs for hours and gets
+            # interrupted (machine sleep, session teardown, Ctrl-C); writing only
+            # at the end meant an interruption threw away the whole scenario, up
+            # to an hour of measurement. `points_expected` lets a resuming
+            # campaign tell a partial file from a finished one.
+            if output_dir:
+                _write_matrix_documents(
+                    clients,
+                    per_client,
+                    name=name,
+                    profile=profile,
+                    runs=runs,
+                    seed=seed,
+                    client_paths=client_paths,
+                    meta=meta,
+                    cpusets=cpusets,
+                    output_dir=output_dir,
+                    points_expected=len(ordered_points),
+                )
 
-    documents = {}
+    documents = _write_matrix_documents(
+        clients,
+        per_client,
+        name=name,
+        profile=profile,
+        runs=runs,
+        seed=seed,
+        client_paths=client_paths,
+        meta=meta,
+        cpusets=cpusets,
+        output_dir=output_dir,
+        points_expected=len(ordered_points),
+    )
+    return {"scenario": name, "clients": list(clients), "documents": documents}
+
+
+def _write_matrix_documents(
+    clients: List[str],
+    per_client: Dict[str, List[dict]],
+    *,
+    name: str,
+    profile: str,
+    runs: int,
+    seed: int,
+    client_paths: Dict[str, str],
+    meta: dict,
+    cpusets: Dict[str, str],
+    output_dir: Optional[str],
+    points_expected: int,
+) -> Dict[str, dict]:
+    documents: Dict[str, dict] = {}
     for client in clients:
         documents[client] = _scenario_payload(
             name=name,
@@ -1467,11 +1516,15 @@ def run_matrix(
             meta=meta,
             all_results=per_client[client],
             cpusets=cpusets,
-            extra={"interleaved_with": [c for c in clients if c != client]},
+            extra={
+                "interleaved_with": [c for c in clients if c != client],
+                "points_expected": points_expected,
+                "points_complete": len(per_client[client]) >= points_expected,
+            },
         )
         if output_dir:
             write_json(str(Path(output_dir) / f"{client}-{name}.json"), documents[client])
-    return {"scenario": name, "clients": list(clients), "documents": documents}
+    return documents
 
 
 def run_scenario(

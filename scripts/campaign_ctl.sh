@@ -15,6 +15,8 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+UNIT="${UNIT:-mqtt-bench-campaign}"
+
 find_pgid() {
   local pid
   pid=$(pgrep -f 'run_campaign_5h' | grep -v cursorsandbox | head -1) || return 1
@@ -24,7 +26,9 @@ find_pgid() {
 
 cmd_status() {
   local pgid
-  if ! pgid=$(find_pgid) || [[ -z "$pgid" ]]; then
+  if systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
+    echo "campaign: running as systemd --user unit '$UNIT'"
+  elif ! pgid=$(find_pgid) || [[ -z "$pgid" ]]; then
     echo "campaign: NOT running"
   else
     echo "campaign: running (process group $pgid)"
@@ -35,36 +39,62 @@ cmd_status() {
       | head -4
   fi
   echo
-  echo "scenarios completed by the current harness:"
+  echo "scenario progress (current harness only):"
   python - <<'PY'
 import json
 from pathlib import Path
+from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario
+
 REPR = ["pub_payload_sweep_qos0","pub_qos_sweep_telemetry","pub_qos1_inflight",
         "sub_exact_telemetry","sub_hierarchy_telemetry","sub_callback_matching",
         "duplex_gateway","burst_recovery","e2e_integrity","puback_latency_qos1",
         "application_rtt_qos1"]
 done_n = 0
 for scenario in REPR:
-    files = sorted(Path("results").glob(f"*-{scenario}.json"))
-    fresh = 0
-    for path in files:
+    expected = len(expand_scenario(SCENARIO_BY_NAME[scenario], "standard"))
+    fresh, partial = 0, 0
+    for path in sorted(Path("results").glob(f"*-{scenario}.json")):
         try:
             data = json.loads(path.read_text())
         except Exception:
             continue
-        runs = [r for b in (data.get("results") or []) for r in (b.get("runs") or [])]
-        if runs and all("started_at" in r for r in runs):
+        blocks = data.get("results") or []
+        runs = [r for b in blocks for r in (b.get("runs") or [])]
+        if not runs or not all("started_at" in r for r in runs):
+            continue
+        if len(blocks) >= expected:
             fresh += 1
-    mark = "done" if fresh else "pending"
+        else:
+            partial = max(partial, len(blocks))
     if fresh:
         done_n += 1
-    print(f"  {scenario:<28} {mark:>8}  ({fresh} client files)")
+        state = "done"
+    elif partial:
+        state = f"partial {partial}/{expected} pts"
+    else:
+        state = "pending"
+    print(f"  {scenario:<28} {state:>18}  ({fresh} complete client files)")
 print(f"\n  {done_n}/{len(REPR)} scenarios complete")
 PY
 }
 
 cmd_stop() {
   local pgid
+  # A campaign started as a systemd unit is stopped through systemd. SIGINT is
+  # sent explicitly to the whole unit cgroup so the harness cleanup runs; a plain
+  # `systemctl stop` would use SIGTERM, which skips it.
+  if systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
+    echo "stopping systemd --user unit '$UNIT' with SIGINT..."
+    systemctl --user kill --signal=SIGINT "$UNIT" 2>/dev/null
+    for _ in $(seq 1 30); do
+      sleep 1
+      systemctl --user is-active --quiet "$UNIT" 2>/dev/null || break
+    done
+    systemctl --user stop "$UNIT" >/dev/null 2>&1 || true
+    systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true
+    echo "stopped. Resume with: bash scripts/campaign_ctl.sh resume"
+    return 0
+  fi
   if ! pgid=$(find_pgid) || [[ -z "$pgid" ]]; then
     echo "campaign is not running; nothing to stop"
     return 0
@@ -97,6 +127,23 @@ cmd_resume() {
   fi
   local clients="${CLIENTS:-paho,gmqtt,aiomqtt,amqtt,awscrt,zmqtt,mqttium,mqttium-compat}"
   echo "resuming with clients=$clients (completed scenarios are skipped)"
+  # `setsid` was not enough: the campaign died twice at session teardown, since
+  # the terminal's cgroup is torn down with it whatever the process group says.
+  # A transient systemd --user *service* (not --scope, which stays in the
+  # caller's cgroup) is owned by the user manager and outlives the session.
+  if command -v systemd-run >/dev/null 2>&1 && systemctl --user is-system-running >/dev/null 2>&1; then
+    systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true
+    if systemd-run --user --unit="$UNIT" --same-dir --collect \
+        --setenv=CLIENTS="$clients" --setenv=PYTHONPATH=src \
+        bash scripts/run_campaign_5h.sh >/dev/null 2>&1; then
+      echo "started as systemd --user unit '$UNIT' (survives this session)"
+      echo "  follow: journalctl --user -u $UNIT -f    or    tail -f logs/campaign.log"
+      sleep 3
+      cmd_status
+      return 0
+    fi
+    echo "systemd-run failed; falling back to setsid (will not survive session teardown)"
+  fi
   CLIENTS="$clients" setsid nohup bash scripts/run_campaign_5h.sh \
     >> logs/campaign-stdout.log 2>&1 < /dev/null &
   disown

@@ -1333,6 +1333,51 @@ class MatrixRunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             run_matrix("pub_qos_sweep_telemetry", ["paho"])
 
+    def test_matrix_checkpoints_mark_partial_scenarios(self):
+        # Points are written as they finish so an interruption costs one point,
+        # not the whole scenario. A resuming campaign must be able to tell a
+        # half-written file from a finished one.
+        import tempfile
+
+        from mqtt_client_bench.harness import _write_matrix_documents
+
+        with tempfile.TemporaryDirectory() as tmp:
+            clients = ["paho", "gmqtt"]
+            per_client = {c: [{"point": {}, "runs": [], "summary": {}}] for c in clients}
+            docs = _write_matrix_documents(
+                clients, per_client, name="pub_qos_sweep_telemetry", profile="standard",
+                runs=3, seed=42, client_paths={}, meta={}, cpusets={},
+                output_dir=tmp, points_expected=6,
+            )
+            self.assertEqual(docs["paho"]["points_expected"], 6)
+            self.assertFalse(docs["paho"]["points_complete"], "1 of 6 points is partial")
+            self.assertTrue(Path(tmp, "paho-pub_qos_sweep_telemetry.json").exists())
+
+            for c in clients:
+                per_client[c] = [{"point": {}, "runs": [], "summary": {}} for _ in range(6)]
+            docs = _write_matrix_documents(
+                clients, per_client, name="pub_qos_sweep_telemetry", profile="standard",
+                runs=3, seed=42, client_paths={}, meta={}, cpusets={},
+                output_dir=tmp, points_expected=6,
+            )
+            self.assertTrue(docs["gmqtt"]["points_complete"])
+
+    def test_resume_check_rejects_partial_scenario_files(self):
+        # Mirrors the completeness test in scripts/run_campaign_5h.sh: a file
+        # whose runs carry provenance but whose points are incomplete must be
+        # re-run, not skipped.
+        def complete(blocks, expected):
+            runs = [r for b in blocks for r in (b.get("runs") or [])]
+            if not runs or not all("started_at" in r for r in runs):
+                return False
+            return len(blocks) >= expected
+
+        run = {"started_at": "2026-08-06T00:00:00+00:00"}
+        self.assertFalse(complete([{"runs": [run]}], 6), "partial must re-run")
+        self.assertTrue(complete([{"runs": [run]}] * 6, 6))
+        # Pre-fix results carry no provenance, so they never count as done.
+        self.assertFalse(complete([{"runs": [{}]}] * 6, 6))
+
     def test_matrix_documents_keep_scenario_shape(self):
         # The report reads <client>-<scenario>.json; the interleaved runner must
         # emit exactly that shape, only with extra provenance.
