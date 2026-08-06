@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Bounded campaign: calibrate (publish + RTT capacity per MQTT protocol) +
 # representative core (3 runs, standard 12/3/6) + 2 ABBA + report.
+#
+# Scenarios run through `matrix`, which interleaves every client *within each
+# point* instead of running one full client campaign after another. Sequential
+# campaigns let hours of thermal drift and background load enter the ranking as
+# if they were differences between libraries; interleaving removes that, and the
+# client order rotates between repetitions so no client always runs first.
+#
 # Dual-protocol scenarios expand MQTTv311×MQTTv5 automatically.
 # After pulling dual-protocol changes, re-run calibrate for every client.
 # Fail closed: any step error aborts the rest.
@@ -10,10 +17,15 @@ cd "$(dirname "$0")/.."
 source .venv/bin/activate
 mkdir -p calibrations results logs
 
-START=$(date +%s)
-echo "CAMPAIGN start $(date -Is)" | tee logs/campaign.log
+CLIENTS="${CLIENTS:-paho,gmqtt,aiomqtt,amqtt,awscrt}"
 
-for c in paho gmqtt aiomqtt amqtt awscrt; do
+START=$(date +%s)
+echo "CAMPAIGN start $(date -Is) clients=$CLIENTS" | tee logs/campaign.log
+
+# Calibration stays per client: it measures that client's own capacity, and its
+# output is only ever compared with itself.
+IFS=',' read -ra CLIENT_LIST <<<"$CLIENTS"
+for c in "${CLIENT_LIST[@]}"; do
   echo "==> calibrate $c" | tee -a logs/campaign.log
   python -m mqtt_client_bench.run calibrate \
       --client "$c" --profile standard \
@@ -35,22 +47,17 @@ REPR=(
   application_rtt_qos1
 )
 
-for c in paho gmqtt aiomqtt amqtt awscrt; do
-  for s in "${REPR[@]}"; do
-    out="results/${c}-${s}.json"
-    if [[ -f "$out" ]]; then
-      echo "skip $out" | tee -a logs/campaign.log
-      continue
-    fi
-    echo "==> $c $s" | tee -a logs/campaign.log
-    python -m mqtt_client_bench.run run \
-        --scenario "$s" --client "$c" --profile standard --runs 3 \
-        --load-profile "calibrations/${c}-load.json" \
-        --output "$out" \
-        >"logs/${c}-${s}.log" 2>&1
-  done
+for s in "${REPR[@]}"; do
+  echo "==> matrix $s ($CLIENTS)" | tee -a logs/campaign.log
+  python -m mqtt_client_bench.run matrix \
+      --clients "$CLIENTS" --scenario "$s" --profile standard --runs 3 \
+      --load-profile-dir calibrations \
+      --output-dir results \
+      >"logs/matrix-${s}.log" 2>&1
 done
 
+# ABBA stays for the pairwise verdicts with bootstrap confidence intervals;
+# the matrix above gives the ranking, this gives the significance.
 echo "==> ABBA paho,gmqtt" | tee -a logs/campaign.log
 python -m mqtt_client_bench.run compare \
   --clients paho,gmqtt --scenario pub_qos_sweep_telemetry \

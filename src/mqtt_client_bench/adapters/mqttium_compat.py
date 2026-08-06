@@ -19,6 +19,13 @@ class MqttiumCompatAdapter:
     """Bench ``mqttium.compat.paho`` only — not comparable to native ``mqttium``."""
 
     MQTT_ERR_SUCCESS = 0
+    # See GmqttAdapter._PRIVATE_API for the rationale of this inventory.
+    _PRIVATE_API = {
+        "Client._async": "façade ctor exposes no max_outbound_inflight (through a4); the inner AsyncClient is rebuilt so QoS>=1 runs the same window as peers",
+        "Client._loop": "needed to schedule the properties publish path on the façade's own loop",
+        "AsyncClient._engine / _engine_lock": "subscribe registration: the façade has no on_subscribe hook to deliver grants",
+        "AsyncClient._queue_qos0_on_loop / _queue_qosn_on_loop / _finalize_loop_commands": "rebound after the inner client is replaced",
+    }
 
     def __init__(self, client: Any):
         self._client = client
@@ -81,6 +88,7 @@ class MqttiumCompatAdapter:
             "implementation_language": caps.implementation_language,
             "synthetic_mids": caps.synthetic_mids,
             "display_note": caps.notes,
+            "private_api": dict(cls._PRIVATE_API),
         }
 
     @classmethod
@@ -114,9 +122,12 @@ class MqttiumCompatAdapter:
             clean_session=clean_session,
             max_pending_outbound_messages=pending,
         )
-        # a3: max_outbound_inflight is attach-time only; the façade ctor does not
-        # expose it and ProtocolEngine.reconfigure rejects it once attached.
-        # Replace the inner AsyncClient before loop_start/connect.
+        # Through a4: max_outbound_inflight is attach-time only; the façade ctor
+        # does not expose it and ProtocolEngine.reconfigure rejects it once
+        # attached. Replace the inner AsyncClient before loop_start/connect so
+        # QoS>=1 points run with the same window as the other clients.
+        # Re-check on each mqttium bump: if the façade gains the parameter, drop
+        # this rebuild and pass it straight to Client(...).
         inner = AsyncClient(
             client_id=client_id,
             protocol=proto,
@@ -290,7 +301,7 @@ class MqttiumCompatAdapter:
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
         """Paho-shaped subscribe: return mid before SUBACK, then fire on_subscribe.
 
-        The a3 façade exposes ``Client.subscribe`` but has no ``on_subscribe``
+        The façade (through a4) exposes ``Client.subscribe`` but has no ``on_subscribe``
         hook, so the bench mirrors ``AsyncClient.subscribe`` registration
         (queue + ``_sub_futs`` + effect drain) to deliver grants to the harness.
         Mid must be returned before the callback: roles add mid to a wait-set

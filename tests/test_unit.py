@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -199,7 +200,10 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual(unsupported_features({"payload": "telemetry256", "qos_publish": 0}), [])
         self.assertIn("receive_maximum", unsupported_features({"receive_maximum": 10}))
         self.assertIn("retained_count", unsupported_features({"retained_count": 10_000}))
-        self.assertIn("session_outage", unsupported_features({"outage_s": 2.0}))
+        # outage_s is implemented (graceful disconnect/reconnect), so it must no
+        # longer be refused; it only requires an adapter that can reconnect and
+        # an outage short enough to leave traffic on both sides of the gap.
+        self.assertEqual(unsupported_features({"outage_s": 2.0, "duration_s": 12.0}), [])
         self.assertIn("queue_rejection_protocol", unsupported_features({"submit_count": 150}))
         self.assertIn("properties_profile:topic_alias", unsupported_features({"properties_profile": "topic_alias"}))
         self.assertIn("connect_mode:tcp_concurrent", unsupported_features({"connect_mode": "tcp_concurrent"}))
@@ -279,6 +283,35 @@ class AdapterRegistryTests(unittest.TestCase):
             self.assertEqual(info["client"], name)
             self.assertIsNotNone(info.get("client_module"), name)
 
+    def test_adapters_declare_their_private_api_use(self):
+        # Reaching into a library's internals changes what is being measured, so
+        # every such dependency must be declared and visible in the result JSON.
+        from mqtt_client_bench.adapters.registry import adapter_identity
+
+        for name in ("gmqtt", "aiomqtt", "mqttium-compat"):
+            info = adapter_identity(name)
+            declared = info.get("private_api")
+            self.assertTrue(declared, f"{name} must declare its private API use")
+            for attr, reason in declared.items():
+                self.assertTrue(reason.strip(), f"{name}:{attr} needs a reason")
+
+    def test_gmqtt_private_api_shape(self):
+        # gmqtt's public publish() drops the packet id, so QoS>=1 mirrors it via
+        # internals. If a gmqtt release moves them, fail here rather than let the
+        # adapter silently measure something else.
+        import inspect
+
+        from gmqtt import Client
+
+        source = inspect.getsource(Client.publish)
+        self.assertIn("self._connection.publish(message)", source)
+        self.assertIn("push_message_nowait", source)
+        # Still returns nothing: that is why QoS>=1 cannot use the public API.
+        self.assertNotIn("return ", source)
+        client = Client("shape-probe")
+        for attr in ("_connection", "_persistent_storage", "_remove_message_from_query"):
+            self.assertTrue(hasattr(client, attr), f"gmqtt no longer exposes {attr}")
+
     def test_gmqtt_v5_properties_align_payload_format(self):
         from mqtt_client_bench.adapters.gmqtt import GmqttAdapter
         from mqtt_client_bench.adapters.paho import build_paho_publish_properties
@@ -345,7 +378,6 @@ class BridgedAdapterTests(unittest.TestCase):
         self.assertEqual(subscribed[0][2], 3)
 
     def test_schedule_coro_coalesces_wake(self):
-        import asyncio
         import time
 
         from mqtt_client_bench.adapters.async_bridge import AsyncioBridge
@@ -376,6 +408,86 @@ class BridgedAdapterTests(unittest.TestCase):
         # races a second append before clearing the flag).
         self.assertGreaterEqual(wakes["n"], 1)
         self.assertLessEqual(wakes["n"], 8)
+
+    def test_schedule_coro_reuses_workers(self):
+        # await-only publish APIs must not pay one asyncio.Task per message:
+        # that is a harness tax schedule_call clients never pay.
+        import time
+
+        from mqtt_client_bench.adapters.async_bridge import AsyncioBridge
+
+        bridge = AsyncioBridge()
+        bridge.start()
+        done = []
+
+        async def _work(i):
+            done.append(i)
+
+        for i in range(500):
+            bridge.schedule_coro(_work(i))
+            # Let the loop drain so a single worker can be handed the next item.
+            time.sleep(0.0005)
+        deadline = time.time() + 5.0
+        while len(done) < 500 and time.time() < deadline:
+            time.sleep(0.01)
+        workers = len(bridge._workers)
+        bridge.stop()
+        self.assertEqual(len(done), 500)
+        # 500 messages served by a handful of reused workers, not 500 tasks.
+        self.assertLessEqual(workers, 16)
+
+    def test_schedule_coro_keeps_concurrency_for_awaiting_publishes(self):
+        # Workers are created on demand, so overlapping in-flight publishes (QoS>=1
+        # awaiting a PUBACK) are not serialised by the pool.
+        import asyncio
+        import time
+
+        from mqtt_client_bench.adapters.async_bridge import AsyncioBridge
+
+        bridge = AsyncioBridge()
+        bridge.start()
+        gate = {"release": None}
+        started = []
+        finished = []
+
+        async def _blocked(i):
+            started.append(i)
+            await gate["release"]
+            finished.append(i)
+
+        async def _make_gate():
+            gate["release"] = asyncio.get_running_loop().create_future()
+
+        bridge.run(_make_gate())
+        for i in range(64):
+            bridge.schedule_coro(_blocked(i))
+        deadline = time.time() + 5.0
+        while len(started) < 64 and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(len(started), 64, "pool serialised concurrent publishes")
+        self.assertEqual(finished, [])
+        bridge._loop.call_soon_threadsafe(gate["release"].set_result, None)
+        deadline = time.time() + 5.0
+        while len(finished) < 64 and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(len(finished), 64)
+        bridge.stop()
+
+    def test_bridge_stop_drops_queued_work_cleanly(self):
+        from mqtt_client_bench.adapters.async_bridge import AsyncioBridge
+
+        bridge = AsyncioBridge()
+        bridge.start()
+        ran = []
+
+        async def _work():
+            ran.append(1)
+
+        # Queue without letting the loop drain, then tear down.
+        with bridge._pending_lock:
+            bridge._pending.append(_work())
+        bridge.stop()
+        self.assertFalse(bridge.running)
 
     def test_alloc_mid_cycles(self):
         from mqtt_client_bench.adapters.async_bridge import BridgedAdapterBase
@@ -464,6 +576,120 @@ class PublisherContractTests(unittest.TestCase):
             missed += 1
         self.assertEqual(missed, 1)
 
+    def _drive_publish_loop(self, *, ack_mode: str, outstanding: int = 8, until_s: float = 0.05):
+        """Run the real publish loop against a fake adapter.
+
+        ``ack_mode``: "sync" fires on_publish inside publish() (before it returns,
+        the early-ack race), "deferred" fires it after publish() returns, "never"
+        leaves the mid outstanding.
+        """
+        import threading
+        import time as _time
+
+        from mqtt_client_bench.adapters.base import PublishResult
+        from mqtt_client_bench.roles import publisher as pub_mod
+
+        state = {
+            "offered": 0,
+            "submitted": 0,
+            "sync_rejected": 0,
+            "completed_success": 0,
+            "completed_failed": 0,
+            "missed_due_to_backpressure": 0,
+            "publish_calls": 0,
+            "publish_accepted": 0,
+            "publish_rejected": 0,
+            "protocol_completed": 0,
+            "protocol_failed": 0,
+            "socket_completed_qos0": 0,
+            "completed_in_window": 0,
+            "completed_during_drain": 0,
+            "latencies_ns": [],
+            "scheduler_lags_ns": [],
+            "lock": threading.Lock(),
+            "inflight_local": 0,
+            "phase": "measure",
+            "mid_send_ns": {},
+            "early_acks": {},
+            "seen_mids_inflight": set(),
+        }
+
+        def on_publish(client, userdata, mid, reason_code=None, properties=None):
+            now = _time.perf_counter_ns()
+            with state["lock"]:
+                send_ns = state["mid_send_ns"].pop(mid, None)
+                if send_ns is None:
+                    state["early_acks"][mid] = (now, False)
+                    return
+                pub_mod._consume_completion_locked(state, 1, send_ns, now, False, mid=mid)
+
+        class FakeAdapter:
+            def __init__(self):
+                self.next_mid = 0
+                self.pending = []
+
+            def publish(self, topic, payload=None, qos=0, retain=False, properties=None):
+                # Wrap like a real 16-bit packet id so mid reuse is exercised.
+                self.next_mid = 1 if self.next_mid >= 32 else self.next_mid + 1
+                mid = self.next_mid
+                if ack_mode == "sync":
+                    on_publish(self, None, mid)
+                elif ack_mode == "deferred":
+                    self.pending.append(mid)
+                    # Ack in batches so the loop keeps going and mids get reused,
+                    # exercising completion-after-publish-returns with wrapping.
+                    if len(self.pending) >= max(1, outstanding // 2):
+                        self.flush()
+                return PublishResult(rc=0, mid=mid)
+
+            def flush(self):
+                for mid in self.pending:
+                    on_publish(self, None, mid)
+                self.pending.clear()
+
+        adapter = FakeAdapter()
+        pub_mod._run_publish_loop(
+            adapter,
+            state,
+            topic="t",
+            qos=1,
+            body=b"x" * 8,
+            corpus=[],
+            run_id=b"abcdefgh",
+            outstanding=outstanding,
+            cadence="capacity",
+            until=_time.perf_counter() + until_s,
+            target_rate=None,
+            properties_builder=lambda: None,
+        )
+        adapter.flush()
+        return state
+
+    def test_publish_loop_tracker_matches_outstanding_mids(self):
+        # seen_mids_inflight is maintained incrementally (no per-message rebuild):
+        # it must stay exactly the set of submitted-but-uncompleted mids.
+        for mode in ("sync", "deferred"):
+            with self.subTest(ack_mode=mode):
+                state = self._drive_publish_loop(ack_mode=mode)
+                self.assertGreater(state["offered"], 0)
+                self.assertEqual(
+                    state["seen_mids_inflight"],
+                    set(state["mid_send_ns"]) | set(state["early_acks"]),
+                )
+                self.assertEqual(state["completed_success"], state["submitted"])
+                # A wrapping mid that was already freed must not count as a collision.
+                self.assertEqual(state["completed_failed"], 0)
+                self.assertEqual(state["inflight_local"], 0)
+
+    def test_publish_loop_gate_blocks_at_outstanding_without_acks(self):
+        # No completions: the outstanding gate must bound submissions and the
+        # tracker must hold exactly those still-open mids.
+        state = self._drive_publish_loop(ack_mode="never", outstanding=8)
+        self.assertEqual(state["inflight_local"], 8)
+        self.assertEqual(state["submitted"], 8)
+        self.assertEqual(len(state["seen_mids_inflight"]), 8)
+        self.assertEqual(state["seen_mids_inflight"], set(state["mid_send_ns"]))
+
     def test_aiomqtt3_refuses_v5_property_profiles(self):
         missing = unsupported_for_client(
             "aiomqtt3", {"protocol": "MQTTv5", "properties_profile": "realistic"}
@@ -485,8 +711,10 @@ class ScenarioTests(unittest.TestCase):
         self.assertFalse(any(p.get("topic_topology") == "fleet100k" for p in stress))
         net = expand_scenario(SCENARIO_BY_NAME["network_matrix"], "standard")
         self.assertFalse(any(p.get("network") == "wan_cut" for p in net))
+        # session_resume_qos1 is executable now: a plain DISCONNECT is enough of an
+        # outage, since MQTT keeps session state whenever Clean Session = 0.
         session = SCENARIO_BY_NAME["session_resume_qos1"]
-        self.assertIn("planned", session.tags)
+        self.assertNotIn("planned", session.tags)
 
     def test_rtt_requires_tcp_nodelay(self):
         # Without TCP_NODELAY the RTT loop measures a ~40 ms/hop Nagle plateau.
@@ -505,7 +733,7 @@ class ScenarioTests(unittest.TestCase):
     def test_niche_scenarios_are_planned(self):
         # Harness-level gaps: kept in the catalogue, excluded from suite
         # execution instead of burning campaign time on refused points.
-        for name in ("mqttv5_flow_control", "queue_rejection", "retained_bootstrap", "session_resume_qos1"):
+        for name in ("mqttv5_flow_control", "queue_rejection", "retained_bootstrap"):
             scenario = SCENARIO_BY_NAME[name]
             self.assertIn("planned", scenario.tags, name)
             for point in expand_scenario(scenario, "standard"):
@@ -803,6 +1031,393 @@ class CeilingProbeTests(unittest.TestCase):
         self.assertEqual(delta["publish_received_delta"], 380)
 
 
+class FairnessGateTests(unittest.TestCase):
+    def _pub_worker(self, completed):
+        return {"ok": True, "role": "publisher", "completed_success": completed}
+
+    def test_reconciliation_accepts_broker_confirmed_run(self):
+        from mqtt_client_bench.harness import reconcile_broker_publishes
+
+        out = reconcile_broker_publishes(
+            {"topology": "publisher_only"},
+            [self._pub_worker(100_000)],
+            {"publish_received_delta": 99_000},
+        )
+        self.assertTrue(out["applicable"])
+        self.assertIsNone(out["reason"])
+        self.assertAlmostEqual(out["ratio"], 0.99, places=2)
+
+    def test_reconciliation_rejects_completions_the_broker_never_saw(self):
+        # The QoS0 failure mode: an adapter counts a publish at an in-process
+        # queue, so the broker never receives most of them.
+        from mqtt_client_bench.harness import reconcile_broker_publishes
+
+        out = reconcile_broker_publishes(
+            {"topology": "publisher_only"},
+            [self._pub_worker(100_000)],
+            {"publish_received_delta": 40_000},
+        )
+        self.assertTrue(out["reason"].startswith("broker_received_below_completed:"))
+
+    def test_reconciliation_flags_missing_probe(self):
+        from mqtt_client_bench.harness import reconcile_broker_publishes
+
+        out = reconcile_broker_publishes(
+            {"topology": "publisher_only"}, [self._pub_worker(10)], None
+        )
+        self.assertEqual(out["reason"], "publisher_completions_unconfirmed")
+
+    def test_reconciliation_skips_topologies_with_other_publishers(self):
+        # emqtt-bench publishes here too, so the broker counter mixes sources.
+        from mqtt_client_bench.harness import reconcile_broker_publishes
+
+        for topology in ("subscriber_ingress", "duplex_gateway", "broker_ceiling", "application_rtt"):
+            out = reconcile_broker_publishes(
+                {"topology": topology}, [self._pub_worker(100)], {"publish_received_delta": 0}
+            )
+            self.assertFalse(out["applicable"], topology)
+            self.assertIsNone(out["reason"], topology)
+
+    def test_validate_run_invalidates_unconfirmed_publisher_run(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            {"topology": "publisher_only", "duration_s": 12.0},
+            [self._pub_worker(100_000)],
+            None,
+            [],
+            sys_counters={"publish_received_delta": 10_000},
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertEqual(out["bottleneck"], "broker_unconfirmed")
+
+    def test_broker_headroom_gate(self):
+        from mqtt_client_bench.harness import validate_run
+
+        def run_with_cpu(pct):
+            samples = [{"containers": {"mosquitto": {"cpu_pct": pct}}}]
+            return validate_run(
+                {"topology": "publisher_only", "duration_s": 12.0},
+                [self._pub_worker(1000)],
+                None,
+                samples,
+                sys_counters={"publish_received_delta": 1000},
+            )
+
+        quiet = run_with_cpu(40.0)
+        self.assertEqual(quiet["status"], "valid")
+        self.assertEqual(quiet["broker_cpu_max_pct"], 40.0)
+
+        tight = run_with_cpu(75.0)
+        self.assertEqual(tight["status"], "inconclusive")
+        self.assertEqual(tight["bottleneck"], "broker_limited")
+        self.assertTrue(any(r.startswith("broker_headroom_low:") for r in tight["reasons"]))
+
+        saturated = run_with_cpu(95.0)
+        self.assertEqual(saturated["bottleneck"], "broker_limited")
+        self.assertTrue(any(r.startswith("container_cpu_high:") for r in saturated["reasons"]))
+
+    def test_worker_error_reported_once(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            {"topology": "publisher_only", "duration_s": 12.0},
+            [{"ok": False, "role": "publisher", "error": "warmup_drain_timeout"}],
+            None,
+            [],
+        )
+        self.assertEqual(
+            [r for r in out["reasons"] if "warmup_drain_timeout" in r],
+            ["worker_error:warmup_drain_timeout"],
+        )
+
+    def test_host_state_reasons(self):
+        from mqtt_client_bench.harness import host_state_reasons
+
+        self.assertEqual(host_state_reasons({"scaling_governor": "performance", "loadavg": [1.0], "cpu_count": 8}), [])
+        self.assertIn(
+            "cpu_governor_not_performance:powersave",
+            host_state_reasons({"scaling_governor": "powersave", "loadavg": [1.0], "cpu_count": 8}),
+        )
+        busy = host_state_reasons({"scaling_governor": "performance", "loadavg": [20.0], "cpu_count": 8})
+        self.assertTrue(any(r.startswith("host_busy_at_start:") for r in busy))
+        # Threshold scales with the machine: same load on a big box is fine.
+        self.assertEqual(
+            host_state_reasons({"scaling_governor": "performance", "loadavg": [20.0], "cpu_count": 64}), []
+        )
+
+    def test_inflight_window_is_equalised_except_in_the_sweep(self):
+        # Clients that expose max_inflight must not run a narrower window than
+        # clients that ignore it and are bounded only by `outstanding`.
+        from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario
+
+        for name, scenario in SCENARIO_BY_NAME.items():
+            for point in expand_scenario(scenario, "standard"):
+                if point.get("require_max_inflight"):
+                    continue  # pub_qos1_inflight sweeps the window on purpose
+                self.assertEqual(
+                    point["inflight"],
+                    point["outstanding"],
+                    f"{name}: in-flight window differs from the outstanding gate",
+                )
+                self.assertGreaterEqual(point["max_queued"], point["inflight"])
+
+    def test_new_scenarios_are_additive(self):
+        # The new coverage lives in `full` so it does not force a re-run of the
+        # published `core` campaign.
+        from mqtt_client_bench.scenarios import SCENARIO_BY_NAME
+
+        for name in ("sub_delivery_latency", "pubcomp_latency_qos2", "cost_per_message"):
+            self.assertIn(name, SCENARIO_BY_NAME)
+            self.assertEqual(SCENARIO_BY_NAME[name].suite, "full", name)
+            self.assertNotIn("planned", SCENARIO_BY_NAME[name].tags, name)
+
+    def test_session_resume_scenarios_are_executable(self):
+        from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario
+
+        for name in ("session_resume_qos1", "reconnect_ordering"):
+            scenario = SCENARIO_BY_NAME[name]
+            self.assertNotIn("planned", scenario.tags, name)
+            self.assertEqual(scenario.suite, "full", name)
+            for point in expand_scenario(scenario, "standard"):
+                self.assertTrue(point.get("session_persistent"), name)
+                self.assertGreater(float(point["outage_s"]), 0.0, name)
+                # The outage must fit inside the measure window with room on
+                # both sides, otherwise there is no backlog to replay.
+                self.assertLess(float(point["outage_s"]), float(point["duration_s"]), name)
+
+    def test_outage_must_fit_inside_the_measure_window(self):
+        # A 3 s outage in a 3 s smoke window leaves no traffic to replay: that is
+        # a degenerate measurement, so it must be refused, not published.
+        from mqtt_client_bench.harness import unsupported_features
+
+        degenerate = unsupported_features({"outage_s": 3.0, "duration_s": 3.0})
+        self.assertTrue(any(r.startswith("outage_exceeds_window") for r in degenerate), degenerate)
+        # Half the window or less is fine, so short smoke runs stay usable.
+        self.assertEqual(unsupported_features({"outage_s": 3.0, "duration_s": 12.0}), [])
+        self.assertEqual(unsupported_features({"outage_s": 1.0, "duration_s": 3.0}), [])
+
+    def test_outage_requires_a_reconnecting_adapter(self):
+        from mqtt_client_bench.adapters.base import AdapterCapabilities
+
+        caps = AdapterCapabilities(name="x", reconnect=False)
+        self.assertIn("reconnect", caps.missing_for_point({"outage_s": 2.0}))
+        self.assertEqual(
+            AdapterCapabilities(name="x").missing_for_point({"outage_s": 2.0}), []
+        )
+
+    def test_session_present_flag_shapes(self):
+        # Adapters report CONNACK flags in three different shapes.
+        from mqtt_client_bench.roles.subscriber import _session_present
+
+        class PahoStyle:
+            session_present = True
+
+        self.assertTrue(_session_present(PahoStyle()))
+        self.assertTrue(_session_present({"session_present": True}))
+        self.assertTrue(_session_present({"session present": True}))  # gmqtt / paho v1
+        self.assertFalse(_session_present({"session_present": False}))
+        self.assertIsNone(_session_present({}), "unreported must stay unknown, not False")
+
+    def test_resume_scenarios_stay_out_of_the_throughput_chart(self):
+        # Their throughput is pinned by the cadence; the substance is integrity.
+        from mqtt_client_bench.report import _CHART_EXCLUDED_SCENARIOS
+
+        self.assertIn("session_resume_qos1", _CHART_EXCLUDED_SCENARIOS)
+        self.assertIn("reconnect_ordering", _CHART_EXCLUDED_SCENARIOS)
+
+    def test_cost_per_message_uses_worker_window_cpu(self):
+        # CPU must come from the workers' own measure window. Telemetry samples
+        # span warmup and drain too, so using them would divide out-of-window CPU
+        # by in-window messages.
+        from mqtt_client_bench.harness import cost_per_message
+
+        samples = [
+            {"processes": {"w0": {"cpu_ticks": 1000, "rss_kb": 40_000}}},
+            {"processes": {"w0": {"cpu_ticks": 9999, "rss_kb": 52_000}}},
+        ]
+        workers = [
+            {"role": "publisher", "completed_in_window": 120_000, "cpu_ns_in_window": 6_000_000_000}
+        ]
+        out = cost_per_message(workers, samples)
+        self.assertEqual(out["messages"], 120_000)
+        self.assertEqual(out["cpu_ns_in_window"], 6_000_000_000)
+        self.assertEqual(out["rss_peak_kb"], 52_000)
+        self.assertAlmostEqual(out["cpu_us_per_message"], 50.0)
+
+    def test_cost_per_message_does_not_double_count_pub_and_sub(self):
+        # In a pub+sub topology each logical message is published once and
+        # delivered once; summing both would halve the reported cost.
+        from mqtt_client_bench.harness import cost_per_message
+
+        workers = [
+            {"role": "publisher", "completed_in_window": 1000, "cpu_ns_in_window": 1_000_000_000},
+            {"role": "subscriber", "subscriber_delivered": 1000, "cpu_ns_in_window": 1_000_000_000},
+        ]
+        out = cost_per_message(workers, [])
+        self.assertEqual(out["messages"], 1000, "denominator must be logical messages")
+        self.assertEqual(out["published"], 1000)
+        self.assertEqual(out["delivered"], 1000)
+        # Both processes' CPU over 1000 messages: 2 s / 1000 = 2000 us.
+        self.assertAlmostEqual(out["cpu_us_per_message"], 2000.0)
+
+    def test_cost_per_message_needs_cpu_and_traffic(self):
+        from mqtt_client_bench.harness import cost_per_message
+
+        self.assertIsNone(cost_per_message([], []))
+        # No worker CPU recorded (older result files) -> no figure at all.
+        self.assertIsNone(cost_per_message([{"role": "publisher", "completed_in_window": 10}], []))
+        # CPU but no traffic.
+        self.assertIsNone(
+            cost_per_message(
+                [{"role": "publisher", "completed_in_window": 0, "cpu_ns_in_window": 5}], []
+            )
+        )
+
+    def test_broker_cpu_judged_on_the_measure_window(self):
+        # A warmup ramp spike must not invalidate a run whose measured window was
+        # quiet; without the window filter this run would be broker_limited.
+        from mqtt_client_bench.harness import validate_run
+
+        samples = [
+            {"ts": 100.0, "containers": {"mosquitto": {"cpu_pct": 95.0}}},  # warmup ramp
+            {"ts": 200.0, "containers": {"mosquitto": {"cpu_pct": 30.0}}},  # measure
+            {"ts": 201.0, "containers": {"mosquitto": {"cpu_pct": 32.0}}},  # measure
+            {"ts": 300.0, "containers": {"mosquitto": {"cpu_pct": 91.0}}},  # drain
+        ]
+        point = {"topology": "publisher_only", "duration_s": 12.0}
+        workers = [{"ok": True, "role": "publisher", "completed_success": 1000}]
+        sys_counters = {"publish_received_delta": 1000}
+
+        scoped = validate_run(point, workers, None, samples, sys_counters=sys_counters,
+                              measure_window=(199.0, 202.0))
+        self.assertEqual(scoped["status"], "valid")
+        self.assertEqual(scoped["broker_cpu_max_pct"], 32.0)
+
+        unscoped = validate_run(point, workers, None, samples, sys_counters=sys_counters)
+        self.assertEqual(unscoped["broker_cpu_max_pct"], 95.0)
+        self.assertEqual(unscoped["bottleneck"], "broker_limited")
+
+    def test_measure_window_filter_falls_back_when_empty(self):
+        from mqtt_client_bench.harness import _samples_in_window
+
+        samples = [{"ts": 10.0}, {"ts": 11.0}]
+        self.assertEqual(_samples_in_window(samples, None), samples)
+        self.assertEqual(_samples_in_window(samples, (10.5, 10.9)), samples, "no samples inside -> keep all")
+        self.assertEqual(_samples_in_window(samples, (9.0, 10.5)), [{"ts": 10.0}])
+
+    def test_inflight_sweep_still_sweeps(self):
+        from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario
+
+        points = expand_scenario(SCENARIO_BY_NAME["pub_qos1_inflight"], "standard")
+        self.assertEqual(sorted(p["inflight"] for p in points), [1, 20, 100])
+        self.assertTrue(all(p["require_max_inflight"] for p in points))
+
+
+class MatrixRunnerTests(unittest.TestCase):
+    def test_rotation_counterbalances_slot_positions(self):
+        # Position within a point is itself a condition (the first client runs on
+        # a freshly idle machine), so it must rotate across repetitions.
+        clients = ["paho", "gmqtt", "aiomqtt"]
+        seen = {c: set() for c in clients}
+        for run_idx in range(len(clients)):
+            rotation = clients[run_idx % len(clients):] + clients[: run_idx % len(clients)]
+            for slot, client in enumerate(rotation):
+                seen[client].add(slot)
+        for client, slots in seen.items():
+            self.assertEqual(slots, {0, 1, 2}, f"{client} never occupied every slot")
+
+    def test_matrix_requires_two_clients(self):
+        from mqtt_client_bench.harness import run_matrix
+
+        with self.assertRaises(ValueError):
+            run_matrix("pub_qos_sweep_telemetry", ["paho"])
+
+    def test_matrix_documents_keep_scenario_shape(self):
+        # The report reads <client>-<scenario>.json; the interleaved runner must
+        # emit exactly that shape, only with extra provenance.
+        from mqtt_client_bench.harness import _scenario_payload
+
+        doc = _scenario_payload(
+            name="pub_qos_sweep_telemetry",
+            profile="standard",
+            runs=3,
+            seed=42,
+            client="paho",
+            client_path=None,
+            meta={"managed_broker": True},
+            all_results=[],
+            cpusets={"sut": "0,4"},
+            extra={"interleaved_with": ["gmqtt"]},
+        )
+        for key in ("schema_version", "scenario", "profile", "runs", "client", "client_identity", "results"):
+            self.assertIn(key, doc)
+        self.assertEqual(doc["interleaved_with"], ["gmqtt"])
+
+
+class TelemetryTests(unittest.TestCase):
+    def _fake_cgroup(self, usage_usec: int, mem_bytes: int = 1024):
+        import tempfile
+
+        d = tempfile.mkdtemp(prefix="cgroup-")
+        Path(d, "cpu.stat").write_text(
+            f"usage_usec {usage_usec}\nuser_usec 1\nsystem_usec 2\n", encoding="utf-8"
+        )
+        Path(d, "memory.current").write_text(f"{mem_bytes}\n", encoding="utf-8")
+        return d
+
+    def test_cgroup_readers(self):
+        from mqtt_client_bench.telemetry import cgroup_cpu_usec, cgroup_memory_bytes
+
+        d = self._fake_cgroup(123456, mem_bytes=4096)
+        self.assertEqual(cgroup_cpu_usec(d), 123456)
+        self.assertEqual(cgroup_memory_bytes(d), 4096)
+        self.assertIsNone(cgroup_cpu_usec("/nonexistent-cgroup"))
+        self.assertIsNone(cgroup_memory_bytes("/nonexistent-cgroup"))
+
+    def test_container_sampler_cpu_percent_matches_docker_convention(self):
+        # 100% == one saturated core, same as `docker stats`, so the existing
+        # >=85% broker-saturation rule keeps its meaning.
+        from mqtt_client_bench.telemetry import ContainerSampler
+
+        sampler = ContainerSampler.__new__(ContainerSampler)
+        sampler.name = "fake"
+        sampler._last = None
+        sampler.cgroup_path = self._fake_cgroup(1_000_000)
+        first = sampler.sample()
+        self.assertIsNone(first["cpu_pct"], "first sample has no delta yet")
+        self.assertEqual(first["source"], "cgroup")
+
+        # Pretend one wall second elapsed and one CPU-second was consumed.
+        sampler._last = (sampler._last[0] - 1.0, 1_000_000)
+        Path(sampler.cgroup_path, "cpu.stat").write_text(
+            "usage_usec 2000000\n", encoding="utf-8"
+        )
+        second = sampler.sample()
+        self.assertAlmostEqual(second["cpu_pct"], 100.0, delta=1.0)
+
+    def test_pin_current_process_rejects_bad_input(self):
+        from mqtt_client_bench.telemetry import pin_current_process
+
+        self.assertIsNone(pin_current_process(None))
+        self.assertIsNone(pin_current_process(""))
+        self.assertIsNone(pin_current_process("not-a-cpu"))
+
+    def test_temporarily_pinned_restores_affinity(self):
+        import os
+
+        from mqtt_client_bench.telemetry import allocate_cpuset, temporarily_pinned
+
+        if not hasattr(os, "sched_getaffinity"):
+            self.skipTest("sched_getaffinity unavailable")
+        before = os.sched_getaffinity(0)
+        cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile="smoke")
+        with temporarily_pinned(cpusets["sut"]):
+            inside = os.sched_getaffinity(0)
+        self.assertEqual(os.sched_getaffinity(0), before)
+        self.assertEqual(inside, {int(c) for c in cpusets["sut"].split(",")})
+
+
 class SchemaTests(unittest.TestCase):
     def test_schema_file_exists_and_parses(self):
         import json
@@ -919,7 +1534,6 @@ class ReportTests(unittest.TestCase):
             self.assertFalse(any(site.rglob("*.json")))
 
     def test_performance_matrix_on_index(self):
-        import html
         import json
         import tempfile
 
@@ -959,6 +1573,11 @@ class ReportTests(unittest.TestCase):
             (results / "gmqtt-pub.json").write_text(
                 json.dumps(sample("gmqtt", "pub_qos_sweep_telemetry", 8000.0)), encoding="utf-8"
             )
+            # Same peer group as gmqtt (both asyncio_bridged), so "best" is a
+            # meaningful comparison; paho sits in the sync group on its own.
+            (results / "aiomqtt-pub.json").write_text(
+                json.dumps(sample("aiomqtt", "pub_qos_sweep_telemetry", 5000.0)), encoding="utf-8"
+            )
             (results / "paho-duplex.json").write_text(
                 json.dumps(sample("paho", "duplex_gateway", 200.0)), encoding="utf-8"
             )
@@ -990,23 +1609,33 @@ class ReportTests(unittest.TestCase):
             index = (site / "index.html").read_text(encoding="utf-8")
             self.assertIn("Performance matrix", index)
             self.assertIn('class="matrix"', index)
-            self.assertIn('class="num best"', index)
             self.assertIn("8,000.0", index)
-            self.assertIn("data-overview=", index)
+            # "Best" is scoped to a peer group: gmqtt beats aiomqtt among the
+            # bridged clients, and paho — alone in the sync group — is never
+            # crowned just for having no one to compare against.
+            matrix_only = index[index.index('class="matrix"') : index.index("All results")]
+            self.assertIn('class="num best" title', matrix_only)
+            best_cells = re.findall(r'<td class="num best"[^>]*>([\d,.]+)</td>', matrix_only)
+            self.assertEqual(best_cells, ["8,000.0"])
+            # The chart is server-rendered SVG: no CDN, no canvas, no JS.
+            self.assertIn('<svg class="chart-svg"', index)
+            self.assertNotIn("<canvas", index)
             # Rate-capped / niche checks stay in the matrix (at the end) but leave the chart.
             self.assertIn("duplex_gateway", index)
             self.assertIn("e2e_integrity", index)
             self.assertIn("sub_callback_matching", index)
             self.assertIn("remaining_length_boundaries", index)
-            overview_attr = index.split("data-overview='", 1)[1].split("'></canvas>", 1)[0]
-            overview_payload = json.loads(html.unescape(overview_attr))
-            self.assertNotIn("duplex_gateway", overview_payload["scenarios"])
-            self.assertNotIn("e2e_integrity", overview_payload["scenarios"])
-            self.assertNotIn("sub_callback_matching", overview_payload["scenarios"])
-            self.assertNotIn("remaining_length_boundaries", overview_payload["scenarios"])
-            self.assertEqual(overview_payload["scenarios"], ["pub_qos_sweep_telemetry · MQTTv311"])
-            clients_in_chart = [s["client"] for s in overview_payload["series"]]
-            self.assertEqual(clients_in_chart, ["gmqtt", "paho"])
+            chart_svg = index.split('<svg class="chart-svg"', 1)[1].split("</svg>", 1)[0]
+            self.assertIn("pub_qos_sweep_telemetry · MQTTv311", chart_svg)
+            for excluded in (
+                "duplex_gateway",
+                "e2e_integrity",
+                "sub_callback_matching",
+                "remaining_length_boundaries",
+            ):
+                self.assertNotIn(excluded, chart_svg)
+            for client in ("gmqtt", "paho"):
+                self.assertIn(client, chart_svg)
             matrix_body = index[index.index('class="matrix"') :]
             self.assertLess(
                 matrix_body.index("pub_qos_sweep_telemetry · MQTTv311"),
@@ -1021,12 +1650,14 @@ class ReportTests(unittest.TestCase):
                 matrix_body.index("sub_callback_matching · MQTTv311"),
                 matrix_body.index("remaining_length_boundaries · MQTTv311"),
             )
-            # Matrix header order matches chart: gmqtt before paho (io_model badges OK).
-            self.assertLess(matrix_body.index("gmqtt"), matrix_body.index("paho"))
+            # Columns are grouped by peer group, so sync (paho) precedes the
+            # asyncio_bridged block (gmqtt, aiomqtt) regardless of client name.
+            self.assertLess(matrix_body.index("paho"), matrix_body.index("gmqtt"))
             self.assertIn("asyncio_bridged", matrix_body)
             self.assertIn("sync", matrix_body)
+            self.assertIn('class="group-head"', matrix_body)
             # Compare docs must not inflate the Clients hero stat.
-            self.assertRegex(index, r'stat-label">Clients</p>\s*<p class="stat-value">2</p>')
+            self.assertRegex(index, r'stat-label">Clients</p>\s*<p class="stat-value">3</p>')
 
     def test_client_load_signals_surface_on_index(self):
         import json
@@ -1107,10 +1738,15 @@ class ReportTests(unittest.TestCase):
             self.assertIn("open_loop_rate_out_of_tolerance", index)
             self.assertIn("capability", index)
             self.assertIn("tcp_nodelay", index)
-            # Matrix stays numeric-only; issues live in the dedicated table.
+            # The matrix stays numeric — a refusal is never rendered as a value —
+            # but an empty cell now says *why* it is empty instead of showing a
+            # bare em-dash that could equally mean "never run".
             matrix_body = index[index.index('class="matrix"') : index.index("Client issues")]
-            self.assertNotIn("open_loop_rate_out_of_tolerance", matrix_body)
-            self.assertNotIn("tcp_nodelay", matrix_body)
+            self.assertIn('class="num empty empty-refused"', matrix_body)
+            self.assertIn("⊘", matrix_body)
+            self.assertNotIn("<td class=\"num\">tcp_nodelay", matrix_body)
+            # The reason appears only as a tooltip, never as a cell value.
+            self.assertIn('title="refused — client lacks the capability: tcp_nodelay"', matrix_body)
 
     def test_integrity_aggregates_all_runs(self):
         from mqtt_client_bench.report import _collect_integrity

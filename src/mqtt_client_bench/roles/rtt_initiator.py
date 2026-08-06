@@ -198,9 +198,9 @@ def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, unt
     next_send = time.perf_counter()
     seq = sequence_start
     while time.perf_counter() < until:
-        with state["lock"]:
-            inflight = len(state["inflight"])
-        if inflight >= outstanding:
+        # dict len() is atomic under the GIL; taking the lock per sample adds
+        # scheduling jitter on the very path whose latency we publish.
+        if len(state["inflight"]) >= outstanding:
             time.sleep(0.0005)
             continue
         now = time.perf_counter()

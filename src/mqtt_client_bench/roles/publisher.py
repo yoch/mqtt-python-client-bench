@@ -239,6 +239,10 @@ def main(argv=None) -> int:
         return 1
 
     state["phase"] = "measure"
+    # Process CPU across the measure window only. Deriving cost-per-message from
+    # the orchestrator's telemetry samples instead would fold warmup and drain
+    # CPU into a denominator that counts measure-window messages alone.
+    cpu_ns_start = time.process_time_ns()
     t0 = time.perf_counter()
     measure_end = t0 + duration_s
     measure_sequences = _run_publish_loop(
@@ -259,6 +263,7 @@ def main(argv=None) -> int:
         force_header=bool(cfg.get("force_header", False)),
     )
     t1 = time.perf_counter()
+    cpu_ns_in_window = time.process_time_ns() - cpu_ns_start
 
     state["phase"] = "drain"
     drain_deadline = time.perf_counter() + drain_s
@@ -324,6 +329,7 @@ def main(argv=None) -> int:
         "payload_bytes_per_s": (completed_in_window * payload_len) / window,
         "latencies_ns": latencies[:50000],
         "scheduler_lags_ns": lags[:50000],
+        "cpu_ns_in_window": cpu_ns_in_window,
         "gc_count_start": list(gc_start),
         "gc_count_end": list(gc.get_count()),
         **identity,
@@ -404,9 +410,9 @@ def _run_publish_loop(
             if now < next_send:
                 time.sleep(min(0.001, next_send - now))
                 continue
-            lag_ns = int((now - next_send) * 1e9)
-            with state["lock"]:
-                state["scheduler_lags_ns"].append(lag_ns)
+            # list.append is atomic under the GIL and only this thread appends;
+            # the final snapshot copies the list under the lock.
+            state["scheduler_lags_ns"].append(int((now - next_send) * 1e9))
             next_send += interval
 
         n = batch_size if cadence == "batch64" else 1
@@ -414,16 +420,18 @@ def _run_publish_loop(
             if time.perf_counter() >= until:
                 break
 
-            with state["lock"]:
-                saturated = state["inflight_local"] >= outstanding
-            if saturated:
+            # Plain int read: atomic under the GIL, and a stale-by-one value only
+            # shifts the gate by one message. Taking the lock here would add a
+            # per-message acquire on the hot path for no accuracy gain.
+            if state["inflight_local"] >= outstanding:
                 # Outstanding gate applies to ALL cadences. Open-loop counts a miss
                 # instead of spawning unbounded work.
                 if open_loop:
-                    with state["lock"]:
-                        state["offered"] += 1
-                        state["missed_due_to_backpressure"] += 1
-                        state["publish_calls"] += 1
+                    # Publisher-thread-only counters (see the offered/publish_calls
+                    # note below): no lock needed.
+                    state["offered"] += 1
+                    state["missed_due_to_backpressure"] += 1
+                    state["publish_calls"] += 1
                     continue
                 time.sleep(0.0001)
                 break
@@ -453,12 +461,17 @@ def _run_publish_loop(
                     payload = payload_body
 
             props = properties_builder()
-            with state["lock"]:
-                state["offered"] += 1
-                state["publish_calls"] += 1
+            # One critical section per publish: rebuilding trackers or taking the
+            # lock several times per message is harness cost that scales with the
+            # client's own rate, which compresses inter-client ratios.
+            # offered/publish_calls/submitted/sync_rejected are written only by this
+            # thread (on_publish never touches them), so they need no lock; the final
+            # snapshot reads them under the lock.
+            state["offered"] += 1
+            state["publish_calls"] += 1
             info = adapter.publish(topic, payload=payload, qos=qos, retain=False, properties=props)
-            if info.rc == 0 and info.mid is not None:
-                with state["lock"]:
+            with state["lock"]:
+                if info.rc == 0 and info.mid is not None:
                     mid = info.mid
                     if mid in state["seen_mids_inflight"]:
                         # Synthetic MID collision while still inflight — treat as failure signal.
@@ -468,6 +481,8 @@ def _run_publish_loop(
                     state["submitted"] += 1
                     state["publish_accepted"] += 1
                     state["inflight_local"] += 1
+                    # seen_mids_inflight is maintained incrementally: added here,
+                    # discarded by _consume_completion_locked on completion.
                     state["seen_mids_inflight"].add(mid)
                     if early is not None:
                         early_now, early_failed = early
@@ -476,13 +491,9 @@ def _run_publish_loop(
                     else:
                         state["mid_send_ns"][mid] = send_ns
                     sent_sequences.append(sequence)
-            else:
-                with state["lock"]:
+                else:
                     state["sync_rejected"] += 1
                     state["publish_rejected"] += 1
-            # Keep uniqueness tracker aligned with still-open inflight / early ACKs.
-            with state["lock"]:
-                state["seen_mids_inflight"] = set(state["mid_send_ns"]) | set(state["early_acks"])
     return sent_sequences
 
 

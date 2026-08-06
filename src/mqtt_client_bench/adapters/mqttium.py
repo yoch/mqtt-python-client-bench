@@ -1,4 +1,4 @@
-"""MQTTium native adapter — AsyncClient via AsyncioBridge (PyPI ≥0.1.0a3)."""
+"""MQTTium native adapter — AsyncClient via AsyncioBridge (PyPI ≥0.1.0a4)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from mqtt_client_bench.adapters.base import AdapterCapabilities, PublishResult, 
 class MqttiumAdapter(BridgedAdapterBase):
     """Bench the native ``mqttium.api.AsyncClient`` API (not the Paho façade).
 
-    On the bridge loop, prefer ``publish_nowait()`` (0.1.0a3+): loop-bound,
+    On the bridge loop, prefer ``publish_nowait()`` (0.1.0a4+): loop-bound,
     non-suspending admission + coalesced effect flush. Fall back to
     ``await publish(..., nowait=True)`` on older wheels. Completions still
     report via synthetic mid + ``on_publish`` after ``receipt.wait()``.
@@ -23,7 +23,7 @@ class MqttiumAdapter(BridgedAdapterBase):
     _NOTES = (
         "MQTTium AsyncClient (https://pypi.org/project/mqttium/) — async-native MQTT "
         "3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop "
-        "(PyPI ≥0.1.0a3). Alpha; ranked under --suite experimental. Paho VERSION2 "
+        "(PyPI ≥0.1.0a4). Alpha; ranked under --suite experimental. Paho VERSION2 "
         "façade is `mqttium-compat`."
     )
 

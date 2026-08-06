@@ -27,7 +27,7 @@ generalized behind a per-library adapter layer.
 |---|---|---|
 | `zmqtt` | [faststream-community/zMQTT](https://github.com/faststream-community/zMQTT) | Pure asyncio MQTT 3.1.1/5 (Alpha) — `pip install 'mqtt-client-bench[zmqtt]'` |
 | `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | aiomqtt **v3** alpha (mqtt5 sans-io, MQTT5 only). **Cannot** share an env with `aiomqtt` v2 |
-| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (alpha ≥0.1.0a3, `publish_nowait` on bridge loop) — `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
+| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (alpha ≥0.1.0a4, `publish_nowait` on bridge loop) — `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
 | `mqttium-compat` | same | Paho VERSION2 façade only (`mqttium.compat.paho`) — ranked separately from `mqttium` |
 
 ```bash
@@ -107,6 +107,7 @@ Experimental: `.[zmqtt]`, `.[aiomqtt3]`, or `.[mqttium]` (aiomqtt3 needs a separ
 | `run --scenario NAME --client LIB` | Run one scenario (default `--profile standard`) |
 | `run --suite core\|full --client LIB` | Run a suite |
 | `calibrate --client LIB --output load.json` | Publish + RTT closed-loop baselines → open-loop fractions |
+| `matrix --clients A,B,C [--scenario NAME]` | **Recommended for published rankings** — runs every client interleaved within each point, rotating the order between repetitions |
 | `compare --clients A,B --scenario NAME` | ABBA A/B comparison (all variants by default) |
 | `report build [--input results] [--output site]` | Build static HTML reports for GitHub Pages |
 
@@ -183,14 +184,14 @@ that its peers do not. Rankings remain peer-grouped by `io_model` (sync vs
 asyncio_bridged vs CRT); do not treat paho and aiomqtt as interchangeable.
 
 `mqttium` uses ``AsyncClient.publish_nowait`` on the bridge event-loop thread
-(PyPI ≥0.1.0a3; loop-bound, not cross-thread). Older wheels fall back to
+(PyPI ≥0.1.0a4; loop-bound, not cross-thread). Older wheels fall back to
 ``await publish(..., nowait=True)``. The Paho façade remains a separate client
 id (`mqttium-compat`). Bench ``max_queued`` maps to
 ``max_pending_outbound_messages`` (``EngineConfig.max_queued`` was removed in
-0.1.0a2). On a3 the façade does not expose ``max_outbound_inflight``; the
+0.1.0a2). Through a4 the façade does not expose ``max_outbound_inflight``; the
 compat adapter rebuilds the inner ``AsyncClient`` before connect so QoS≥1
 scenarios stay comparable. Campaign helpers:
-`scripts/run_mqttium_a3_campaign.sh`,
+`scripts/run_mqttium_campaign.sh`,
 `scripts/run_asyncio_bridged_qos0_campaign.sh`.
 
 Mosquitto provides a local broker on `127.0.0.1:11883` (TCP) and
@@ -263,8 +264,13 @@ results/              committed raw JSON outputs
 ## Tests
 
 ```bash
-PYTHONPATH=src python tests/test_unit.py
+PYTHONPATH=src python -m unittest tests.test_unit -v
 ```
+
+## Contributing
+
+All repository content is written in **English**: documentation, comments,
+docstrings, scenario descriptions, commit messages and report output.
 
 ## Known limitations
 

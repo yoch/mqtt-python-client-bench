@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Prepare + run mqttium / mqttium-compat against PyPI 0.1.0a3 (or newer).
-# Usage: bash scripts/run_mqttium_a3_campaign.sh
+# Prepare + run mqttium / mqttium-compat against PyPI 0.1.0a4 (or newer).
+# Usage: bash scripts/run_mqttium_campaign.sh
 # Does NOT run automatically — invoke explicitly when ready.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -9,7 +9,7 @@ cd "$ROOT"
 source .venv/bin/activate
 export PYTHONPATH=src
 
-MQTTIUM_VER="${MQTTIUM_VER:-0.1.0a3}"
+MQTTIUM_VER="${MQTTIUM_VER:-0.1.0a4}"
 echo "=== ensure mqttium==${MQTTIUM_VER} (site-packages, no editable) ==="
 pip install --force-reinstall --no-cache-dir "mqttium==${MQTTIUM_VER}"
 python - <<'PY'
@@ -20,7 +20,7 @@ from mqttium.api import AsyncClient
 v = version("mqttium")
 path = Path(mqttium.__file__).resolve()
 assert "site-packages" in str(path), path
-assert hasattr(AsyncClient, "publish_nowait"), "a3+ required"
+assert hasattr(AsyncClient, "publish_nowait"), "a4+ required"
 print("OK", v, path)
 PY
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -52,6 +53,8 @@ _CLIENT_ORDER = (
 # Keep them in the matrix (last); omit them from the overview throughput chart.
 _CHART_EXCLUDED_SCENARIOS = frozenset(
     {
+        "session_resume_qos1",
+        "reconnect_ordering",
         "duplex_gateway",
         "e2e_integrity",
         "sub_callback_matching",
@@ -61,6 +64,8 @@ _CHART_EXCLUDED_SCENARIOS = frozenset(
     }
 )
 _CHART_EXCLUDED_ORDER = (
+    "session_resume_qos1",
+    "reconnect_ordering",
     "duplex_gateway",
     "e2e_integrity",
     "sub_callback_matching",
@@ -171,25 +176,86 @@ _CLIENT_COLORS = {
     "zmqtt": "#3f6b4d",
     "aiomqtt3": "#4a5a78",
 }
-_FALLBACK_PALETTE = ["#5c6b64", "#7a6a4f", "#4f6b7a", "#7a4f5c"]
+_FALLBACK_PALETTE = ["#5c6b64", "#7a6a4f", "#4f6b7a", "#7a4f5c", "#6b5c7a", "#7a7a4f"]
 
-# Peer-group annotation for matrix headers (sync vs bridged vs CRT).
-_CLIENT_IO_MODEL = {
-    "paho": "sync",
-    "mqttium-compat": "sync",
-    "gmqtt": "asyncio_bridged",
-    "aiomqtt": "asyncio_bridged",
-    "amqtt": "asyncio_bridged",
-    "zmqtt": "asyncio_bridged",
-    "aiomqtt3": "asyncio_bridged",
-    "mqttium": "asyncio_bridged",
-    "awscrt": "crt_event_loop",
-}
+# Peer-group order for display. io_model itself is read from client_identity in
+# the result JSON (see ClientMeta), never from a table in this file.
+_IO_MODEL_ORDER = ("sync", "asyncio_bridged", "crt_event_loop")
+_STABILITY_ORDER = ("stable", "experimental")
 
 
-def _sort_clients(clients: Sequence[str]) -> List[str]:
+@dataclass
+class ClientMeta:
+    """Per-client facts, taken from the results rather than hard-coded here."""
+
+    name: str
+    io_model: str = "unknown"
+    stability: str = "unknown"
+    version: Optional[str] = None
+    private_api: Dict[str, str] = field(default_factory=dict)
+
+    @property
+    def peer_group(self) -> tuple:
+        return (self.stability, self.io_model)
+
+
+def _registry_meta(name: str) -> tuple:
+    """Fall back to the adapter registry for results predating client_identity.
+
+    Still not a table in this file: the registry is the same source the harness
+    stamps into new results, so the two can never disagree.
+    """
+    try:
+        from mqtt_client_bench.adapters.registry import get_adapter_class
+
+        caps = get_adapter_class(name).capabilities()
+        return caps.io_model, caps.stability
+    except Exception:  # noqa: BLE001 - unknown client, or adapter deps missing
+        return None, None
+
+
+def _client_meta(docs: Sequence["ResultDoc"]) -> Dict[str, ClientMeta]:
+    """Collect client metadata from the documents' client_identity blocks."""
+    meta: Dict[str, ClientMeta] = {}
+    for doc in docs:
+        if doc.kind != "scenario" or not doc.client:
+            continue
+        entry = meta.setdefault(doc.client, ClientMeta(name=doc.client))
+        if doc.io_model:
+            entry.io_model = doc.io_model
+        if doc.stability:
+            entry.stability = doc.stability
+        if doc.client_version:
+            entry.version = doc.client_version
+        if doc.private_api:
+            entry.private_api.update(doc.private_api)
+    for name, entry in meta.items():
+        if entry.io_model != "unknown" and entry.stability != "unknown":
+            continue
+        io_model, stability = _registry_meta(name)
+        if entry.io_model == "unknown" and io_model:
+            entry.io_model = io_model
+        if entry.stability == "unknown" and stability:
+            entry.stability = stability
+    return meta
+
+
+def _sort_clients(clients: Sequence[str], meta: Optional[Dict[str, ClientMeta]] = None) -> List[str]:
+    """Order columns by peer group first, then by the display order, then name."""
     rank = {name: i for i, name in enumerate(_CLIENT_ORDER)}
-    return sorted(clients, key=lambda c: (rank.get(c, len(_CLIENT_ORDER)), c))
+
+    def key(client: str):
+        info = (meta or {}).get(client)
+        stability = info.stability if info else "unknown"
+        io_model = info.io_model if info else "unknown"
+        return (
+            _STABILITY_ORDER.index(stability) if stability in _STABILITY_ORDER else len(_STABILITY_ORDER),
+            _IO_MODEL_ORDER.index(io_model) if io_model in _IO_MODEL_ORDER else len(_IO_MODEL_ORDER),
+            rank.get(client, len(_CLIENT_ORDER)),
+            client,
+        )
+
+    return sorted(clients, key=key)
 
 
 def _client_colors(clients: Sequence[str]) -> Dict[str, str]:
@@ -204,15 +270,124 @@ def _client_colors(clients: Sequence[str]) -> Dict[str, str]:
     return colors
 
 
-def _client_swatch(name: str, colors: Dict[str, str]) -> str:
+def _client_swatch(
+    name: str,
+    colors: Dict[str, str],
+    meta: Optional[Dict[str, ClientMeta]] = None,
+) -> str:
     color = colors.get(name, "#5c6b64")
-    io_model = _CLIENT_IO_MODEL.get(name)
-    badge = (
-        f' <span class="io-badge" title="I/O model peer group">{_esc(io_model)}</span>'
-        if io_model
-        else ""
+    info = (meta or {}).get(name)
+    badges = ""
+    if info and info.io_model != "unknown":
+        badges += f' <span class="io-badge" title="I/O model peer group">{_esc(info.io_model)}</span>'
+    if info and info.stability == "experimental":
+        badges += ' <span class="io-badge badge-exp" title="Experimental — ranked separately">exp</span>'
+    return f'<span class="swatch" style="background:{_esc(color)}"></span>{_esc(name)}{badges}'
+
+
+def _svg_grouped_bars(
+    categories: Sequence[str],
+    series: Sequence[Dict[str, Any]],
+    *,
+    height: int = 340,
+    bar_slot: int = 13,
+    group_gap: int = 18,
+    label_room: int = 150,
+) -> str:
+    """Render a grouped bar chart as inline SVG with min/max whiskers.
+
+    Deliberately server-rendered: the page used to pull Chart.js and Google
+    Fonts from CDNs, so the report needed the network to display at all and
+    leaked a request per reader. Everything here ships in the HTML.
+    """
+    if not categories or not series:
+        return ""
+    n_series = len(series)
+    group_w = n_series * bar_slot + group_gap
+    plot_w = max(320, group_w * len(categories))
+    pad_l, pad_r, pad_t = 64, 16, 16
+    plot_h = height - label_room
+    width = pad_l + plot_w + pad_r
+
+    values = [
+        v
+        for s in series
+        for v in list(s.get("values") or []) + list(s.get("high") or [])
+        if v is not None
+    ]
+    top = max(values) if values else 0.0
+    if top <= 0:
+        return ""
+    # Round the axis up to a friendly step so gridlines read cleanly.
+    magnitude = 10 ** max(0, len(str(int(top))) - 2)
+    top = math.ceil(top / magnitude) * magnitude
+
+    def y_of(value: float) -> float:
+        return pad_t + plot_h - (value / top) * plot_h
+
+    parts = [
+        f'<svg class="chart-svg" viewBox="0 0 {width} {height}" role="img" '
+        f'aria-label="Median throughput by scenario and client" '
+        f'preserveAspectRatio="xMinYMin meet">'
+    ]
+    for i in range(5):
+        value = top * i / 4
+        y = y_of(value)
+        parts.append(
+            f'<line class="grid" x1="{pad_l}" y1="{y:.1f}" x2="{pad_l + plot_w}" y2="{y:.1f}" />'
+            f'<text class="axis" x="{pad_l - 8}" y="{y + 4:.1f}" text-anchor="end">{_fmt_num(value, digits=0)}</text>'
+        )
+    for c_idx, category in enumerate(categories):
+        gx = pad_l + c_idx * group_w + group_gap / 2
+        for s_idx, serie in enumerate(series):
+            values_list = serie.get("values") or []
+            value = values_list[c_idx] if c_idx < len(values_list) else None
+            if value is None:
+                continue
+            x = gx + s_idx * bar_slot
+            y = y_of(float(value))
+            h = pad_t + plot_h - y
+            color = serie.get("color", "#5c6b64")
+            title = f"{serie.get('client', '')} · {category}: {_fmt_num(value)} msg/s"
+            parts.append(
+                f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_slot - 3}" height="{max(h, 0.5):.1f}" '
+                f'fill="{_esc(color)}"><title>{_esc(title)}</title></rect>'
+            )
+            lows = serie.get("low") or []
+            highs = serie.get("high") or []
+            low = lows[c_idx] if c_idx < len(lows) else None
+            high = highs[c_idx] if c_idx < len(highs) else None
+            if low is not None and high is not None and high > low:
+                cx = x + (bar_slot - 3) / 2
+                y_low, y_high = y_of(float(low)), y_of(float(high))
+                parts.append(
+                    f'<line class="whisker" x1="{cx:.1f}" y1="{y_low:.1f}" x2="{cx:.1f}" y2="{y_high:.1f}" />'
+                    f'<line class="whisker" x1="{cx - 3:.1f}" y1="{y_high:.1f}" x2="{cx + 3:.1f}" y2="{y_high:.1f}" />'
+                    f'<line class="whisker" x1="{cx - 3:.1f}" y1="{y_low:.1f}" x2="{cx + 3:.1f}" y2="{y_low:.1f}" />'
+                )
+        tx = gx + (n_series * bar_slot) / 2
+        ty = pad_t + plot_h + 12
+        parts.append(
+            f'<text class="cat" x="{tx:.1f}" y="{ty:.1f}" transform="rotate(-40 {tx:.1f} {ty:.1f})" '
+            f'text-anchor="end">{_esc(category)}</text>'
+        )
+    parts.append(
+        f'<line class="axis-line" x1="{pad_l}" y1="{pad_t + plot_h}" '
+        f'x2="{pad_l + plot_w}" y2="{pad_t + plot_h}" />'
     )
-    return f'<span class="swatch" style="background:{_esc(color)}"></span>{_esc(name)}{badge}'
+    parts.append("</svg>")
+    legend = " ".join(
+        f'<span class="legend-item"><span class="swatch" style="background:{_esc(s.get("color", "#5c6b64"))}"></span>'
+        f'{_esc(s.get("client", ""))}</span>'
+        for s in series
+    )
+    return f'<div class="chart-scroll">{"".join(parts)}</div><p class="legend">{legend}</p>'
+
+
+def _svg_single_bars(labels: Sequence[str], values: Sequence[Optional[float]]) -> str:
+    """Single-series bar chart (detail pages), inline SVG."""
+    series = [{"client": "median msg/s", "color": "#0f6e56", "values": list(values)}]
+    return _svg_grouped_bars(labels, series, height=300, bar_slot=26, group_gap=14, label_room=130)
 
 
 def _performance_matrix_html(
@@ -220,45 +395,104 @@ def _performance_matrix_html(
     clients: Sequence[str],
     by_key: Dict[tuple, Optional[float]],
     colors: Dict[str, str],
+    meta: Optional[Dict[str, ClientMeta]] = None,
+    cells_by: Optional[Dict[tuple, PointRow]] = None,
 ) -> str:
-    """Compact scenario × client table for immediate reading on the index page."""
+    """Compact scenario × client table for immediate reading on the index page.
+
+    The "best" value is computed **per peer group**, not across the whole row.
+    Highlighting the global maximum contradicted the page's own warning that a
+    bridged client and a sync client are not comparable, and it silently crowned
+    the native CRT client over every pure-Python one.
+    """
     if not scenarios or not clients:
         return ""
-    ordered = _sort_clients(clients)
-    head = "".join(f'<th scope="col" class="num">{_client_swatch(c, colors)}</th>' for c in ordered)
+    meta = meta or {}
+    cells_by = cells_by or {}
+    ordered = _sort_clients(clients, meta)
+    groups: List[tuple] = []
+    for client in ordered:
+        info = meta.get(client)
+        group = info.peer_group if info else ("unknown", "unknown")
+        if not groups or groups[-1][0] != group:
+            groups.append((group, [client]))
+        else:
+            groups[-1][1].append(client)
+
+    group_head = "".join(
+        f'<th scope="col" class="group-head" colspan="{len(members)}">'
+        f'{_esc(group[1])}<span class="group-sub">{_esc(group[0])}</span></th>'
+        for group, members in groups
+    )
+    head = "".join(
+        f'<th scope="col" class="num">{_client_swatch(c, colors, meta)}</th>' for c in ordered
+    )
+
     body_rows: List[str] = []
     for scenario in scenarios:
-        cells = [by_key.get((scenario, c)) for c in ordered]
-        numeric = [v for v in cells if v is not None]
-        best = max(numeric) if numeric else None
-        tied_count = sum(1 for v in numeric if best is not None and _is_tied_with_best(v, best))
-        # A tie across every populated cell isn't a "winner" — it means the
-        # scenario is rate-capped, not that one client outperformed the rest.
-        all_tied = bool(numeric) and tied_count == len(numeric)
-        tds = []
-        for value in cells:
-            if value is None:
-                tds.append('<td class="num muted">—</td>')
-            elif all_tied:
-                tds.append(f'<td class="num">{_esc(_fmt_num(value))}</td>')
-            elif best is not None and _is_tied_with_best(value, best):
-                tds.append(f'<td class="num best">{_esc(_fmt_num(value))}</td>')
-            else:
-                tds.append(f'<td class="num">{_esc(_fmt_num(value))}</td>')
+        tds: List[str] = []
+        for group, members in groups:
+            values = [by_key.get((scenario, c)) for c in members]
+            numeric = [v for v in values if v is not None]
+            best = max(numeric) if numeric else None
+            tied = sum(1 for v in numeric if best is not None and _is_tied_with_best(v, best))
+            # A tie across every populated cell isn't a "winner" — it means the
+            # scenario is rate-capped, not that one client outperformed the rest.
+            all_tied = bool(numeric) and tied == len(numeric)
+            for client, value in zip(members, values):
+                if value is None:
+                    row = cells_by.get((scenario, client))
+                    kind = (row.empty_reason if row else None) or "missing"
+                    glyph, title = EMPTY_GLYPHS.get(kind, EMPTY_GLYPHS["missing"])
+                    detail = (row.reason_detail if row else "") or ""
+                    tip = f"{title}{': ' + detail if detail else ''}"
+                    tds.append(
+                        f'<td class="num empty empty-{kind}" title="{_esc(tip)}">{glyph}</td>'
+                    )
+                    continue
+                row = cells_by.get((scenario, client))
+                classes = ["num"]
+                if not all_tied and best is not None and _is_tied_with_best(value, best):
+                    classes.append("best")
+                tip_bits = []
+                if row:
+                    if row.bottleneck:
+                        tip_bits.append(f"bottleneck: {row.bottleneck}")
+                    if row.relative_spread_pct is not None:
+                        tip_bits.append(f"spread: ±{row.relative_spread_pct / 2:.1f}%")
+                    if row.valid_runs:
+                        tip_bits.append(f"n={row.valid_runs}/{row.total_runs}")
+                    if row.broker_cpu_max_pct is not None:
+                        tip_bits.append(f"broker CPU {row.broker_cpu_max_pct:.0f}%")
+                    if row.bottleneck and row.bottleneck != "sut_limited":
+                        classes.append("suspect")
+                tip = " · ".join(tip_bits)
+                tds.append(
+                    f'<td class="{" ".join(classes)}" title="{_esc(tip)}">{_esc(_fmt_num(value))}</td>'
+                )
         body_rows.append(
             f'<tr><th scope="row" class="scenario">{_esc(scenario)}</th>{"".join(tds)}</tr>'
         )
+
+    legend = " ".join(
+        f'<span class="legend-item"><span class="legend-glyph empty-{kind}">{glyph}</span>{_esc(title)}</span>'
+        for kind, (glyph, title) in EMPTY_GLYPHS.items()
+    )
     return f"""
       <section class="panel">
         <div class="panel-head">
           <h2>Performance matrix</h2>
-          <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols. Best result in each row is highlighted, unless every client ties (rate-capped scenario). Peer groups matter: compare <code>sync</code>, <code>asyncio_bridged</code>, and <code>crt_event_loop</code> clients within the same I/O model (badges under each name). <code>mqttium</code> (native) and <code>mqttium-compat</code> are not substitutes. Rate-capped / niche / probe checks are listed last and omitted from the chart above.</p>
+          <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols, and the best value is highlighted <strong>within each peer group</strong> (columns are grouped by I/O model and stability) — a bridged client and a sync client are not substitutes, and neither are <code>mqttium</code> and <code>mqttium-compat</code>. A dotted underline marks a number the harness did not attribute to the client itself; hover any cell for its bottleneck, run count and spread.</p>
+          <p class="legend">{legend}</p>
         </div>
         <div class="table-wrap table-wrap-sticky-col">
           <table class="matrix">
             <thead>
               <tr>
-                <th scope="col" class="scenario-head">Scenario</th>
+                <th scope="col" class="scenario-head" rowspan="2">Scenario</th>
+                {group_head}
+              </tr>
+              <tr>
                 {head}
               </tr>
             </thead>
@@ -426,19 +660,134 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
-def _point_label(point: Dict[str, Any]) -> str:
+# Axes that a scenario can sweep. A label built from a fixed subset collapsed
+# distinct points into identical rows (pub_qos1_inflight showed three identical
+# lines for inflight 1/20/100), which silently hid the very thing being swept.
+_LABEL_AXES = (
+    ("payload", "payload"),
+    ("qos_publish", "qos"),
+    ("qos_subscribe", "sub_qos"),
+    ("protocol", "proto"),
+    ("topology", "topo"),
+    ("inflight", "inflight"),
+    ("load_fraction", "load"),
+    ("subscription", "sub"),
+    ("topic_topology", "topics"),
+    ("callback_filters", "filters"),
+    ("subscription_count", "subs"),
+    ("subscribers", "n_sub"),
+    ("loadgen_clients", "gen"),
+    ("cadence", "cadence"),
+    ("properties_profile", "props"),
+    ("connect_mode", "connect"),
+    ("fleet_size", "fleet"),
+    ("network", "net"),
+    ("tls", "tls"),
+)
+
+
+def _point_label(point: Dict[str, Any], varying: Optional[Sequence[str]] = None) -> str:
+    """Label a measurement point.
+
+    ``varying`` restricts the label to the axes that actually differ inside the
+    scenario, keeping labels short while guaranteeing they stay distinct.
+    """
     parts = []
-    if point.get("payload") is not None:
-        parts.append(f"payload={point['payload']}")
-    if point.get("qos_publish") is not None:
-        parts.append(f"qos={point['qos_publish']}")
-    if point.get("qos_subscribe") is not None:
-        parts.append(f"sub_qos={point['qos_subscribe']}")
-    if point.get("protocol") is not None:
-        parts.append(f"proto={point['protocol']}")
-    if point.get("topology") is not None:
-        parts.append(f"topo={point['topology']}")
+    for key, alias in _LABEL_AXES:
+        if varying is not None and key not in varying:
+            continue
+        value = point.get(key)
+        if value is None:
+            continue
+        if key == "tls" and not value:
+            continue
+        if key == "network" and value == "localhost":
+            continue
+        parts.append(f"{alias}={value}")
     return ", ".join(parts) if parts else "default"
+
+
+def _varying_axes(points: Sequence[Dict[str, Any]]) -> List[str]:
+    """Axes whose value is not constant across a scenario's points."""
+    if len(points) <= 1:
+        return [k for k, _ in _LABEL_AXES if points and points[0].get(k) is not None][:5]
+    varying = []
+    for key, _ in _LABEL_AXES:
+        seen = {repr(p.get(key)) for p in points}
+        if len(seen) > 1:
+            varying.append(key)
+    if not varying:
+        # Genuinely identical points (repeat runs): fall back to a stable subset.
+        varying = ["payload", "qos_publish", "protocol", "topology"]
+    return varying
+
+
+def _dominant(runs: Sequence[Dict[str, Any]], key: str) -> Optional[str]:
+    """Most common non-empty value of ``key`` across a point's runs."""
+    counts: Dict[str, int] = {}
+    for run in runs:
+        value = run.get(key)
+        if value:
+            counts[str(value)] = counts.get(str(value), 0) + 1
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda kv: kv[1])[0]
+
+
+def _max_of(runs: Sequence[Dict[str, Any]], key: str) -> Optional[float]:
+    values = [float(r[key]) for r in runs if r.get(key) is not None]
+    return max(values) if values else None
+
+
+def _ratio_of(runs: Sequence[Dict[str, Any]]) -> Optional[float]:
+    values = [
+        float((r.get("broker_reconciliation") or {}).get("ratio"))
+        for r in runs
+        if (r.get("broker_reconciliation") or {}).get("ratio") is not None
+    ]
+    return (sum(values) / len(values)) if values else None
+
+
+def _cost_of(runs: Sequence[Dict[str, Any]], key: str) -> Optional[float]:
+    values = [
+        float((r.get("cost_per_message") or {}).get(key))
+        for r in runs
+        if (r.get("cost_per_message") or {}).get(key) is not None
+    ]
+    return (sum(values) / len(values)) if values else None
+
+
+# What an empty cell means. Collapsing four different outcomes into one em-dash
+# made "the client cannot do this" indistinguishable from "we never ran it".
+EMPTY_GLYPHS = {
+    "refused": ("⊘", "refused — client lacks the capability"),
+    "failed": ("✕", "failed under load"),
+    "environment": ("!", "invalidated by the environment (broker or host)"),
+    "missing": ("–", "not run"),
+}
+
+
+def _empty_cell_reason(
+    runs: Sequence[Dict[str, Any]], median: Optional[float]
+) -> tuple:
+    """Classify why a point has no comparable number."""
+    if median is not None:
+        return None, ""
+    if not runs:
+        return "missing", ""
+    reasons = [str(r) for run in runs for r in (run.get("reasons") or [])]
+    if not reasons:
+        return "missing", ""
+    kinds = {_reason_kind(r) for r in reasons}
+    shorts = sorted({_short_reason(r) for r in reasons})
+    detail = ", ".join(shorts[:3])
+    if "capability" in kinds:
+        return "refused", detail
+    if "environment" in kinds:
+        return "environment", detail
+    if "load" in kinds:
+        return "failed", detail
+    return "missing", detail
 
 
 def _collect_latency(runs: Sequence[Dict[str, Any]]) -> Dict[str, Optional[float]]:
@@ -514,10 +863,25 @@ class PointRow:
     non_comparable: bool
     latency: Dict[str, Optional[float]] = field(default_factory=dict)
     integrity: Optional[Dict[str, Any]] = None
-    chart_rates: List[Optional[float]] = field(default_factory=list)
     spread_low: Optional[float] = None
     spread_high: Optional[float] = None
     protocol: Optional[str] = None
+    # Attribution and confidence signals. All of these were already produced by
+    # the harness and dropped on the floor by the report; without them a reader
+    # cannot tell a client-limited number from a broker-limited one, nor a
+    # repeatable median from a noisy one.
+    bottleneck: Optional[str] = None
+    mad: Optional[float] = None
+    relative_spread_pct: Optional[float] = None
+    broker_cpu_max_pct: Optional[float] = None
+    broker_reconcile_ratio: Optional[float] = None
+    delivery_offer_ratio: Optional[float] = None
+    effective_offer: Optional[float] = None
+    cost_us_per_message: Optional[float] = None
+    rss_peak_kb: Optional[float] = None
+    # Why the cell is empty, when it is: refused | failed | environment | missing
+    empty_reason: Optional[str] = None
+    reason_detail: str = ""
 
 
 @dataclass
@@ -547,6 +911,13 @@ class ResultDoc:
     environment_reasons: Dict[str, int] = field(default_factory=dict)
     inconclusive_runs: int = 0
     total_runs: int = 0
+    # Taken from client_identity in the JSON rather than a hard-coded table, so a
+    # newly added client is grouped and labelled correctly with no report edit.
+    io_model: Optional[str] = None
+    stability: Optional[str] = None
+    client_version: Optional[str] = None
+    private_api: Dict[str, str] = field(default_factory=dict)
+    interleaved_with: List[str] = field(default_factory=list)
 
 
 def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
@@ -657,7 +1028,10 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
     capability_reasons: Dict[str, int] = {}
     environment_reasons: Dict[str, int] = {}
     inconclusive_runs = 0
-    for block in data.get("results") or []:
+    identity = data.get("client_identity") or {}
+    blocks = data.get("results") or []
+    varying = _varying_axes([b.get("point") or {} for b in blocks])
+    for block in blocks:
         point = block.get("point") or {}
         runs = block.get("runs") or []
         summary = block.get("summary") or {}
@@ -681,9 +1055,6 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
         any_non_comparable = any_non_comparable or non_comparable
         # Prefer summary computed from valid runs only.
         median_rate = summary.get("median")
-        if non_comparable or (point.get("profile") == "smoke"):
-            # Keep value for display but mark non-comparable.
-            pass
         point_min = summary.get("min")
         point_max = summary.get("max")
         if median_rate is not None and not non_comparable:
@@ -697,14 +1068,14 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
         status = "valid" if counts["valid"] == counts["total"] and counts["total"] else (
             "partial" if counts["valid"] else "inconclusive"
         )
-        chart_rates = [
-            r.get("primary_msgs_per_s")
-            for r in runs
-            if r.get("status") == "valid" and not r.get("non_comparable")
-        ]
+        mad = summary.get("mad")
+        relative_spread = None
+        if median_rate and point_min is not None and point_max is not None and float(median_rate) > 0:
+            relative_spread = 100.0 * (float(point_max) - float(point_min)) / float(median_rate)
+        empty_reason, reason_detail = _empty_cell_reason(runs, median_rate)
         points.append(
             PointRow(
-                label=_point_label(point),
+                label=_point_label(point, varying),
                 median_msgs_per_s=median_rate,
                 status=status,
                 valid_runs=counts["valid"],
@@ -712,10 +1083,20 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
                 non_comparable=non_comparable,
                 latency=_collect_latency(runs),
                 integrity=_collect_integrity(runs),
-                chart_rates=chart_rates,
                 spread_low=float(point_min) if point_min is not None else None,
                 spread_high=float(point_max) if point_max is not None else None,
                 protocol=str(point.get("protocol") or "MQTTv311"),
+                bottleneck=_dominant(runs, "bottleneck"),
+                mad=float(mad) if mad is not None else None,
+                relative_spread_pct=relative_spread,
+                broker_cpu_max_pct=_max_of(runs, "broker_cpu_max_pct"),
+                broker_reconcile_ratio=_ratio_of(runs),
+                delivery_offer_ratio=_max_of(runs, "delivery_offer_ratio"),
+                effective_offer=_max_of(runs, "effective_offer_msgs_per_s"),
+                cost_us_per_message=_cost_of(runs, "cpu_us_per_message"),
+                rss_peak_kb=_cost_of(runs, "rss_peak_kb"),
+                empty_reason=empty_reason,
+                reason_detail=reason_detail,
             )
         )
 
@@ -762,6 +1143,11 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
         environment_reasons=environment_reasons,
         inconclusive_runs=inconclusive_runs,
         total_runs=overall_total,
+        io_model=identity.get("io_model"),
+        stability=identity.get("stability"),
+        client_version=identity.get("client_version"),
+        private_api=dict(identity.get("private_api") or {}),
+        interleaved_with=list(data.get("interleaved_with") or []),
     )
 
 
@@ -797,18 +1183,19 @@ def _page_shell(title: str, body: str, *, relative_root: str = ".") -> str:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>{_esc(title)}</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <!-- No CDN: charts are server-rendered SVG and fonts are system stacks, so the
+       site works offline and issues no third-party request per reader. -->
   <link rel="stylesheet" href="{_esc(css_href)}" />
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js" defer></script>
-  <script src="{_esc(f'{relative_root}/assets/app.js')}" defer></script>
 </head>
 <body>
   <div class="page">
     <header class="site-header">
       <a class="brand" href="{_esc(f'{relative_root}/index.html')}">MQTT Python client bench</a>
       <p class="tagline">Comparative publish/subscribe results against Mosquitto</p>
+      <nav class="site-nav">
+        <a href="{_esc(f'{relative_root}/index.html')}">Results</a>
+        <a href="{_esc(f'{relative_root}/methodology.html')}">Methodology</a>
+      </nav>
     </header>
     {body}
     <footer class="site-footer">
@@ -879,6 +1266,9 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
     by_key: Dict[tuple, Optional[float]] = {}
     by_key_low: Dict[tuple, Optional[float]] = {}
     by_key_high: Dict[tuple, Optional[float]] = {}
+    # Representative point per cell, so the matrix can show attribution and
+    # confidence (bottleneck, spread, run count) instead of a bare number.
+    cells_by: Dict[tuple, PointRow] = {}
     for doc in scenario_docs:
         scenario = doc.scenario or doc.title
         client = doc.client or "?"
@@ -889,6 +1279,24 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
             by_key[(row_id, client)] = median_v
             by_key_low[(row_id, client)] = low_v
             by_key_high[(row_id, client)] = high_v
+        for point in doc.points:
+            row_id = _matrix_row_id(scenario, point.protocol or "MQTTv311")
+            existing = cells_by.get((row_id, client))
+            # Prefer a point that produced a number; otherwise keep the first
+            # refusal/failure so the empty cell can still explain itself.
+            if existing is None or (
+                existing.median_msgs_per_s is None and point.median_msgs_per_s is not None
+            ):
+                cells_by[(row_id, client)] = point
+    # Clients whose every point was refused produce no scenario aggregate, so
+    # their columns would otherwise vanish from the matrix entirely.
+    for doc in docs:
+        if doc.kind != "scenario" or not doc.client:
+            continue
+        scenario = doc.scenario or doc.title
+        for point in doc.points:
+            row_id = _matrix_row_id(scenario, point.protocol or "MQTTv311")
+            cells_by.setdefault((row_id, doc.client), point)
 
     # Single-library scenario clients only. ABBA compare docs store a composite
     # "a / b" label in `client` and must not inflate the Clients stat.
@@ -903,7 +1311,8 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
         name = doc.client or "?"
         if name not in scenario_clients:
             scenario_clients.append(name)
-    colors = _client_colors(_sort_clients(all_clients))
+    meta = _client_meta(docs)
+    colors = _client_colors(_sort_clients(all_clients, meta))
     # Include clients/scenarios that only produced capability or load signals so
     # the issues table and matrix columns stay aligned with the full campaign.
     for doc in docs:
@@ -931,10 +1340,12 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
             "low": [by_key_low.get((scenario, client)) for scenario in chart_scenarios],
             "high": [by_key_high.get((scenario, client)) for scenario in chart_scenarios],
         }
-        for client in _sort_clients(scenario_clients)
+        for client in _sort_clients(scenario_clients, meta)
     ]
     overview_payload = {"scenarios": chart_scenarios, "series": overview_series}
-    matrix_html = _performance_matrix_html(matrix_scenarios, scenario_clients, by_key, colors)
+    matrix_html = _performance_matrix_html(
+        matrix_scenarios, scenario_clients, by_key, colors, meta=meta, cells_by=cells_by
+    )
     env_warnings_html = _environment_warnings_html(docs)
     signals_html = _client_signals_html(docs, colors)
 
@@ -967,7 +1378,9 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
             d.scenario or d.title,
         ),
     ):
-        client_cell = _client_swatch(doc.client, colors) if doc.client in colors else _esc(doc.client or "—")
+        client_cell = (
+            _client_swatch(doc.client, colors, meta) if doc.client in colors else _esc(doc.client or "—")
+        )
         rows.append(
             f"""<tr>
   <td><a href="runs/{_esc(doc.slug)}.html">{_esc(doc.title)}</a></td>
@@ -997,11 +1410,13 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
           <p class="hint">Grouped by scenario · MQTT protocol, one colour per client. Whiskers show the observed run-to-run min/max. Comparable only within the same protocol. Rate-capped checks, smoke, and non-comparable results are omitted.</p>
         </div>
         <div class="chart-wrap chart-wrap-wide">
-          <canvas id="overview-chart" data-overview='{_esc(json.dumps(overview_payload))}'></canvas>
+          {_svg_grouped_bars(overview_payload.get("scenarios") or [], overview_payload.get("series") or [])}
         </div>
       </section>
 
       {matrix_html}
+
+      {signals_html}
 
       <section class="panel">
         <div class="panel-head">
@@ -1027,8 +1442,6 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
           </table>
         </div>
       </section>
-
-      {signals_html}
     </main>
 """
     return _page_shell("Benchmark reports", body)
@@ -1056,30 +1469,67 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
     for idx, point in enumerate(doc.points):
         lat = point.latency
         integ = point.integrity or {}
+        median_cell = _esc(_fmt_num(point.median_msgs_per_s))
+        if point.median_msgs_per_s is None and point.empty_reason:
+            glyph, title = EMPTY_GLYPHS.get(point.empty_reason, EMPTY_GLYPHS["missing"])
+            tip = f"{title}{': ' + point.reason_detail if point.reason_detail else ''}"
+            median_cell = f'<span class="empty-{point.empty_reason}" title="{_esc(tip)}">{glyph}</span>'
+        # Dispersion is what says whether a median is repeatable; it was computed
+        # for every point and never shown.
+        spread_cell = "—"
+        if point.relative_spread_pct is not None:
+            spread_cell = f"±{point.relative_spread_pct / 2:.1f}%"
+            if point.mad is not None:
+                spread_cell += f' <span class="muted">(mad {_fmt_num(point.mad)})</span>'
+        cost_cell = "—"
+        if point.cost_us_per_message is not None:
+            cost_cell = f"{point.cost_us_per_message:.1f} µs"
+            if point.rss_peak_kb:
+                cost_cell += f' <span class="muted">/ {point.rss_peak_kb / 1024:.0f} MiB</span>'
+        checks = []
+        if point.broker_cpu_max_pct is not None:
+            checks.append(f"broker CPU {point.broker_cpu_max_pct:.0f}%")
+        if point.broker_reconcile_ratio is not None:
+            checks.append(f"broker×{point.broker_reconcile_ratio:.2f}")
+        if point.delivery_offer_ratio is not None:
+            checks.append(f"offer×{point.delivery_offer_ratio:.2f}")
         point_rows.append(
             f"""<tr>
   <td>{_esc(point.label)}</td>
   <td>{_status_badge(point.status, point.non_comparable)}</td>
-  <td class="num">{_esc(_fmt_num(point.median_msgs_per_s))}</td>
+  <td class="num">{median_cell}</td>
+  <td class="num">{spread_cell}</td>
+  <td>{_esc(point.bottleneck or '—')}</td>
   <td class="num">{_esc(_fmt_num(lat.get('p50_ms'), digits=2))}</td>
+  <td class="num">{_esc(_fmt_num(lat.get('p95_ms'), digits=2))}</td>
   <td class="num">{_esc(_fmt_num(lat.get('p99_ms'), digits=2))}{' *' if lat.get('p99_gated') else ''}</td>
   <td class="num">{_esc(integ.get('missing', '—'))} / {_esc(integ.get('duplicates', '—'))} (worst {_esc(integ.get('worst_missing', '—'))})</td>
+  <td class="num">{cost_cell}</td>
+  <td class="muted">{_esc(' · '.join(checks)) or '—'}</td>
   <td>{_esc(point.valid_runs)}/{_esc(point.total_runs)}</td>
 </tr>"""
         )
 
     chart_block = ""
-    if doc.points:
-        labels = [p.label for p in doc.points]
-        values = [p.median_msgs_per_s for p in doc.points]
-        lows = [p.spread_low for p in doc.points]
-        highs = [p.spread_high for p in doc.points]
+    if doc.points and any(p.median_msgs_per_s is not None for p in doc.points):
+        series = [
+            {
+                "client": "median msg/s",
+                "color": "#0f6e56",
+                "values": [p.median_msgs_per_s for p in doc.points],
+                "low": [p.spread_low for p in doc.points],
+                "high": [p.spread_high for p in doc.points],
+            }
+        ]
+        chart_svg = _svg_grouped_bars(
+            [p.label for p in doc.points], series, height=320, bar_slot=28, group_gap=16, label_room=150
+        )
         chart_block = f"""
       <section class="panel">
         <h2>Per-point throughput</h2>
         <p class="hint">Whiskers show the observed run-to-run min/max at each point. Dual-protocol scenarios list MQTTv311 and MQTTv5 points separately (labels include <code>proto=</code>).</p>
         <div class="chart-wrap">
-          <canvas class="detail-chart" data-labels='{_esc(json.dumps(labels))}' data-values='{_esc(json.dumps(values))}' data-low='{_esc(json.dumps(lows))}' data-high='{_esc(json.dumps(highs))}'></canvas>
+          {chart_svg}
         </div>
       </section>
 """
@@ -1186,16 +1636,21 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
         points_table = f"""
       <section class="panel">
         <h2>Measurement points</h2>
-        <div class="table-wrap">
+        <div class="table-wrap table-wrap-scroll">
           <table>
             <thead>
               <tr>
                 <th>Point</th>
                 <th>Status</th>
                 <th>Median msg/s</th>
-                <th>Latency p50 ms</th>
-                <th>Latency p99 ms</th>
+                <th>Spread</th>
+                <th>Bottleneck</th>
+                <th>p50 ms</th>
+                <th>p95 ms</th>
+                <th>p99 ms</th>
                 <th>Missing / dup</th>
+                <th>CPU / RSS per msg</th>
+                <th>Checks</th>
                 <th>Valid runs</th>
               </tr>
             </thead>
@@ -1204,7 +1659,7 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
             </tbody>
           </table>
         </div>
-        <p class="hint">* p99 marked gated when sample coverage is incomplete. Smoke / non-comparable points are excluded from global comparative charts.</p>
+        <p class="hint"><strong>Spread</strong> is half the observed run-to-run range, as a percentage of the median — a wide spread means the number is not repeatable, whatever its value. <strong>Bottleneck</strong> is the harness's attribution: only <code>sut_limited</code> says something about the client. <strong>Checks</strong> shows peak broker CPU, the broker-confirmed fraction of reported publishes, and delivered/offered where applicable. * marks a gated p99 (incomplete sample coverage).</p>
       </section>
 """
 
@@ -1257,6 +1712,105 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
     return _page_shell(doc.title, body, relative_root="..")
 
 
+def render_methodology(docs: Sequence[ResultDoc], generated_at: str) -> str:
+    """Explain how to read the numbers, next to the numbers themselves.
+
+    These rules used to live only in the README and SCENARIOS.md, so a reader
+    arriving at the published site had no way to know what a cell meant.
+    """
+    meta = _client_meta(docs)
+    client_rows = "".join(
+        f"<tr><td class='mono'>{_esc(name)}</td><td>{_esc(info.version or '—')}</td>"
+        f"<td>{_esc(info.io_model)}</td><td>{_esc(info.stability)}</td>"
+        f"<td>{_esc(', '.join(sorted(info.private_api)) or '—')}</td></tr>"
+        for name, info in sorted(meta.items(), key=lambda kv: _sort_clients([kv[0]], meta))
+    )
+    legend = "".join(
+        f"<li><span class='legend-glyph empty-{kind}'>{glyph}</span> {_esc(title)}</li>"
+        for kind, (glyph, title) in EMPTY_GLYPHS.items()
+    )
+    body = f"""
+    <main>
+      <section class="hero">
+        <h1>Methodology</h1>
+        <p>What these numbers mean, and what they deliberately do not mean.</p>
+        <p class="meta">generated {_esc(generated_at)}</p>
+      </section>
+
+      <section class="panel">
+        <h2>Three measurement protocols, never mixed</h2>
+        <ul class="prose">
+          <li><strong>Capacity</strong> — closed loop with a bounded outstanding window. The primary metric is <code>completed_success</code> inside the measure window.</li>
+          <li><strong>Latency</strong> — open loop at calibrated fractions of <em>that client's own</em> capacity in the same regime: publish capacity for PUBACK latency, RTT capacity for application RTT.</li>
+          <li><strong>Integrity</strong> — bounded rate with a sequence header; counts missing, duplicate and out-of-order messages. Not a throughput race.</li>
+        </ul>
+      </section>
+
+      <section class="panel">
+        <h2>What "completed" means</h2>
+        <p class="hint">The publish completion boundary is part of the contract; an adapter that cannot honour one declares the capability as missing instead of approximating it.</p>
+        <table class="table">
+          <thead><tr><th>QoS</th><th><code>on_publish</code> fires when</th></tr></thead>
+          <tbody>
+            <tr><td>0</td><td>the packet has been handed to the transport</td></tr>
+            <tr><td>1</td><td>PUBACK is received</td></tr>
+            <tr><td>2</td><td>PUBCOMP is received (not PUBREC)</td></tr>
+          </tbody>
+        </table>
+        <p class="hint">For single-publisher scenarios the completions are reconciled against the broker's own <code>$SYS</code> received-publish counter. A run the broker cannot confirm is marked inconclusive rather than published.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Peer groups</h2>
+        <p class="hint">A ranking is only meaningful inside a peer group. The matrix highlights the best value per group, never across groups.</p>
+        <ul class="prose">
+          <li><code>sync</code> — the library exposes a blocking/callback API and is driven directly.</li>
+          <li><code>asyncio_bridged</code> — an asyncio library driven through a private event-loop thread. That bridge has a cost, it is assumed and documented, and it is paid equally by every bridged client.</li>
+          <li><code>crt_event_loop</code> — a native (non-Python) engine; not comparable with pure-Python clients.</li>
+        </ul>
+        <p class="hint">Stable and experimental clients are also ranked separately, and MQTT 3.1.1 and MQTT 5 rows are never merged.</p>
+      </section>
+
+      <section class="panel">
+        <h2>Why a cell can be empty</h2>
+        <ul class="prose legend-list">{legend}</ul>
+      </section>
+
+      <section class="panel">
+        <h2>Attribution</h2>
+        <p class="hint">Every run carries a bottleneck attribution. Only <code>sut_limited</code> runs say something about the client.</p>
+        <ul class="prose">
+          <li><code>sut_limited</code> — the client was the constraint.</li>
+          <li><code>broker_limited</code> — Mosquitto was at or near saturation; the number is partly the broker's.</li>
+          <li><code>broker_unconfirmed</code> — the broker did not confirm the reported completions.</li>
+          <li><code>loadgen_limited</code> / <code>offer_limited</code> — the injected load, not the client, set the ceiling.</li>
+        </ul>
+      </section>
+
+      <section class="panel">
+        <h2>Clients in this report</h2>
+        <p class="hint">Read from each result's <code>client_identity</code>. "Internals used" lists library-private attributes the adapter depends on, because reaching into internals changes what is being measured.</p>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Client</th><th>Version</th><th>I/O model</th><th>Stability</th><th>Internals used</th></tr></thead>
+            <tbody>{client_rows}</tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Known limits</h2>
+        <ul class="prose">
+          <li>All runs are local, against a Dockerised Mosquitto on loopback. Nothing here predicts WAN behaviour.</li>
+          <li>Netem profiles (<code>lan</code>/<code>wan</code>/<code>edge</code>) and smoke runs are diagnostic and marked non-comparable.</li>
+          <li>Application RTT drives both sides with the same library, which amplifies stack cost on purpose; it is not a neutral peer RTT.</li>
+        </ul>
+      </section>
+    </main>
+"""
+    return _page_shell("Methodology — MQTT Python client bench", body)
+
+
 def build_site(input_dir: Path | str, output_dir: Path | str) -> Dict[str, Any]:
     """Generate the static site under output_dir from JSON files in input_dir."""
     input_path = Path(input_dir)
@@ -1271,10 +1825,13 @@ def build_site(input_dir: Path | str, output_dir: Path | str) -> Dict[str, Any]:
     runs_dir.mkdir(parents=True, exist_ok=True)
     assets_out.mkdir(parents=True, exist_ok=True)
 
-    for name in ("style.css", "app.js"):
-        shutil.copy2(ASSETS_DIR / name, assets_out / name)
+    # app.js only existed to drive Chart.js; charts are server-rendered SVG now.
+    shutil.copy2(ASSETS_DIR / "style.css", assets_out / "style.css")
 
     (output_path / "index.html").write_text(render_index(docs, generated_at), encoding="utf-8")
+    (output_path / "methodology.html").write_text(
+        render_methodology(docs, generated_at), encoding="utf-8"
+    )
     related: Dict[str, str] = {}
     for doc in docs:
         if doc.kind == "scenario" and doc.scenario:

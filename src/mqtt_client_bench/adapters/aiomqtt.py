@@ -18,6 +18,11 @@ class AiomqttAdapter(BridgedAdapterBase):
         "aiomqtt — idiomatic asyncio MQTT client. Bench targets v2.x (paho backend). "
         "v3 (mqtt5 sans-io) is the separate experimental client id `aiomqtt3`."
     )
+    # See GmqttAdapter._PRIVATE_API for the rationale of this inventory.
+    _PRIVATE_API = {
+        "Client._client.socket()": "aiomqtt claims on_socket_open for its loop glue, so TCP_NODELAY has to be set on the live socket (RTT scenarios are meaningless without it)",
+        "Client.pending_calls_threshold": "documented attribute, raised to skip a per-publish WARNING branch that floods stderr at bench outstanding windows",
+    }
 
     def __init__(self) -> None:
         super().__init__()
@@ -66,6 +71,7 @@ class AiomqttAdapter(BridgedAdapterBase):
             "io_model": caps.io_model,
             "implementation_language": caps.implementation_language,
             "synthetic_mids": caps.synthetic_mids,
+            "private_api": dict(cls._PRIVATE_API),
         }
 
     @classmethod

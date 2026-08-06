@@ -16,6 +16,15 @@ class GmqttAdapter(BridgedAdapterBase):
         "Wialon gmqtt — asyncio MQTT client with callback API. "
         "Sync facade runs the event loop on a dedicated thread."
     )
+    # Private attributes this adapter depends on, and why the public API does not
+    # suffice. Surfaced in identity() so a reader can judge how faithful the
+    # measurement is, and checked by test_gmqtt_private_api_shape so a gmqtt
+    # release that moves them fails the suite instead of silently drifting.
+    _PRIVATE_API = {
+        "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+        "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+        "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback",
+    }
 
     def __init__(self) -> None:
         super().__init__()
@@ -70,6 +79,7 @@ class GmqttAdapter(BridgedAdapterBase):
             "io_model": caps.io_model,
             "implementation_language": caps.implementation_language,
             "synthetic_mids": caps.synthetic_mids,
+            "private_api": dict(cls._PRIVATE_API),
         }
 
     @classmethod
@@ -188,13 +198,15 @@ class GmqttAdapter(BridgedAdapterBase):
         # outstanding window and structurally bias gmqtt against its peers.
         synth_mid = self.alloc_mid()
 
-        # QoS0: connection.publish is synchronous on the loop thread — avoid a
-        # Task per message (same discipline as mqttium schedule_call).
+        # QoS0: Client.publish is synchronous on the loop thread — avoid a Task
+        # per message (same discipline as mqttium schedule_call). Use the public
+        # API: for QoS0 it is exactly `self._connection.publish(message)` with no
+        # persistent-storage step, so nothing is skipped by going through it.
         if int(qos) == 0:
 
             def _publish_qos0() -> None:
                 try:
-                    client._connection.publish(message)
+                    client.publish(message)
                     self._fire_on_publish(synth_mid, reason_code=0)
                 except Exception:  # noqa: BLE001
                     self._fire_on_publish(synth_mid, reason_code=128)
@@ -202,6 +214,11 @@ class GmqttAdapter(BridgedAdapterBase):
             self.schedule_call(_publish_qos0)
             return PublishResult(rc=0, mid=synth_mid)
 
+        # QoS>=1 must use the private call: gmqtt's public `Client.publish()`
+        # returns None and therefore discards the packet id needed to correlate
+        # the PUBACK back to the synthetic mid the bench handed the role worker.
+        # The body below mirrors `Client.publish()` exactly (connection.publish +
+        # persistent-storage push) — see _PRIVATE_API and test_gmqtt_private_api_shape.
         async def _publish():
             real_mid = None
             try:

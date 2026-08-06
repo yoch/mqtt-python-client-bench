@@ -1,9 +1,9 @@
-"""Scenario registry for the Paho MQTT client benchmark."""
+"""Scenario registry for the comparative MQTT client benchmark."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -33,12 +33,10 @@ class Scenario:
     tls: bool = False
     network: str = "localhost"
     variants: Tuple[Dict[str, Any], ...] = ()
-    estimated_minutes: float = 2.0
 
     def resolved(self, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         data = asdict(self)
         data.pop("variants", None)
-        data.pop("estimated_minutes", None)
         data.pop("description", None)
         if overrides:
             data.update(overrides)
@@ -77,18 +75,6 @@ def default_runs(profile: str) -> int:
         raise KeyError(f"unknown profile {profile!r}; choose from {', '.join(PROFILE_SPECS)}") from exc
 
 
-def _variants(**axes: Sequence[Any]) -> Tuple[Dict[str, Any], ...]:
-    """Build one-axis-at-a-time variant dicts from the first axis that has multiple values.
-
-    For multi-axis scenarios we pass an explicit list via Scenario.variants instead.
-    """
-    items: List[Dict[str, Any]] = []
-    for key, values in axes.items():
-        for value in values:
-            items.append({key: value})
-    return tuple(items)
-
-
 SCENARIOS: List[Scenario] = [
     Scenario(
         name="pub_payload_sweep_qos0",
@@ -112,7 +98,6 @@ SCENARIOS: List[Scenario] = [
                 "blob1m",
             )
         ),
-        estimated_minutes=8.0,
     ),
     Scenario(
         name="pub_qos_sweep_telemetry",
@@ -123,7 +108,6 @@ SCENARIOS: List[Scenario] = [
         payload="telemetry256",
         cadence="capacity",
         variants=tuple({"qos_publish": q} for q in (0, 1, 2)),
-        estimated_minutes=5.0,
     ),
     Scenario(
         name="pub_segment_threshold_16k",
@@ -134,7 +118,6 @@ SCENARIOS: List[Scenario] = [
         qos_publish=0,
         payload="record16k",
         cadence="capacity",
-        estimated_minutes=2.0,
     ),
     Scenario(
         name="pub_segment_block_64k",
@@ -145,7 +128,6 @@ SCENARIOS: List[Scenario] = [
         qos_publish=0,
         payload="block64k",
         cadence="capacity",
-        estimated_minutes=2.0,
     ),
     Scenario(
         name="pub_segment_blob_1m",
@@ -156,7 +138,6 @@ SCENARIOS: List[Scenario] = [
         qos_publish=0,
         payload="blob1m",
         cadence="capacity",
-        estimated_minutes=2.0,
     ),
     Scenario(
         name="pub_qos1_inflight",
@@ -171,7 +152,6 @@ SCENARIOS: List[Scenario] = [
             {"inflight": n, "max_queued": n * 10, "outstanding": max(n, 8)}
             for n in (1, 20, 100)
         ),
-        estimated_minutes=4.0,
     ),
     Scenario(
         name="remaining_length_boundaries",
@@ -183,7 +163,6 @@ SCENARIOS: List[Scenario] = [
         cadence="capacity",
         topic_topology="single",
         variants=tuple({"payload": p} for p in ("rl_126", "rl_127", "rl_128", "rl_16383", "rl_16384")),
-        estimated_minutes=3.0,
     ),
     Scenario(
         name="sub_exact_telemetry",
@@ -199,7 +178,6 @@ SCENARIOS: List[Scenario] = [
         subscription="exact",
         loadgen_clients=32,
         subscribers=1,
-        estimated_minutes=4.0,
     ),
     Scenario(
         name="sub_hierarchy_telemetry",
@@ -217,7 +195,6 @@ SCENARIOS: List[Scenario] = [
             {"topic_topology": "fleet4k_uniform", "subscription": "plus"},
             {"topic_topology": "fleet4k_uniform", "subscription": "hash"},
         ),
-        estimated_minutes=4.0,
     ),
     Scenario(
         name="sub_callback_matching",
@@ -232,7 +209,6 @@ SCENARIOS: List[Scenario] = [
         loadgen_clients=32,
         subscribers=1,
         variants=tuple({"callback_filters": n} for n in (1, 16, 256)),
-        estimated_minutes=5.0,
     ),
     Scenario(
         name="duplex_gateway",
@@ -244,7 +220,6 @@ SCENARIOS: List[Scenario] = [
         qos_subscribe=1,
         payload="telemetry256",
         variants=tuple({"cadence": c} for c in ("steady50", "burst")),
-        estimated_minutes=4.0,
     ),
     Scenario(
         name="burst_recovery",
@@ -259,7 +234,6 @@ SCENARIOS: List[Scenario] = [
         subscription="hash",
         loadgen_clients=32,
         subscribers=1,
-        estimated_minutes=3.0,
     ),
     Scenario(
         name="e2e_integrity",
@@ -275,7 +249,6 @@ SCENARIOS: List[Scenario] = [
             {"qos_publish": 2, "qos_subscribe": 2, "payload": "telemetry256", "force_header": True},
             {"qos_publish": 0, "qos_subscribe": 0, "payload": "empty0", "force_header": True},
         ),
-        estimated_minutes=5.0,
     ),
     Scenario(
         name="puback_latency_qos1",
@@ -287,7 +260,54 @@ SCENARIOS: List[Scenario] = [
         payload="telemetry256",
         cadence="loaded75",
         variants=tuple({"load_fraction": f} for f in (0.50, 0.90)),
-        estimated_minutes=5.0,
+    ),
+    Scenario(
+        # The bench measured publisher-side PUBACK latency and full application
+        # RTT, but never the one-way broker -> subscriber delivery latency, which
+        # is what a consumer-shaped application actually experiences. The
+        # publisher header already carries send_ns and the subscriber already
+        # computes `now - send_ns`; this scenario publishes those percentiles.
+        name="sub_delivery_latency",
+        suite="full",
+        tags=("representative", "dual_protocol"),
+        topology="publisher_with_oracle",
+        description="One-way broker-to-subscriber delivery latency at calibrated load fractions.",
+        qos_publish=1,
+        qos_subscribe=1,
+        payload="telemetry256",
+        cadence="loaded75",
+        subscribers=1,
+        variants=tuple({"load_fraction": f, "force_header": True} for f in (0.50, 0.90)),
+    ),
+    Scenario(
+        # QoS2 was only ever exercised for capacity and integrity; its completion
+        # path (PUBREC/PUBREL/PUBCOMP) is where clients differ most, and latency
+        # is the metric that exposes it.
+        name="pubcomp_latency_qos2",
+        suite="full",
+        tags=("diagnostic",),
+        topology="publisher_only",
+        description="Open-loop PUBCOMP latency at calibrated load fractions (QoS 2 four-way handshake).",
+        qos_publish=2,
+        payload="telemetry256",
+        cadence="loaded75",
+        variants=tuple({"load_fraction": f} for f in (0.50, 0.90)),
+    ),
+    Scenario(
+        # RSS and CPU were collected as run telemetry but only ever reported for
+        # an idle fleet. Normalising them by delivered messages answers "what does
+        # this client cost per message", which throughput alone cannot.
+        name="cost_per_message",
+        suite="full",
+        tags=("diagnostic",),
+        topology="publisher_with_oracle",
+        description="CPU and RSS cost per delivered message at a fixed, calibrated rate.",
+        qos_publish=1,
+        qos_subscribe=1,
+        payload="telemetry256",
+        cadence="loaded75",
+        subscribers=1,
+        variants=({"load_fraction": 0.50},),
     ),
     Scenario(
         name="rtt_capacity_qos1",
@@ -304,7 +324,6 @@ SCENARIOS: List[Scenario] = [
         cadence="capacity",
         outstanding=32,
         subscribers=1,
-        estimated_minutes=4.0,
     ),
     Scenario(
         name="application_rtt_qos1",
@@ -323,7 +342,6 @@ SCENARIOS: List[Scenario] = [
         outstanding=32,
         subscribers=1,
         variants=tuple({"load_fraction": f} for f in (0.50, 0.90)),
-        estimated_minutes=5.0,
     ),
     # --- full suite ---
     Scenario(
@@ -338,7 +356,6 @@ SCENARIOS: List[Scenario] = [
             {"payload": "block64k", "qos_publish": 1},
             {"payload": "blob1m", "qos_publish": 1},
         ),
-        estimated_minutes=6.0,
     ),
     Scenario(
         name="topic_stress",
@@ -356,7 +373,6 @@ SCENARIOS: List[Scenario] = [
             {"topic_topology": "fleet4k_uniform", "subscription": "hash", "callback_filters": 4096},
             {"topic_topology": "fleet4k_uniform", "subscription": "hash", "callback_filters": 8, "overlapping_callbacks": True},
         ),
-        estimated_minutes=8.0,
     ),
     Scenario(
         name="sub_multi_subscribe",
@@ -367,7 +383,6 @@ SCENARIOS: List[Scenario] = [
         loadgen_clients=16,
         subscribers=1,
         variants=tuple({"subscription_count": n, "subscription": "multi_exact"} for n in (16, 256)),
-        estimated_minutes=4.0,
     ),
     Scenario(
         name="fanin_scaling",
@@ -386,7 +401,6 @@ SCENARIOS: List[Scenario] = [
             {"loadgen_clients": 16, "fanin_mode": "per_publisher"},
             {"loadgen_clients": 128, "fanin_mode": "per_publisher"},
         ),
-        estimated_minutes=8.0,
     ),
     Scenario(
         name="fanout_scaling",
@@ -397,7 +411,6 @@ SCENARIOS: List[Scenario] = [
         qos_publish=0,
         qos_subscribe=0,
         variants=tuple({"subscribers": n} for n in (1, 8, 32)),
-        estimated_minutes=6.0,
     ),
     Scenario(
         name="periodic_and_microburst",
@@ -411,7 +424,6 @@ SCENARIOS: List[Scenario] = [
             {"cadence": "periodic10"},
             {"cadence": "microburst"},
         ),
-        estimated_minutes=4.0,
     ),
     Scenario(
         name="mqttv5_properties",
@@ -425,7 +437,6 @@ SCENARIOS: List[Scenario] = [
             {"protocol": "MQTTv5", "properties_profile": "none"},
             {"protocol": "MQTTv5", "properties_profile": "realistic"},
         ),
-        estimated_minutes=5.0,
     ),
     Scenario(
         name="mqttv5_rich",
@@ -440,7 +451,6 @@ SCENARIOS: List[Scenario] = [
             {"properties_profile": "topic_alias"},
             {"properties_profile": "subscription_identifier"},
         ),
-        estimated_minutes=5.0,
     ),
     Scenario(
         name="mqttv5_flow_control",
@@ -454,7 +464,6 @@ SCENARIOS: List[Scenario] = [
             {"receive_maximum": 10, "inflight": 100},
             {"receive_maximum": 100, "inflight": 100},
         ),
-        estimated_minutes=4.0,
     ),
     Scenario(
         name="qos_asymmetric",
@@ -469,7 +478,6 @@ SCENARIOS: List[Scenario] = [
             {"qos_publish": 2, "qos_subscribe": 1},
             {"qos_publish": 0, "qos_subscribe": 1},
         ),
-        estimated_minutes=4.0,
     ),
     Scenario(
         name="queue_rejection",
@@ -482,7 +490,6 @@ SCENARIOS: List[Scenario] = [
         max_queued=100,
         cadence="capacity",
         variants=({"expected_accepts": 100, "expected_rejects": 50, "submit_count": 150},),
-        estimated_minutes=2.0,
     ),
     Scenario(
         name="retained_bootstrap",
@@ -492,27 +499,60 @@ SCENARIOS: List[Scenario] = [
         description="Retained message bootstrap snapshot (broker-sensitive; planned — not executable yet).",
         subscribers=1,
         variants=tuple({"retained_count": n} for n in (10_000, 100_000)),
-        estimated_minutes=6.0,
     ),
     Scenario(
+        # Outage mechanism: a plain DISCONNECT. MQTT keeps session state whenever
+        # Clean Session = 0, however the connection ends, and Mosquitto holds it
+        # in memory even with `persistence false` (that setting only disables the
+        # on-disk copy; sessions are lost on *broker restart*, which this scenario
+        # never does). Verified: session_present=True on resume and the full QoS1
+        # backlog is drained in order. So this needs no CAP_NET_ADMIN, no broker
+        # config change, and stays comparable everywhere.
+        #
+        # Two harder variants are deliberately left out for now:
+        #   - abrupt drop (RST via SO_LINGER=0 on the live socket) would also cover
+        #     QoS1 messages unacknowledged *at* the break and their DUP
+        #     retransmission. It needs socket access, which paho exposes publicly
+        #     but asyncio clients hide behind a transport, so it would have to be
+        #     an adapter capability with reduced client coverage.
+        #   - silent blackhole (`network.blackhole()`) would additionally measure
+        #     how long a client takes to notice a dead link, but needs
+        #     tc + CAP_NET_ADMIN and mostly measures the keepalive setting.
         name="session_resume_qos1",
         suite="full",
-        tags=("functional", "planned"),
+        tags=("functional",),
         topology="publisher_with_oracle",
-        description="Persistent session resume after short outage (planned — not executable yet).",
+        description="Persistent-session resume: QoS 1 backlog drained after a subscriber outage.",
         qos_publish=1,
         qos_subscribe=1,
         cadence="steady50",
         subscribers=1,
-        variants=({"session_persistent": True, "outage_s": 2.0, "expected_drain": 2000},),
-        estimated_minutes=3.0,
+        variants=({"session_persistent": True, "outage_s": 2.0, "force_header": True},),
+    ),
+    Scenario(
+        # Same machinery as e2e_integrity, with an outage in the middle: the
+        # question is whether the resumed session preserves order and loses
+        # nothing, not how fast it goes.
+        name="reconnect_ordering",
+        suite="full",
+        tags=("functional",),
+        topology="publisher_with_oracle",
+        description="Message loss and ordering across a subscriber reconnect (persistent session).",
+        qos_publish=1,
+        qos_subscribe=1,
+        cadence="steady50",
+        subscribers=1,
+        variants=(
+            {"session_persistent": True, "outage_s": 1.0, "force_header": True},
+            {"session_persistent": True, "outage_s": 3.0, "force_header": True},
+        ),
     ),
     Scenario(
         name="network_matrix",
         suite="full",
         tags=("diagnostic", "functional"),
         topology="publisher_only",
-        description="Network profile matrix for latency, integrity and reconnect.",
+        description="Network profile matrix for latency and integrity under netem.",
         qos_publish=1,
         payload="telemetry256",
         variants=(
@@ -521,7 +561,6 @@ SCENARIOS: List[Scenario] = [
             {"network": "wan", "cadence": "loaded75"},
             {"network": "edge", "cadence": "steady50", "integrity": True},
         ),
-        estimated_minutes=8.0,
     ),
     Scenario(
         name="tls_steady_state",
@@ -532,7 +571,6 @@ SCENARIOS: List[Scenario] = [
         qos_publish=1,
         payload="telemetry256",
         tls=True,
-        estimated_minutes=3.0,
     ),
     Scenario(
         name="connect_latency_and_churn",
@@ -547,7 +585,6 @@ SCENARIOS: List[Scenario] = [
             {"connect_mode": "tcp_concurrent", "connect_count": 32},
             {"connect_mode": "tcp_concurrent", "connect_count": 256},
         ),
-        estimated_minutes=6.0,
     ),
     Scenario(
         name="client_fleet_idle",
@@ -556,7 +593,6 @@ SCENARIOS: List[Scenario] = [
         topology="fleet",
         description="Idle fleet keepalive/RSS/CPU cost.",
         variants=tuple({"fleet_size": n, "keepalive": 30} for n in (1, 32, 256)),
-        estimated_minutes=5.0,
     ),
     Scenario(
         name="broker_ceiling_ingress",
@@ -579,7 +615,6 @@ SCENARIOS: List[Scenario] = [
             {"loadgen_clients": 64, "ingress_target_msgs_per_s": 64000},
             {"loadgen_clients": 128, "ingress_target_msgs_per_s": 128000},
         ),
-        estimated_minutes=6.0,
     ),
     Scenario(
         name="client_ceiling_ingress",
@@ -603,7 +638,6 @@ SCENARIOS: List[Scenario] = [
             {"loadgen_clients": 64, "ingress_target_msgs_per_s": 64000},
             {"loadgen_clients": 128, "ingress_target_msgs_per_s": 128000},
         ),
-        estimated_minutes=6.0,
     ),
 ]
 
@@ -646,8 +680,20 @@ def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[
         resolved = scenario.resolved(variant)
         if "inflight" in variant:
             resolved["require_max_inflight"] = True
+        else:
+            # Equalise the effective in-flight window. Clients that expose
+            # max_inflight were configured to 20 while clients that do not expose
+            # it ran with the harness `outstanding` window (64) as their only
+            # bound — a 3.2x larger pipelining window for the second group, which
+            # showed up directly in the QoS>=1 rankings. Only `pub_qos1_inflight`
+            # (which pins `inflight` in its variants) still sweeps the window.
+            resolved["inflight"] = int(resolved.get("outstanding", 64))
         if "max_queued" in variant:
             resolved["require_max_queued"] = True
+        # The queue sits behind the in-flight window; keep it clear of the gate so
+        # it is never the binding constraint for a client that honours both.
+        resolved["max_queued"] = max(int(resolved.get("max_queued", 200)), 10 * int(resolved["inflight"]))
+        resolved["effective_inflight_window"] = int(resolved["inflight"])
         resolved["duration_s"] = float(spec["duration_s"])
         resolved["warmup_s"] = float(spec["warmup_s"])
         resolved["drain_s"] = float(spec["drain_s"])
