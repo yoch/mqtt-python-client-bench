@@ -88,7 +88,10 @@ for s in "${REPR[@]}"; do
   if [[ "$FORCE" != "1" ]] && python - "$s" "$CLIENTS" <<'PY'
 import json, sys
 from pathlib import Path
+from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario
+
 scenario, clients = sys.argv[1], sys.argv[2].split(",")
+expected = len(expand_scenario(SCENARIO_BY_NAME[scenario], "standard"))
 for client in clients:
     path = Path("results") / f"{client}-{scenario}.json"
     if not path.exists():
@@ -97,11 +100,17 @@ for client in clients:
         data = json.loads(path.read_text())
     except Exception:
         raise SystemExit(1)
-    runs = [r for block in (data.get("results") or []) for r in (block.get("runs") or [])]
+    blocks = data.get("results") or []
+    runs = [r for block in blocks for r in (block.get("runs") or [])]
     if not runs:
         raise SystemExit(1)
-    # `started_at` only exists on runs produced after the fairness fixes.
+    # `started_at` only exists on runs produced after the fairness fixes, so
+    # older results count as missing rather than as finished work.
     if not all("started_at" in r for r in runs):
+        raise SystemExit(1)
+    # Points are checkpointed as they finish, so a file can exist while the
+    # scenario is only half measured.
+    if len(blocks) < expected:
         raise SystemExit(1)
 raise SystemExit(0)
 PY
