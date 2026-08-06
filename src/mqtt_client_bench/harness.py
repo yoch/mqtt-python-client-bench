@@ -383,6 +383,11 @@ def validate_run(
             # worker_error already carries the error string; a second bare reason
             # for the same failure double-counted it in the report's tables.
             reasons.append(f"worker_error:{result.get('error', 'unknown')}")
+        tripped = result.get("memory_guard_tripped_kb")
+        if tripped:
+            # The worker stopped publishing early to protect the host, so the
+            # measure window is truncated: the number means nothing.
+            reasons.append(f"memory_guard_tripped:{int(tripped) // 1024}MB")
         failed = int(result.get("completed_failed") or result.get("protocol_failed") or 0)
         if failed:
             reasons.append("protocol_failed")

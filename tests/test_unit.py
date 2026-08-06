@@ -1186,6 +1186,40 @@ class FairnessGateTests(unittest.TestCase):
                 # both sides, otherwise there is no backlog to replay.
                 self.assertLess(float(point["outage_s"]), float(point["duration_s"]), name)
 
+    def test_memory_guard_trips_and_invalidates_the_run(self):
+        # A QoS0 path completing at an in-process queue leaves the outstanding
+        # gate with nothing to hold back; one worker was observed at 11.5 GB on
+        # 1 MiB payloads. The guard must stop it AND the run must not be
+        # published, since its measure window is truncated.
+        from mqtt_client_bench.harness import validate_run
+        from mqtt_client_bench.telemetry import MemoryGuard, self_rss_kb
+
+        rss = self_rss_kb()
+        self.assertIsNotNone(rss, "RSS must be readable for the guard to work")
+
+        # Limit far below current RSS: must trip once enough calls elapse.
+        guard = MemoryGuard(limit_mb=0.001, check_every=4)
+        self.assertFalse(guard.exceeded(), "sampled 1 in N, so not on the first call")
+        tripped = any(guard.exceeded() for _ in range(16))
+        self.assertTrue(tripped)
+        self.assertIsNotNone(guard.tripped_at_kb)
+        self.assertTrue(guard.exceeded(), "stays tripped once it fires")
+
+        # Generous limit: never trips.
+        calm = MemoryGuard(limit_mb=1024 * 1024, check_every=1)
+        self.assertFalse(any(calm.exceeded() for _ in range(32)))
+
+        out = validate_run(
+            {"topology": "publisher_only", "duration_s": 12.0},
+            [{"ok": True, "role": "publisher", "completed_success": 10,
+              "memory_guard_tripped_kb": 11_466 * 1024}],
+            None,
+            [],
+            sys_counters={"publish_received_delta": 10},
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertTrue(any(r.startswith("memory_guard_tripped:") for r in out["reasons"]), out["reasons"])
+
     def test_outage_must_fit_inside_the_measure_window(self):
         # A 3 s outage in a 3 s smoke window leaves no traffic to replay: that is
         # a degenerate measurement, so it must be refused, not published.
