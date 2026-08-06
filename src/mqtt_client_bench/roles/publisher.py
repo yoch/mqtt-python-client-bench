@@ -23,6 +23,7 @@ import time
 
 from mqtt_client_bench.adapters.registry import adapter_identity, create_adapter
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
+from mqtt_client_bench.telemetry import MemoryGuard
 from mqtt_client_bench.workloads import (
     HEADER_SIZE,
     build_payload,
@@ -165,6 +166,13 @@ def main(argv=None) -> int:
         elif cadence == "periodic10":
             open_loop_rate = 10.0
 
+    # Cap worker RSS. Default is generous next to the ~180 MB a well-behaved
+    # client uses on 1 MiB payloads, but far below what takes a host down.
+    payload_bytes = len(body) if isinstance(body, (bytes, bytearray)) else len(str(body).encode())
+    memory_guard = MemoryGuard(
+        float(cfg.get("memory_limit_mb", 1536)), payload_bytes=payload_bytes
+    )
+
     gc.collect()
     gc_start = gc.get_count()
     state["phase"] = "warmup"
@@ -184,6 +192,7 @@ def main(argv=None) -> int:
         properties_builder=_properties_builder(cfg, adapter),
         force_header=bool(cfg.get("force_header", False)),
         sequence_start=1 << 40,
+        memory_guard=memory_guard,
     )
 
     # Drain warmup outstanding; fail closed if still active when the deadline hits.
@@ -261,6 +270,7 @@ def main(argv=None) -> int:
         batch_size=int(cfg.get("batch_size", 64)) if cadence == "batch64" else 1,
         reset_sequence=True,
         force_header=bool(cfg.get("force_header", False)),
+        memory_guard=memory_guard,
     )
     t1 = time.perf_counter()
     cpu_ns_in_window = time.process_time_ns() - cpu_ns_start
@@ -330,6 +340,7 @@ def main(argv=None) -> int:
         "latencies_ns": latencies[:50000],
         "scheduler_lags_ns": lags[:50000],
         "cpu_ns_in_window": cpu_ns_in_window,
+        "memory_guard_tripped_kb": state.get("memory_guard_tripped_kb"),
         "gc_count_start": list(gc_start),
         "gc_count_end": list(gc.get_count()),
         **identity,
@@ -387,6 +398,7 @@ def _run_publish_loop(
     batch_size=1,
     reset_sequence=False,
     force_header=False,
+    memory_guard=None,
     sequence_start=0,
 ):
     sequence = sequence_start
@@ -419,6 +431,12 @@ def _run_publish_loop(
         for _ in range(n):
             if time.perf_counter() >= until:
                 break
+            # A QoS0 path that completes at an in-process queue gives the
+            # outstanding gate nothing to hold back, so this is the only thing
+            # standing between a 1 MiB fire-and-forget loop and the host's RAM.
+            if memory_guard is not None and memory_guard.exceeded():
+                state["memory_guard_tripped_kb"] = memory_guard.tripped_at_kb
+                return sent_sequences
 
             # Plain int read: atomic under the GIL, and a stale-by-one value only
             # shifts the gate by one message. Taking the lock here would add a

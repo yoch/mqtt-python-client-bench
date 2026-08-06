@@ -120,11 +120,75 @@ cmd_stop() {
   echo "Resume later with: bash scripts/campaign_ctl.sh resume"
 }
 
+# Refuse to start a campaign that is already doomed. A full run is ~6.5 h; every
+# one of these makes the harness mark runs inconclusive or risks the host, and
+# each is cheap to check now and expensive to discover afterwards.
+preflight() {
+  local fatal=0
+  local gov
+  gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || echo unknown)
+  if [[ "$gov" != "performance" ]]; then
+    echo "BLOCKER  cpu governor is '$gov', not 'performance'"
+    echo "         every run would be invalidated (cpu_governor_not_performance)."
+    echo "         fix: sudo cpupower frequency-set -g performance"
+    echo "           or: echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
+    fatal=1
+  else
+    echo "ok       cpu governor: performance"
+  fi
+
+  local free_gb
+  free_gb=$(df -BG --output=avail . | tail -1 | tr -dc '0-9')
+  if (( free_gb < 5 )); then
+    echo "BLOCKER  only ${free_gb} GB free; a campaign writes ~1 GB plus logs"
+    fatal=1
+  else
+    echo "ok       disk free: ${free_gb} GB (campaign writes ~1 GB)"
+  fi
+
+  local avail_gb
+  avail_gb=$(free -g | awk '/^Mem:/{print $7}')
+  if (( avail_gb < 4 )); then
+    echo "BLOCKER  only ${avail_gb} GB RAM available"
+    fatal=1
+  else
+    echo "ok       RAM available: ${avail_gb} GB"
+  fi
+
+  local load
+  load=$(awk '{print int($1)}' /proc/loadavg)
+  local cpus
+  cpus=$(nproc)
+  if (( load > cpus )); then
+    echo "WARN     load average ${load} exceeds ${cpus} CPUs; runs may be invalidated as host_busy"
+  else
+    echo "ok       load average: ${load} (of ${cpus} CPUs)"
+  fi
+
+  if ! docker info >/dev/null 2>&1; then
+    echo "BLOCKER  docker is not usable; the broker and loadgen cannot start"
+    fatal=1
+  else
+    echo "ok       docker reachable"
+  fi
+  return $fatal
+}
+
+cmd_preflight() { preflight; }
+
 cmd_resume() {
   if find_pgid >/dev/null 2>&1; then
     echo "campaign is already running; nothing to do"
     return 0
   fi
+  echo "preflight:"
+  if ! preflight; then
+    echo
+    echo "refusing to start: fix the blockers above, or re-run with SKIP_PREFLIGHT=1"
+    [[ "${SKIP_PREFLIGHT:-0}" == "1" ]] || return 1
+    echo "SKIP_PREFLIGHT=1 set; starting anyway"
+  fi
+  echo
   local clients="${CLIENTS:-paho,gmqtt,aiomqtt,amqtt,awscrt,zmqtt,mqttium,mqttium-compat}"
   echo "resuming with clients=$clients (completed scenarios are skipped)"
   # `setsid` was not enough: the campaign died twice at session teardown, since
@@ -153,7 +217,8 @@ cmd_resume() {
 
 case "${1:-status}" in
   status) cmd_status ;;
+  preflight|check) cmd_preflight ;;
   stop|pause) cmd_stop ;;
   resume|start) cmd_resume ;;
-  *) echo "usage: $0 {status|stop|resume}" >&2; exit 2 ;;
+  *) echo "usage: $0 {status|preflight|stop|resume}" >&2; exit 2 ;;
 esac

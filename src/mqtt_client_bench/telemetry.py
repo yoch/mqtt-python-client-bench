@@ -75,6 +75,71 @@ def process_stats(pid: int) -> dict:
     }
 
 
+def self_rss_kb() -> Optional[int]:
+    """Resident set size of the calling process, in KiB."""
+    text = _read_text("/proc/self/status")
+    if not text:
+        return None
+    for line in text.splitlines():
+        if line.startswith("VmRSS:"):
+            try:
+                return int(line.split()[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+class MemoryGuard:
+    """Abort a role worker before it can take the machine down.
+
+    A fire-and-forget QoS0 path whose completion fires at an in-process queue
+    (rather than at the socket) leaves the harness with nothing to throttle: the
+    outstanding window never engages, so the publish loop fills an unbounded
+    transport buffer as fast as it can. Observed at 11.5 GB RSS in a single
+    worker on 1 MiB payloads, enough to push the host into swap thrash.
+
+    The guard is a safety net, not a fix for that semantic gap: it stops the run
+    and lets it be reported inconclusive instead of letting the host die.
+    """
+
+    # Memory that may be queued between two RSS samples. Bounds the overshoot
+    # past the limit, which is otherwise check_every x payload_size.
+    OVERSHOOT_BUDGET_BYTES = 64 * 1024 * 1024
+
+    def __init__(
+        self,
+        limit_mb: float,
+        check_every: Optional[int] = None,
+        payload_bytes: int = 0,
+    ) -> None:
+        self.limit_kb = int(limit_mb * 1024)
+        if check_every is None:
+            # Sample often enough that big payloads cannot run far past the
+            # limit, rarely enough that small ones pay almost nothing: reading
+            # /proc/self/status every message would itself be a harness tax.
+            if payload_bytes > 0:
+                check_every = self.OVERSHOOT_BUDGET_BYTES // max(payload_bytes, 1)
+            else:
+                check_every = 4096
+            check_every = max(1, min(4096, int(check_every)))
+        self.check_every = max(1, int(check_every))
+        self._counter = 0
+        self.tripped_at_kb: Optional[int] = None
+
+    def exceeded(self) -> bool:
+        """True once RSS passes the limit. Cheap: samples 1 call in N."""
+        if self.tripped_at_kb is not None:
+            return True
+        self._counter += 1
+        if self._counter % self.check_every:
+            return False
+        rss = self_rss_kb()
+        if rss is not None and rss > self.limit_kb:
+            self.tripped_at_kb = rss
+            return True
+        return False
+
+
 def container_cgroup_path(container_name: str) -> Optional[str]:
     """Resolve a container's cgroup v2 directory, or None.
 
