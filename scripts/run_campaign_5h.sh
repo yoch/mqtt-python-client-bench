@@ -20,16 +20,50 @@ mkdir -p calibrations results logs
 CLIENTS="${CLIENTS:-paho,gmqtt,aiomqtt,amqtt,awscrt}"
 
 START=$(date +%s)
-echo "CAMPAIGN start $(date -Is) clients=$CLIENTS" | tee logs/campaign.log
+# Append, never truncate: a campaign spans hours and can be resumed, so the log
+# has to keep what earlier attempts already did.
+echo "CAMPAIGN start $(date -Is) clients=$CLIENTS" | tee -a logs/campaign.log
+
+# Resumable by default: a full campaign is many hours and an interruption
+# (machine sleep, session end, Ctrl-C) must not throw away completed work.
+# Set FORCE=1 to redo everything from scratch.
+FORCE="${FORCE:-0}"
+
+IFS=',' read -ra CLIENT_LIST <<<"$CLIENTS"
 
 # Calibration stays per client: it measures that client's own capacity, and its
 # output is only ever compared with itself.
-IFS=',' read -ra CLIENT_LIST <<<"$CLIENTS"
 for c in "${CLIENT_LIST[@]}"; do
+  cal="calibrations/${c}-load.json"
+  # A calibration is reusable only if it carries per-protocol capacities for the
+  # installed version of that client; `run` re-validates client/version/broker
+  # and refuses a mismatched profile anyway.
+  if [[ "$FORCE" != "1" ]] && python - "$cal" "$c" <<'PY'
+import json, sys
+from pathlib import Path
+path, client = Path(sys.argv[1]), sys.argv[2]
+if not path.exists():
+    raise SystemExit(1)
+try:
+    data = json.loads(path.read_text())
+except Exception:
+    raise SystemExit(1)
+if data.get("client") != client:
+    raise SystemExit(1)
+buckets = data.get("protocol_capacities") or {}
+if not buckets:
+    raise SystemExit(1)
+# At least one protocol must carry a usable publish capacity.
+raise SystemExit(0 if any(v.get("capacity_msgs_per_s") for v in buckets.values()) else 1)
+PY
+  then
+    echo "==> calibrate $c (reusing $cal)" | tee -a logs/campaign.log
+    continue
+  fi
   echo "==> calibrate $c" | tee -a logs/campaign.log
   python -m mqtt_client_bench.run calibrate \
       --client "$c" --profile standard \
-      --output "calibrations/${c}-load.json" \
+      --output "$cal" \
       >"logs/calibrate-${c}.log" 2>&1
 done
 
@@ -48,6 +82,33 @@ REPR=(
 )
 
 for s in "${REPR[@]}"; do
+  # Skip only when every client already has a result for this scenario *from the
+  # current harness*. Results predating the fairness fixes carry no run
+  # provenance, so they are correctly treated as missing and re-run.
+  if [[ "$FORCE" != "1" ]] && python - "$s" "$CLIENTS" <<'PY'
+import json, sys
+from pathlib import Path
+scenario, clients = sys.argv[1], sys.argv[2].split(",")
+for client in clients:
+    path = Path("results") / f"{client}-{scenario}.json"
+    if not path.exists():
+        raise SystemExit(1)
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        raise SystemExit(1)
+    runs = [r for block in (data.get("results") or []) for r in (block.get("runs") or [])]
+    if not runs:
+        raise SystemExit(1)
+    # `started_at` only exists on runs produced after the fairness fixes.
+    if not all("started_at" in r for r in runs):
+        raise SystemExit(1)
+raise SystemExit(0)
+PY
+  then
+    echo "==> matrix $s (already complete, skipping)" | tee -a logs/campaign.log
+    continue
+  fi
   echo "==> matrix $s ($CLIENTS)" | tee -a logs/campaign.log
   python -m mqtt_client_bench.run matrix \
       --clients "$CLIENTS" --scenario "$s" --profile standard --runs 3 \
