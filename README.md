@@ -138,6 +138,19 @@ Three protocols are never mixed:
    capacity for application RTT).
 3. **Integrity** — bounded-rate sequence checks (missing/duplicate/out-of-order).
 
+Worker-owned measurement memory is bounded independently of elapsed message
+count. Latencies and scheduler lag use deterministic reservoir sampling
+(50,000 samples by default); sequence integrity uses bounded exact detail plus
+two online 64-bit commutative fingerprints. Result metadata records observed
+and retained sample counts so percentile quality remains auditable.
+
+Publisher payload backlog is separately capped at 64 MiB by default by reducing
+the effective outstanding window for large payloads. A single payload larger
+than the cap is still admitted alone and reported explicitly. Periodic worker
+telemetry includes RSS, RSS high-water, USS and PSS; abnormal exits retain the
+return code, signal and a `possible_oom_or_sigkill` marker instead of looking
+like an unexplained missing result.
+
 ### Application RTT
 
 `application_rtt_qos1` measures a **homogeneous product loop**: the SUT library
@@ -225,9 +238,10 @@ python -m mqtt_client_bench.run compare \
 ```
 
 ABBA blocks bootstrap per-block `median(B)/median(A)` ratios. Only fully valid
-slots enter the verdict. Load-fraction scenarios auto-calibrate each client
-against its own regime capacity (publish or RTT). Fixed 5 s cooldown between
-slots.
+slots enter the verdict. Load-fraction scenarios auto-calibrate each client once
+against its own MQTT 3.1.1 and MQTT 5 regime capacities (publish or RTT), then
+execute every client × protocol × 50/75/90/100 % point. Fixed 5 s cooldown
+between slots.
 
 ## Planned (not executable yet)
 
