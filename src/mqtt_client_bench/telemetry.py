@@ -42,11 +42,14 @@ def loadavg() -> List[float]:
 def process_stats(pid: int) -> dict:
     status = _read_text(f"/proc/{pid}/status") or ""
     rss_kb = None
+    rss_hwm_kb = None
     voluntary = None
     nonvoluntary = None
     for line in status.splitlines():
         if line.startswith("VmRSS:"):
             rss_kb = int(line.split()[1])
+        elif line.startswith("VmHWM:"):
+            rss_hwm_kb = int(line.split()[1])
         elif line.startswith("voluntary_ctxt_switches:"):
             voluntary = int(line.split()[1])
         elif line.startswith("nonvoluntary_ctxt_switches:"):
@@ -63,14 +66,57 @@ def process_stats(pid: int) -> dict:
             stime = int(fields[12])
         except (IndexError, ValueError):
             pass
+    smaps = _read_text(f"/proc/{pid}/smaps_rollup") or ""
+    pss_kb = None
+    private_kb = 0
+    private_seen = False
+    for line in smaps.splitlines():
+        if line.startswith("Pss:"):
+            pss_kb = int(line.split()[1])
+        elif line.startswith(("Private_Clean:", "Private_Dirty:", "Private_Hugetlb:")):
+            private_kb += int(line.split()[1])
+            private_seen = True
     return {
         "pid": pid,
         "rss_kb": rss_kb,
+        "rss_hwm_kb": rss_hwm_kb,
+        "uss_kb": private_kb if private_seen else None,
+        "pss_kb": pss_kb,
         "voluntary_ctxt_switches": voluntary,
         "nonvoluntary_ctxt_switches": nonvoluntary,
         "utime_ticks": utime,
         "stime_ticks": stime,
         "cpu_ticks": (utime + stime) if utime is not None and stime is not None else None,
+    }
+
+
+def process_memory_peaks(samples: List[dict]) -> dict:
+    """Aggregate per-worker RSS/USS/PSS peaks from periodic samples."""
+    fields = ("rss_kb", "rss_hwm_kb", "uss_kb", "pss_kb")
+    peaks: dict[str, dict] = {}
+    for sample in samples:
+        for name, stats in (sample.get("processes") or {}).items():
+            if not stats:
+                continue
+            current = peaks.setdefault(name, {"pid": stats.get("pid"), "samples": 0})
+            current["samples"] += 1
+            for field in fields:
+                value = stats.get(field)
+                if value is None:
+                    continue
+                peak_name = f"peak_{field}"
+                current[peak_name] = max(int(value), int(current.get(peak_name, 0)))
+    return peaks
+
+
+def process_exit_metadata(returncode: int | None) -> dict:
+    """Make abnormal worker exits explicit, including SIGKILL/OOM suspects."""
+    signal_number = -returncode if returncode is not None and returncode < 0 else None
+    possible_oom = signal_number == 9 or returncode == 137
+    return {
+        "returncode": returncode,
+        "signal": signal_number,
+        "possible_oom_or_sigkill": possible_oom,
     }
 
 

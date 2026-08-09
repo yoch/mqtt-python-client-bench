@@ -23,6 +23,14 @@ import time
 
 from mqtt_client_bench.adapters.registry import adapter_identity, create_adapter
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
+from mqtt_client_bench.sampling import (
+    DEFAULT_METRIC_SAMPLE_LIMIT,
+    DEFAULT_PAYLOAD_BACKLOG_BYTES,
+    DEFAULT_SEQUENCE_EXACT_LIMIT,
+    ReservoirSampler,
+    SequenceTracker,
+    bound_payload_backlog,
+)
 from mqtt_client_bench.workloads import (
     HEADER_SIZE,
     build_payload,
@@ -64,6 +72,15 @@ def main(argv=None) -> int:
     target_rate = cfg.get("target_rate")  # msgs/s for open-loop
     payload_name = cfg.get("payload", "telemetry256")
     protocol = cfg.get("protocol", "MQTTv311")
+    metric_sample_limit = int(cfg.get("metric_sample_limit", DEFAULT_METRIC_SAMPLE_LIMIT))
+    sequence_exact_limit = int(
+        cfg.get("integrity_sequence_limit", DEFAULT_SEQUENCE_EXACT_LIMIT)
+    )
+    payload_backlog_limit = cfg.get(
+        "max_harness_payload_bytes", DEFAULT_PAYLOAD_BACKLOG_BYTES
+    )
+    if payload_backlog_limit is not None:
+        payload_backlog_limit = int(payload_backlog_limit)
 
     # Build payload body.
     if payload_name.startswith("rl_"):
@@ -72,6 +89,15 @@ def main(argv=None) -> int:
     else:
         raw = build_payload(payload_name, seed=1)
         body = raw.encode("utf-8") if isinstance(raw, str) else raw
+
+    payload_len = len(body)
+    payload_allocation_bytes = max(payload_len, HEADER_SIZE) if cfg.get("force_header") else payload_len
+    payload_backlog = bound_payload_backlog(
+        outstanding,
+        payload_allocation_bytes,
+        payload_backlog_limit,
+    )
+    outstanding = payload_backlog["effective_outstanding"]
 
     corpus = []
     if payload_name in ("telemetry256", "event1k", "binary64") and not payload_name.startswith("rl_"):
@@ -95,8 +121,8 @@ def main(argv=None) -> int:
         "socket_completed_qos0": 0,
         "completed_in_window": 0,
         "completed_during_drain": 0,
-        "latencies_ns": [],
-        "scheduler_lags_ns": [],
+        "latencies_ns": ReservoirSampler(metric_sample_limit, seed=11),
+        "scheduler_lags_ns": ReservoirSampler(metric_sample_limit, seed=29),
         "lock": threading.Lock(),
         "inflight_local": 0,
         "phase": "init",
@@ -184,6 +210,7 @@ def main(argv=None) -> int:
         properties_builder=_properties_builder(cfg, adapter),
         force_header=bool(cfg.get("force_header", False)),
         sequence_start=1 << 40,
+        sequence_exact_limit=sequence_exact_limit,
     )
 
     # Drain warmup outstanding; fail closed if still active when the deadline hits.
@@ -257,6 +284,7 @@ def main(argv=None) -> int:
         batch_size=int(cfg.get("batch_size", 64)) if cadence == "batch64" else 1,
         reset_sequence=True,
         force_header=bool(cfg.get("force_header", False)),
+        sequence_exact_limit=sequence_exact_limit,
     )
     t1 = time.perf_counter()
 
@@ -275,8 +303,10 @@ def main(argv=None) -> int:
         timed_out = backlog if qos == 0 else len(state["mid_send_ns"])
         completed_in_window = state["completed_in_window"]
         completed_during_drain = state["completed_during_drain"]
-        latencies = list(state["latencies_ns"])
-        lags = list(state["scheduler_lags_ns"])
+        latencies = state["latencies_ns"].snapshot()
+        lags = state["scheduler_lags_ns"].snapshot()
+        latency_sampling = state["latencies_ns"].metadata()
+        scheduler_lag_sampling = state["scheduler_lags_ns"].metadata()
         counters = {
             "offered": state["offered"],
             "submitted": state["submitted"],
@@ -298,7 +328,7 @@ def main(argv=None) -> int:
     adapter.loop_stop()
 
     window = max(t1 - t0, 1e-9)
-    payload_len = 0 if body is None else len(body if isinstance(body, (bytes, bytearray)) else str(body).encode())
+    sequence_summary = measure_sequences.summary()
     # Primary rate uses completed_success in the measure window.
     result = {
         "ok": True,
@@ -316,14 +346,18 @@ def main(argv=None) -> int:
         "completed_during_drain": completed_during_drain,
         "backlog_at_end": backlog,
         "timed_out": timed_out,
-        "sent_sequence_start": measure_sequences[0] if measure_sequences else None,
-        "sent_sequence_end": measure_sequences[-1] if measure_sequences else None,
-        "sent_sequence_count": len(measure_sequences),
-        "sent_sequences": measure_sequences if len(measure_sequences) <= 20000 else None,
+        "sent_sequence_start": sequence_summary["first"],
+        "sent_sequence_end": sequence_summary["last"],
+        "sent_sequence_count": sequence_summary["count"],
+        "sent_sequences": measure_sequences.exact_values(),
+        "sent_sequence_summary": sequence_summary,
         "msgs_per_s": completed_in_window / window,
         "payload_bytes_per_s": (completed_in_window * payload_len) / window,
-        "latencies_ns": latencies[:50000],
-        "scheduler_lags_ns": lags[:50000],
+        "latencies_ns": latencies,
+        "scheduler_lags_ns": lags,
+        "latency_sampling": latency_sampling,
+        "scheduler_lag_sampling": scheduler_lag_sampling,
+        "harness_payload_backlog": payload_backlog,
         "gc_count_start": list(gc_start),
         "gc_count_end": list(gc.get_count()),
         **identity,
@@ -345,7 +379,7 @@ def _consume_completion_locked(state, qos, send_ns, now, failed: bool, *, mid) -
         else:
             state["protocol_completed"] += 1
         if send_ns is not None:
-            state["latencies_ns"].append(now - send_ns)
+            state["latencies_ns"].add(now - send_ns)
         if state["phase"] == "measure":
             state["completed_in_window"] += 1
         elif state["phase"] == "drain":
@@ -382,9 +416,10 @@ def _run_publish_loop(
     reset_sequence=False,
     force_header=False,
     sequence_start=0,
+    sequence_exact_limit=DEFAULT_SEQUENCE_EXACT_LIMIT,
 ):
     sequence = sequence_start
-    sent_sequences = []
+    sent_sequences = SequenceTracker(sequence_exact_limit)
     loop_start = time.perf_counter()
     next_send = loop_start
     interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0
@@ -406,7 +441,7 @@ def _run_publish_loop(
                 continue
             lag_ns = int((now - next_send) * 1e9)
             with state["lock"]:
-                state["scheduler_lags_ns"].append(lag_ns)
+                state["scheduler_lags_ns"].add(lag_ns)
             next_send += interval
 
         n = batch_size if cadence == "batch64" else 1
@@ -475,7 +510,7 @@ def _run_publish_loop(
                         _consume_completion_locked(state, qos, send_ns, early_now, early_failed, mid=mid)
                     else:
                         state["mid_send_ns"][mid] = send_ns
-                    sent_sequences.append(sequence)
+                    sent_sequences.add(sequence)
             else:
                 with state["lock"]:
                     state["sync_rejected"] += 1

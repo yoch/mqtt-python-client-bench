@@ -286,7 +286,7 @@ SCENARIOS: List[Scenario] = [
         qos_publish=1,
         payload="telemetry256",
         cadence="loaded75",
-        variants=tuple({"load_fraction": f} for f in (0.50, 0.90)),
+        variants=tuple({"load_fraction": f} for f in (0.50, 0.75, 0.90, 1.00)),
         estimated_minutes=5.0,
     ),
     Scenario(
@@ -322,7 +322,7 @@ SCENARIOS: List[Scenario] = [
         cadence="loaded75",
         outstanding=32,
         subscribers=1,
-        variants=tuple({"load_fraction": f} for f in (0.50, 0.90)),
+        variants=tuple({"load_fraction": f} for f in (0.50, 0.75, 0.90, 1.00)),
         estimated_minutes=5.0,
     ),
     # --- full suite ---

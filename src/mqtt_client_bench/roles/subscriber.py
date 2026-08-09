@@ -16,6 +16,12 @@ import time
 
 from mqtt_client_bench.adapters.registry import adapter_identity, create_adapter
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
+from mqtt_client_bench.sampling import (
+    DEFAULT_METRIC_SAMPLE_LIMIT,
+    DEFAULT_SEQUENCE_EXACT_LIMIT,
+    ReservoirSampler,
+    SequenceTracker,
+)
 from mqtt_client_bench.workloads import (
     HEADER_SIZE,
     callback_match_topics,
@@ -48,6 +54,10 @@ def main(argv=None) -> int:
     warmup_s = float(cfg.get("warmup_s", 1.0))
     drain_s = float(cfg.get("drain_s", 2.0))
     protocol = cfg.get("protocol", "MQTTv311")
+    metric_sample_limit = int(cfg.get("metric_sample_limit", DEFAULT_METRIC_SAMPLE_LIMIT))
+    sequence_exact_limit = int(
+        cfg.get("integrity_sequence_limit", DEFAULT_SEQUENCE_EXACT_LIMIT)
+    )
 
     state = {
         "connected": threading.Event(),
@@ -57,8 +67,8 @@ def main(argv=None) -> int:
         "delivered_during_drain": 0,
         "bytes_in_window": 0,
         "callback_invocations": 0,
-        "sequences": [],
-        "latencies_ns": [],
+        "sequences": SequenceTracker(sequence_exact_limit),
+        "latencies_ns": ReservoirSampler(metric_sample_limit, seed=43),
         "phase": "init",
         "lock": threading.Lock(),
         "sub_mids": set(),
@@ -82,10 +92,11 @@ def main(argv=None) -> int:
             if len(payload) >= HEADER_SIZE:
                 try:
                     hdr = decode_header(payload)
-                    state["sequences"].append(hdr["sequence"])
-                    send_ns = hdr["send_ns"]
-                    if send_ns:
-                        state["latencies_ns"].append(now - send_ns)
+                    if hdr["sequence"] < (1 << 40):
+                        state["sequences"].add(hdr["sequence"])
+                        send_ns = hdr["send_ns"]
+                        if send_ns:
+                            state["latencies_ns"].add(now - send_ns)
                 except ValueError:
                     pass
         elif state["phase"] == "drain":
@@ -95,7 +106,9 @@ def main(argv=None) -> int:
             payload = msg.payload or b""
             if len(payload) >= HEADER_SIZE:
                 try:
-                    state["sequences"].append(decode_header(payload)["sequence"])
+                    sequence = decode_header(payload)["sequence"]
+                    if sequence < (1 << 40):
+                        state["sequences"].add(sequence)
                 except ValueError:
                     pass
 
@@ -249,8 +262,8 @@ def main(argv=None) -> int:
     with state["lock"]:
         delivered = state["delivered_in_window"]
         bytes_in_window = state["bytes_in_window"]
-        sequences = list(state["sequences"])
-        latencies = list(state["latencies_ns"])
+        latencies = state["latencies_ns"].snapshot()
+        latency_sampling = state["latencies_ns"].metadata()
         callback_invocations = state["callback_invocations"]
 
     state["phase"] = "drain"
@@ -259,7 +272,8 @@ def main(argv=None) -> int:
     with state["lock"]:
         during_drain = state["delivered_during_drain"]
         # Include drain-phase sequences for integrity accounting.
-        sequences = list(state["sequences"])
+        sequences = state["sequences"].exact_values()
+        sequence_summary = state["sequences"].summary()
 
     adapter.disconnect()
     adapter.loop_stop()
@@ -284,8 +298,10 @@ def main(argv=None) -> int:
         "payload_bytes_in_window": bytes_in_window,
         "payload_bytes_per_s": bytes_in_window / window,
         "callback_invocations": callback_invocations,
-        "sequences": sequences[:200000],
-        "latencies_ns": latencies[:50000],
+        "sequences": sequences,
+        "sequence_summary": sequence_summary,
+        "latencies_ns": latencies,
+        "latency_sampling": latency_sampling,
         **identity,
     }
     write_json(cfg["result_path"], result)
