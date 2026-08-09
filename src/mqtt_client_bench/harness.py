@@ -48,6 +48,12 @@ from mqtt_client_bench.metrics import (
 from mqtt_client_bench.network import PROFILES as NETWORK_PROFILES
 from mqtt_client_bench.network import apply_profile, clear_profile, qdisc_stats
 from mqtt_client_bench.paths import PROJECT_ROOT
+from mqtt_client_bench.sampling import (
+    DEFAULT_METRIC_SAMPLE_LIMIT,
+    DEFAULT_PAYLOAD_BACKLOG_BYTES,
+    DEFAULT_SEQUENCE_EXACT_LIMIT,
+    integrity_from_summaries,
+)
 from mqtt_client_bench.scenarios import (
     SCENARIO_BY_NAME,
     default_runs,
@@ -56,7 +62,13 @@ from mqtt_client_bench.scenarios import (
     list_scenarios,
 )
 from mqtt_client_bench.sys_probe import SysCountersProbe, sys_counters_delta
-from mqtt_client_bench.telemetry import TelemetrySampler, allocate_cpuset, environment_metadata
+from mqtt_client_bench.telemetry import (
+    TelemetrySampler,
+    allocate_cpuset,
+    environment_metadata,
+    process_exit_metadata,
+    process_memory_peaks,
+)
 from mqtt_client_bench.workloads import (
     PAYLOAD_SPECS,
     callback_match_loadgen_topic,
@@ -449,7 +461,8 @@ def run_point(
                 "outstanding", "duration_s", "warmup_s", "drain_s", "protocol", "properties_profile",
                 "load_fraction", "target_rate", "session_persistent", "callback_filters",
                 "overlapping_callbacks", "subscription", "topic_topology", "subscription_count",
-                "keepalive", "batch_size",
+                "keepalive", "batch_size", "metric_sample_limit", "integrity_sequence_limit",
+                "max_harness_payload_bytes",
             ) if k in point or point.get(k) is not None},
         }
         # Fill defaults from point always.
@@ -466,6 +479,9 @@ def run_point(
             ("drain_s", 2.0 if profile == "smoke" else 10.0),
             ("protocol", "MQTTv311"),
             ("force_header", False),
+            ("metric_sample_limit", DEFAULT_METRIC_SAMPLE_LIMIT),
+            ("integrity_sequence_limit", DEFAULT_SEQUENCE_EXACT_LIMIT),
+            ("max_harness_payload_bytes", DEFAULT_PAYLOAD_BACKLOG_BYTES),
         ):
             cfg.setdefault(key, point.get(key, default))
         if "force_header" in point:
@@ -811,6 +827,7 @@ def run_point(
                     w.kill()
 
         telemetry_samples = sampler.stop()
+        worker_memory = process_memory_peaks(telemetry_samples)
         sys_after = sys_probe.snapshot() if sys_probe is not None else None
         if sys_probe is not None:
             sys_probe.stop()
@@ -837,11 +854,25 @@ def run_point(
             ref_sub_loadgen = None
 
         worker_results = []
-        for cfg in configs:
+        for index, cfg in enumerate(configs):
+            returncode = workers[index].returncode if index < len(workers) else None
+            exit_metadata = process_exit_metadata(returncode)
             if os.path.exists(cfg["result_path"]):
-                worker_results.append(read_json(cfg["result_path"]))
+                result = read_json(cfg["result_path"])
             else:
-                worker_results.append({"ok": False, "error": "missing_result", "result_path": cfg["result_path"]})
+                error = (
+                    "possible_oom_or_sigkill"
+                    if exit_metadata["possible_oom_or_sigkill"]
+                    else "missing_result"
+                )
+                result = {
+                    "ok": False,
+                    "error": error,
+                    "result_path": cfg["result_path"],
+                }
+            result["process_exit"] = exit_metadata
+            result["memory_peak"] = worker_memory.get(f"w{index}")
+            worker_results.append(result)
 
         validity = validate_run(
             point,
@@ -858,22 +889,37 @@ def run_point(
             validity["status"] = "inconclusive"
             validity["reasons"].append(f"barrier_failed:{barrier_error or 'broadcast'}")
 
-        # Integrity enrichment when sequences present.
+        # Integrity enrichment. New workers emit bounded online fingerprints;
+        # exact lists remain an optional small-run compatibility detail.
         pub = next((w for w in worker_results if w.get("role") == "publisher"), None)
         for wr in worker_results:
-            if wr.get("role") == "subscriber" and wr.get("sequences"):
-                # Warmup traffic uses a disjoint sequence range (>= 2^40); late
-                # warmup deliveries are not integrity errors.
+            if wr.get("role") != "subscriber":
+                continue
+            expected_summary = (pub or {}).get("sent_sequence_summary")
+            received_summary = wr.get("sequence_summary")
+            if expected_summary and received_summary:
+                online = integrity_from_summaries(expected_summary, received_summary)
+                expected_values = (pub or {}).get("sent_sequences")
+                received_values = wr.get("sequences")
+                if expected_values is not None and received_values is not None:
+                    exact = integrity_counts(expected_values, received_values)
+                    exact.update(
+                        {
+                            "digest_match": online["digest_match"],
+                            "count_delta": online["count_delta"],
+                            "probabilistic": False,
+                        }
+                    )
+                    wr["integrity"] = exact
+                else:
+                    wr["integrity"] = online
+                continue
+            # Compatibility with results from workers predating online summaries.
+            if wr.get("sequences"):
                 seqs = [s for s in wr["sequences"] if s < (1 << 40)]
-                expected = None
-                if pub and pub.get("sent_sequences"):
-                    expected = pub["sent_sequences"]
-                elif pub and pub.get("sent_sequence_start") is not None and pub.get("sent_sequence_end") is not None:
-                    expected = range(int(pub["sent_sequence_start"]), int(pub["sent_sequence_end"]) + 1)
+                expected = (pub or {}).get("sent_sequences")
                 if expected is not None:
                     wr["integrity"] = integrity_counts(expected, seqs)
-                elif seqs:
-                    wr["integrity"] = integrity_counts(range(min(seqs), max(seqs) + 1), seqs)
 
         # Latency summaries.
         for wr in worker_results:
@@ -919,6 +965,7 @@ def run_point(
             "loadgen_ref_sub": loadgen_ref_sub_stats,
             "sys_counters": sys_counters,
             "telemetry": telemetry_samples[-30:],
+            "worker_memory_peaks": worker_memory,
             "network": net_result,
             "qdisc": qdisc_stats() if network != "localhost" else None,
             "managed_broker": managed_broker,
@@ -1258,6 +1305,7 @@ def _fraction_map(capacity: Optional[float]) -> dict:
         "0.50": None if capacity is None else capacity * 0.50,
         "0.75": None if capacity is None else capacity * 0.75,
         "0.90": None if capacity is None else capacity * 0.90,
+        "1.00": capacity,
     }
 
 
@@ -1380,22 +1428,24 @@ def compare_clients(
     point_results = []
     with tempfile.TemporaryDirectory(prefix="mqtt-bench-ab-") as tmp:
         work_dir = Path(tmp)
-        for point_idx, point in enumerate(points):
-            # Auto-calibrate each client when the point uses load_fraction.
-            calibrations = {}
-            if point.get("load_fraction") is not None and shared_load_profile is None:
+        # One calibration per client covers every supported protocol. Reusing
+        # it for the whole matrix prevents each fraction from silently getting
+        # a different gmqtt baseline and guarantees protocol×client alignment.
+        calibrations = {}
+        if any(point.get("load_fraction") is not None for point in points):
+            if shared_load_profile is None:
                 for name in (baseline_client, candidate_client):
-                    cal_path = str(work_dir / f"cal-{name}-{point_idx}.json")
+                    cal_path = str(work_dir / f"cal-{name}.json")
                     calibrations[name] = calibrate(
                         cal_path,
                         client=name,
                         client_path=client_paths.get(name),
                         profile="standard" if profile == "standard" else profile,
                     )
-            elif shared_load_profile is not None:
+            else:
                 calibrations[baseline_client] = shared_load_profile
                 calibrations[candidate_client] = shared_load_profile
-
+        for point_idx, point in enumerate(points):
             baseline_rates = []
             candidate_rates = []
             slot_rates: List[Optional[float]] = []
@@ -1449,6 +1499,7 @@ def compare_clients(
                             "rtt_capacity_msgs_per_s": v.get("rtt_capacity_msgs_per_s"),
                             "client": v.get("client"),
                             "client_identity": v.get("client_identity"),
+                            "protocol_capacities": v.get("protocol_capacities"),
                         }
                         for k, v in calibrations.items()
                     },

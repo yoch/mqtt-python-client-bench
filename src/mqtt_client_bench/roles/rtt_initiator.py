@@ -10,6 +10,7 @@ import time
 
 from mqtt_client_bench.adapters.registry import adapter_identity, create_adapter
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
+from mqtt_client_bench.sampling import DEFAULT_METRIC_SAMPLE_LIMIT, ReservoirSampler
 from mqtt_client_bench.workloads import HEADER_SIZE, decode_header, encode_header
 
 
@@ -51,13 +52,14 @@ def main(argv=None) -> int:
         return 1
     run_id = cfg["run_id"].encode("ascii")
     protocol = cfg.get("protocol", "MQTTv311")
+    metric_sample_limit = int(cfg.get("metric_sample_limit", DEFAULT_METRIC_SAMPLE_LIMIT))
 
     state = {
         "connected": threading.Event(),
         "subscribed": threading.Event(),
         "phase": "init",
         "inflight": {},
-        "latencies_ns": [],
+        "latencies_ns": ReservoirSampler(metric_sample_limit, seed=71),
         "timeouts": 0,
         "sent_in_window": 0,
         "completed_in_window": 0,
@@ -97,7 +99,7 @@ def main(argv=None) -> int:
             if sent is None:
                 return
             if state["phase"] == "measure":
-                state["latencies_ns"].append(now - sent)
+                state["latencies_ns"].add(now - sent)
                 state["completed_in_window"] += 1
 
     adapter.on_connect = on_connect
@@ -168,7 +170,8 @@ def main(argv=None) -> int:
         time.sleep(0.01)
     with state["lock"]:
         timeouts = len(state["inflight"])
-        latencies = list(state["latencies_ns"])
+        latencies = state["latencies_ns"].snapshot()
+        latency_sampling = state["latencies_ns"].metadata()
         completed = state["completed_in_window"]
         sent = state["sent_in_window"]
 
@@ -185,7 +188,8 @@ def main(argv=None) -> int:
             "completed_in_window": completed,
             "timeouts": timeouts,
             "failure_rate": (timeouts / sent) if sent else None,
-            "latencies_ns": latencies[:50000],
+            "latencies_ns": latencies,
+            "latency_sampling": latency_sampling,
             "msgs_per_s": completed / window,
             **identity,
         },
