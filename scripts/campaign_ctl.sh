@@ -196,10 +196,20 @@ preflight() {
   # The managed broker uses network_mode: host, so anything already bound to its
   # ports makes `broker up` fail closed at the first step of the campaign. Cheap
   # to see now, and otherwise discovered hours later in a log.
-  local held=""
-  for port in 11883 11884; do
-    if ss -lnt 2>/dev/null | grep -q ":${port}\b"; then held="$held $port"; fi
-  done
+  #
+  # Our own broker binds those same ports, so a bare port check reports the
+  # healthy case as a blocker. Only a listener that is *not* our running
+  # container counts.
+  local held="" ours=0
+  if docker ps --filter "name=$(basename "$PWD")-mosquitto" --filter "status=running" \
+       --format '{{.Names}}' 2>/dev/null | grep -q .; then
+    ours=1
+    echo "ok       managed broker already running (it owns 11883/11884)"
+  else
+    for port in 11883 11884; do
+      if ss -lnt 2>/dev/null | grep -q ":${port}\b"; then held="$held $port"; fi
+    done
+  fi
   if [[ -n "$held" ]]; then
     echo "BLOCKER  broker port(s) already bound:$held"
     ss -lntp 2>/dev/null | grep -E ":(11883|11884)\b" | sed 's/^/         /'
@@ -207,7 +217,7 @@ preflight() {
     echo "         stop that listener, or the campaign dies at 'broker up'."
     fatal=1
   else
-    echo "ok       broker ports 11883/11884 free"
+    [[ "$ours" == "1" ]] || echo "ok       broker ports 11883/11884 free"
   fi
   return $fatal
 }
