@@ -140,10 +140,11 @@ SCENARIOS=("${REPR[@]}" "${DIAGNOSTIC[@]}")
 # *from the current harness*. Results predating the fairness fixes carry no run
 # provenance, so they are correctly treated as missing and re-run.
 scenario_complete() {  # <scenario> <clients-csv> <python>
-  "$3" - "$1" "$2" <<'PY'
+  "$3" - "$1" "$2" 2>>logs/campaign.log <<'PY'
 import json, sys
 from pathlib import Path
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario
+from mqtt_client_bench.adapters.registry import adapter_identity
 
 scenario, clients = sys.argv[1], sys.argv[2].split(",")
 expected = len(expand_scenario(SCENARIO_BY_NAME[scenario], "standard"))
@@ -166,6 +167,16 @@ for client in clients:
     # Points are checkpointed as they finish, so a file can exist while the
     # scenario is only half measured.
     if len(blocks) < expected:
+        raise SystemExit(1)
+    # A library upgrade invalidates that client's numbers just as surely as a
+    # missing file, and the campaign would otherwise skip a complete-looking
+    # scenario and publish a matrix mixing two versions of the same client. The
+    # calibration gate already refuses a stale profile this way; this is the
+    # same rule for measurements.
+    recorded = (data.get("client_identity") or {}).get("client_version")
+    installed = adapter_identity(client).get("client_version")
+    if recorded and installed and recorded != installed:
+        print(f"    {client} {scenario}: measured on {recorded}, installed {installed}", file=sys.stderr)
         raise SystemExit(1)
 raise SystemExit(0)
 PY
