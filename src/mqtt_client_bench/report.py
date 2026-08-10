@@ -390,6 +390,73 @@ def _svg_single_bars(labels: Sequence[str], values: Sequence[Optional[float]]) -
     return _svg_grouped_bars(labels, series, height=300, bar_slot=26, group_gap=14, label_room=130)
 
 
+def _overview_charts_html(
+    scenarios: Sequence[str],
+    series: Sequence[Dict[str, Any]],
+    meta: Optional[Dict[str, "ClientMeta"]] = None,
+) -> str:
+    """One chart per peer group instead of one chart for everything.
+
+    All nine clients across every scenario row came to 91 bars in a 1970 px
+    viewBox: unreadable at any realistic width, and it invited precisely the
+    cross-group comparison the matrix refuses to make. Splitting on the peer
+    group fixes both at once — each chart holds only clients that are actually
+    substitutes. A scenario with no data in a group is dropped from that group's
+    chart rather than rendered as a gap.
+    """
+    meta = meta or {}
+    grouped: Dict[tuple, List[Dict[str, Any]]] = {}
+    for serie in series:
+        info = meta.get(serie.get("client", ""))
+        group = info.peer_group if info else ("unknown", "unknown")
+        grouped.setdefault(group, []).append(serie)
+
+    sections: List[str] = []
+    for group, members in grouped.items():
+        keep = [
+            i
+            for i, _ in enumerate(scenarios)
+            if any((m.get("values") or [None] * len(scenarios))[i] is not None for m in members)
+        ]
+        if not keep:
+            continue
+        labels = [scenarios[i] for i in keep]
+
+        def _pick(serie: Dict[str, Any], key: str) -> List[Any]:
+            source = serie.get(key) or []
+            return [source[i] if i < len(source) else None for i in keep]
+
+        trimmed = [
+            {
+                "client": m.get("client"),
+                "color": m.get("color"),
+                "values": _pick(m, "values"),
+                "low": _pick(m, "low"),
+                "high": _pick(m, "high"),
+            }
+            for m in members
+        ]
+        svg = _svg_grouped_bars(labels, trimmed, bar_slot=18, group_gap=22)
+        if not svg:
+            continue
+        sections.append(
+            f"""
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Throughput — {_esc(group[1])} <span class="group-sub">{_esc(group[0])}</span></h2>
+          <p class="hint">Only clients that are substitutes for one another share a chart: this one holds the
+          <strong>{_esc(group[0])}</strong> clients whose I/O model is <code>{_esc(group[1])}</code>. Bars are grouped
+          by scenario · MQTT protocol and are comparable only within the same protocol; whiskers show the observed
+          run-to-run min/max. Comparing a bar here with a bar in another chart is not meaningful.</p>
+        </div>
+        <div class="chart-wrap chart-wrap-wide">
+          {svg}
+        </div>
+      </section>"""
+        )
+    return "\n".join(sections)
+
+
 def _performance_matrix_html(
     scenarios: Sequence[str],
     clients: Sequence[str],
@@ -420,12 +487,19 @@ def _performance_matrix_html(
             groups[-1][1].append(client)
 
     group_head = "".join(
-        f'<th scope="col" class="group-head" colspan="{len(members)}">'
+        f'<th scope="col" class="group-head group-start" colspan="{len(members)}">'
         f'{_esc(group[1])}<span class="group-sub">{_esc(group[0])}</span></th>'
         for group, members in groups
     )
+    # The group boundary has to be visible on every row, not just in the header:
+    # reading a row, the eye has no way to tell where one peer group ends, which
+    # is what made an unhighlighted 19,536 next to a highlighted 14,358 look
+    # arbitrary rather than "different groups".
+    group_first = {members[0] for _group, members in groups}
     head = "".join(
-        f'<th scope="col" class="num">{_client_swatch(c, colors, meta)}</th>' for c in ordered
+        f'<th scope="col" class="num{" group-start" if c in group_first else ""}">'
+        f"{_client_swatch(c, colors, meta)}</th>"
+        for c in ordered
     )
 
     body_rows: List[str] = []
@@ -440,6 +514,7 @@ def _performance_matrix_html(
             # scenario is rate-capped, not that one client outperformed the rest.
             all_tied = bool(numeric) and tied == len(numeric)
             for client, value in zip(members, values):
+                edge = " group-start" if client == members[0] else ""
                 if value is None:
                     row = cells_by.get((scenario, client))
                     kind = (row.empty_reason if row else None) or "missing"
@@ -447,12 +522,20 @@ def _performance_matrix_html(
                     detail = (row.reason_detail if row else "") or ""
                     tip = f"{title}{': ' + detail if detail else ''}"
                     tds.append(
-                        f'<td class="num empty empty-{kind}" title="{_esc(tip)}">{glyph}</td>'
+                        f'<td class="num empty empty-{kind}{edge}" title="{_esc(tip)}">{glyph}</td>'
                     )
                     continue
                 row = cells_by.get((scenario, client))
                 classes = ["num"]
-                if not all_tied and best is not None and _is_tied_with_best(value, best):
+                if edge:
+                    classes.append("group-start")
+                solo = len(numeric) == 1
+                if solo:
+                    # Not a winner and not a loser: there is nobody in this peer
+                    # group to rank it against. Saying so beats leaving the
+                    # reader to wonder why a large number is not highlighted.
+                    classes.append("solo")
+                elif not all_tied and best is not None and _is_tied_with_best(value, best):
                     classes.append("best")
                 tip_bits = []
                 if row:
@@ -466,6 +549,8 @@ def _performance_matrix_html(
                         tip_bits.append(f"broker CPU {row.broker_cpu_max_pct:.0f}%")
                     if row.bottleneck and row.bottleneck != "sut_limited":
                         classes.append("suspect")
+                if solo:
+                    tip_bits.insert(0, f"alone in the {group[1]}/{group[0]} group — not ranked")
                 tip = " · ".join(tip_bits)
                 tds.append(
                     f'<td class="{" ".join(classes)}" title="{_esc(tip)}">{_esc(_fmt_num(value))}</td>'
@@ -475,14 +560,22 @@ def _performance_matrix_html(
         )
 
     legend = " ".join(
-        f'<span class="legend-item"><span class="legend-glyph empty-{kind}">{glyph}</span>{_esc(title)}</span>'
-        for kind, (glyph, title) in EMPTY_GLYPHS.items()
+        [
+            '<span class="legend-item"><span class="legend-glyph legend-best"></span>'
+            "best in its peer group</span>",
+            '<span class="legend-item"><span class="legend-glyph legend-solo"></span>'
+            "alone in its group — not ranked</span>",
+        ]
+        + [
+            f'<span class="legend-item"><span class="legend-glyph empty-{kind}">{glyph}</span>{_esc(title)}</span>'
+            for kind, (glyph, title) in EMPTY_GLYPHS.items()
+        ]
     )
     return f"""
       <section class="panel">
         <div class="panel-head">
           <h2>Performance matrix</h2>
-          <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols, and the best value is highlighted <strong>within each peer group</strong> (columns are grouped by I/O model and stability) — a bridged client and a sync client are not substitutes, and neither are <code>mqttium</code> and <code>mqttium-compat</code>. A dotted underline marks a number the harness did not attribute to the client itself; hover any cell for its bottleneck, run count and spread.</p>
+          <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols, and the best value is highlighted <strong>within each peer group</strong> — the vertical rules mark those groups, formed by I/O model and stability. So the highest number in a row is often <em>not</em> highlighted: it belongs to another group. A client alone in its group is shown in outline and never crowned, because there is nothing to rank it against. A dotted underline marks a number the harness did not attribute to the client itself; hover any cell for its bottleneck, run count and spread.</p>
           <p class="legend">{legend}</p>
         </div>
         <div class="table-wrap table-wrap-sticky-col">
@@ -1355,6 +1448,7 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
         for client in _sort_clients(scenario_clients, meta)
     ]
     overview_payload = {"scenarios": chart_scenarios, "series": overview_series}
+    overview_charts_html = _overview_charts_html(chart_scenarios, overview_series, meta)
     matrix_html = _performance_matrix_html(
         matrix_scenarios, scenario_clients, by_key, colors, meta=meta, cells_by=cells_by
     )
@@ -1416,15 +1510,7 @@ def render_index(docs: Sequence[ResultDoc], generated_at: str) -> str:
 
       {env_warnings_html}
 
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Throughput snapshot</h2>
-          <p class="hint">Grouped by scenario · MQTT protocol, one colour per client. Whiskers show the observed run-to-run min/max. Comparable only within the same protocol. Rate-capped checks, smoke, and non-comparable results are omitted.</p>
-        </div>
-        <div class="chart-wrap chart-wrap-wide">
-          {_svg_grouped_bars(overview_payload.get("scenarios") or [], overview_payload.get("series") or [])}
-        </div>
-      </section>
+      {overview_charts_html}
 
       {matrix_html}
 
