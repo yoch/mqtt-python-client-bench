@@ -1849,9 +1849,18 @@ class ReportTests(unittest.TestCase):
             # bridged clients, and paho — alone in the sync group — is never
             # crowned just for having no one to compare against.
             matrix_only = index[index.index('class="matrix"') : index.index("All results")]
-            self.assertIn('class="num best" title', matrix_only)
-            best_cells = re.findall(r'<td class="num best"[^>]*>([\d,.]+)</td>', matrix_only)
+            best_cells = re.findall(
+                r'<td class="[^"]*\bbest\b[^"]*"[^>]*>([\d,.]+)</td>', matrix_only
+            )
             self.assertEqual(best_cells, ["8,000.0"])
+            # Alone in its group, paho is shown but explicitly not ranked, and the
+            # group boundary is drawn on the cells so a row can be read at all.
+            solo_cells = re.findall(
+                r'<td class="[^"]*\bsolo\b[^"]*"[^>]*>([\d,.]+)</td>', matrix_only
+            )
+            self.assertIn("7,000.0", solo_cells)
+            self.assertIn("alone in the sync/stable group", matrix_only)
+            self.assertIn("group-start", matrix_only)
             # The chart is server-rendered SVG: no CDN, no canvas, no JS.
             self.assertIn('<svg class="chart-svg"', index)
             self.assertNotIn("<canvas", index)
@@ -1860,17 +1869,31 @@ class ReportTests(unittest.TestCase):
             self.assertIn("e2e_integrity", index)
             self.assertIn("sub_callback_matching", index)
             self.assertIn("remaining_length_boundaries", index)
-            chart_svg = index.split('<svg class="chart-svg"', 1)[1].split("</svg>", 1)[0]
-            self.assertIn("pub_qos_sweep_telemetry · MQTTv311", chart_svg)
-            for excluded in (
-                "duplex_gateway",
-                "e2e_integrity",
-                "sub_callback_matching",
-                "remaining_length_boundaries",
-            ):
-                self.assertNotIn(excluded, chart_svg)
+            charts = [
+                part.split("</svg>", 1)[0]
+                for part in index.split('<svg class="chart-svg"')[1:]
+            ]
+            self.assertGreater(len(charts), 1, "overview is split per peer group")
+            for chart in charts:
+                for excluded in (
+                    "duplex_gateway",
+                    "e2e_integrity",
+                    "sub_callback_matching",
+                    "remaining_length_boundaries",
+                ):
+                    self.assertNotIn(excluded, chart)
+            # Every client still appears, but never beside one from another peer
+            # group: a chart that mixes them invites the comparison the matrix
+            # refuses to make.
             for client in ("gmqtt", "paho"):
-                self.assertIn(client, chart_svg)
+                self.assertTrue(any(client in c for c in charts), client)
+            self.assertFalse(
+                any("paho" in c and "gmqtt" in c for c in charts),
+                "sync and asyncio_bridged clients must not share a chart",
+            )
+            self.assertTrue(
+                any("pub_qos_sweep_telemetry · MQTTv311" in c for c in charts)
+            )
             matrix_body = index[index.index('class="matrix"') :]
             self.assertLess(
                 matrix_body.index("pub_qos_sweep_telemetry · MQTTv311"),
@@ -1890,7 +1913,7 @@ class ReportTests(unittest.TestCase):
             self.assertLess(matrix_body.index("paho"), matrix_body.index("gmqtt"))
             self.assertIn("asyncio_bridged", matrix_body)
             self.assertIn("sync", matrix_body)
-            self.assertIn('class="group-head"', matrix_body)
+            self.assertRegex(matrix_body, r'class="group-head\b')
             # Compare docs must not inflate the Clients hero stat.
             self.assertRegex(index, r'stat-label">Clients</p>\s*<p class="stat-value">3</p>')
 
@@ -1977,7 +2000,7 @@ class ReportTests(unittest.TestCase):
             # but an empty cell now says *why* it is empty instead of showing a
             # bare em-dash that could equally mean "never run".
             matrix_body = index[index.index('class="matrix"') : index.index("Client issues")]
-            self.assertIn('class="num empty empty-refused"', matrix_body)
+            self.assertRegex(matrix_body, r'class="num empty empty-refused\b')
             self.assertIn("⊘", matrix_body)
             self.assertNotIn("<td class=\"num\">tcp_nodelay", matrix_body)
             # The reason appears only as a tooltip, never as a cell value.
@@ -2316,7 +2339,7 @@ class DualProtocolTests(unittest.TestCase):
             index = (site / "index.html").read_text(encoding="utf-8")
             self.assertIn("pub_qos_sweep_telemetry · MQTTv311", index)
             self.assertIn("pub_qos_sweep_telemetry · MQTTv5", index)
-            self.assertIn("Comparable only within the same protocol", index)
+            self.assertIn("comparable only within the same protocol", index)
 
 
 if __name__ == "__main__":
