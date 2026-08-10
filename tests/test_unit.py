@@ -2127,6 +2127,76 @@ class DualProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             capacity_from_load_profile(legacy, protocol="MQTTv5", kind="publish")
 
+    def test_archive_drops_raw_samples_but_never_a_statistic(self):
+        # Raw sample vectors are 97% of a result file and are read only once, to
+        # produce statistics that are stored beside them. Archiving them must
+        # leave every one of those statistics behind, and say how many samples
+        # were moved so a summary is never mistaken for a complete record.
+        import gzip
+        import json
+        import tempfile
+
+        from mqtt_client_bench.archive import ARCHIVED_KEY, archive_results, slim_document
+
+        doc = {
+            "results": [
+                {
+                    "runs": [
+                        {
+                            "workers": [
+                                {
+                                    "role": "publisher",
+                                    "latencies_ns": [1_000_000, 2_000_000, 3_000_000],
+                                    "scheduler_lags_ns": [10, 20],
+                                    "sent_sequences": [1, 2, 3, 4],
+                                    "integrity": {"missing": 0},
+                                },
+                                {
+                                    "role": "subscriber",
+                                    "sequences": [1, 2, 3],
+                                    "latency_summary": {"p50_ms": 1.5},
+                                    "latencies_ns": [1_500_000],
+                                },
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+        slim, dropped = slim_document(doc)
+        self.assertEqual(dropped["latencies_ns"], 4)
+        self.assertEqual(dropped["sent_sequences"], 4)
+        pub, sub = slim["results"][0]["runs"][0]["workers"]
+        for key in ("latencies_ns", "scheduler_lags_ns", "sent_sequences"):
+            self.assertNotIn(key, pub)
+        self.assertNotIn("sequences", sub)
+        self.assertEqual(pub[ARCHIVED_KEY]["latencies_ns"], 3)
+        # Statistics survive: the pre-existing one untouched, the missing one derived.
+        self.assertEqual(sub["latency_summary"]["p50_ms"], 1.5)
+        self.assertIn("p50_ms", pub["latency_summary"])
+        self.assertEqual(pub["integrity"], {"missing": 0})
+        # The original is not mutated.
+        self.assertEqual(len(doc["results"][0]["runs"][0]["workers"][0]["latencies_ns"]), 3)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            results, archive = Path(tmp) / "results", Path(tmp) / "archive"
+            results.mkdir()
+            (results / "paho-x.json").write_text(json.dumps(doc), encoding="utf-8")
+            first = archive_results(results, archive)
+            self.assertEqual(first["files"], 1)
+            with gzip.open(archive / "paho-x.json.gz", "rb") as fh:
+                restored = json.loads(fh.read())
+            # The archive is the document as measured, not the summary.
+            self.assertEqual(
+                restored["results"][0]["runs"][0]["workers"][0]["latencies_ns"],
+                [1_000_000, 2_000_000, 3_000_000],
+            )
+            # Re-running finds nothing left to archive and cannot clobber it.
+            second = archive_results(results, archive)
+            self.assertEqual(second["files"], 0)
+            with gzip.open(archive / "paho-x.json.gz", "rb") as fh:
+                self.assertIn("latencies_ns", json.loads(fh.read())["results"][0]["runs"][0]["workers"][0])
+
     def test_report_renders_multi_point_compare_verdicts(self):
         # A compare over a multi-point scenario has no top-level ratio or CI:
         # the aggregate verdict is the string "multi_point" and the statistics
