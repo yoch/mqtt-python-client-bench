@@ -20,11 +20,16 @@ class MqttiumCompatAdapter:
 
     MQTT_ERR_SUCCESS = 0
     # See GmqttAdapter._PRIVATE_API for the rationale of this inventory.
+    # Re-verified against mqttium 0.2.0b2; MqttiumPrivateApiShapeTests pins it.
     _PRIVATE_API = {
-        "Client._async": "façade ctor exposes no max_outbound_inflight (through a4); the inner AsyncClient is rebuilt so QoS>=1 runs the same window as peers",
+        "Client._async": "façade ctor exposes no max_outbound_inflight (through 0.2.0b2); the inner AsyncClient is rebuilt so QoS>=1 runs the same window as peers",
         "Client._loop": "needed to schedule the properties publish path on the façade's own loop",
-        "AsyncClient._engine / _engine_lock": "subscribe registration: the façade has no on_subscribe hook to deliver grants",
-        "AsyncClient._queue_qos0_on_loop / _queue_qosn_on_loop / _finalize_loop_commands": "rebound after the inner client is replaced",
+        "Client._submit": "connect() must pass an SSLContext, which the façade's own connect() does not accept",
+        "Client._run_loop_mutation": "applies the bench keepalive on the façade's loop before connecting",
+        "Client._queue_qos0_on_loop / _queue_qosn_on_loop / _finalize_async_commands": "façade caches these bound methods at construction; rebound after the inner client is replaced",
+        "AsyncClient._queue_qos0_on_loop / _queue_qosn_on_loop / _finalize_loop_commands": "source of the rebound façade fast path",
+        "AsyncClient._engine / _engine_lock / _sub_futs / _collect_effects_locked / _drain_effects": "subscribe registration mirrored from AsyncClient.subscribe: the façade has no on_subscribe hook to deliver grants",
+        "AsyncClient._reconfigure": "loop-confined config boundary used to set keepalive before connect",
     }
 
     def __init__(self, client: Any):
@@ -51,6 +56,7 @@ class MqttiumCompatAdapter:
             tls=True,
             max_inflight=True,
             max_queued=True,
+            max_queued_bytes=True,
             message_callback_add=True,
             native_message_callback_add=True,
             v5_publish_properties=True,
@@ -100,6 +106,7 @@ class MqttiumCompatAdapter:
         clean_session: bool = True,
         max_inflight: int = 20,
         max_queued: int = 200,
+        max_queued_bytes: Optional[int] = None,
         tls_ca_certs: Optional[str] = None,
     ) -> "MqttiumCompatAdapter":
         try:
@@ -122,12 +129,19 @@ class MqttiumCompatAdapter:
             clean_session=clean_session,
             max_pending_outbound_messages=pending,
         )
-        # Through a4: max_outbound_inflight is attach-time only; the façade ctor
-        # does not expose it and ProtocolEngine.reconfigure rejects it once
-        # attached. Replace the inner AsyncClient before loop_start/connect so
-        # QoS>=1 points run with the same window as the other clients.
+        # Through 0.2.0b2: max_outbound_inflight is attach-time only; the façade
+        # ctor does not expose it and it is absent from
+        # _RUNTIME_MUTABLE_ENGINE_CONFIG_FIELDS, so _reconfigure() rejects it
+        # once attached. Replace the inner AsyncClient before loop_start/connect
+        # so QoS>=1 points run with the same window as the other clients.
         # Re-check on each mqttium bump: if the façade gains the parameter, drop
         # this rebuild and pass it straight to Client(...).
+        # Same byte-bound sizing as the native adapter: the façade's inner client
+        # carries the 1 MiB write-pump default too. See MqttiumAdapter.connect.
+        byte_kwargs = {}
+        if max_queued_bytes:
+            byte_kwargs["max_outbound_bytes"] = max(1 << 20, int(max_queued_bytes))
+            byte_kwargs["max_pending_outbound_bytes"] = max(64 << 20, int(max_queued_bytes))
         inner = AsyncClient(
             client_id=client_id,
             protocol=proto,
@@ -135,6 +149,7 @@ class MqttiumCompatAdapter:
             max_outbound_inflight=inflight,
             max_pending_outbound_messages=pending,
             publish_backpressure="error",
+            **byte_kwargs,
         )
         inner.on_connect = client._async.on_connect
         inner.on_disconnect = client._async.on_disconnect
@@ -156,8 +171,10 @@ class MqttiumCompatAdapter:
         self._tls_ctx = ssl.create_default_context(cafile=ca_certs)
 
     def connect(self, host: str, port: int, keepalive: int = 60) -> None:
+        # Same call the façade's own connect() makes; it is bypassed here only
+        # because that connect() takes no SSLContext.
         self._client._run_loop_mutation(
-            lambda: setattr(self._client._async._engine.config, "keepalive", keepalive)
+            lambda: self._client._async._reconfigure(keepalive=keepalive)
         )
         self._client._submit(self._client._async.connect(host, port, ssl=self._tls_ctx))
 
@@ -234,8 +251,8 @@ class MqttiumCompatAdapter:
             return PublishResult(rc=0, mid=synth)
 
         # Properties path: façade publish() has no properties kwarg.
-        # Use AsyncClient.publish_nowait on the owning loop (a3+), else
-        # await publish(nowait=True). Avoid private engine/receipt access.
+        # Use AsyncClient.publish_nowait on the owning loop. Avoid private
+        # engine/receipt access.
         import asyncio
 
         if self._client._loop is None:
@@ -250,22 +267,9 @@ class MqttiumCompatAdapter:
 
         async def _queue() -> None:
             try:
-                async_client = self._client._async
-                publish_nowait = getattr(async_client, "publish_nowait", None)
-                if publish_nowait is not None:
-                    receipt = publish_nowait(
-                        topic, data, qos=qos, retain=retain, properties=properties
-                    )
-                else:
-                    receipt = await async_client.publish(
-                        topic,
-                        data,
-                        qos=qos,
-                        retain=retain,
-                        properties=properties,
-                        nowait=True,
-                    )
-                handoff["receipt"] = receipt
+                handoff["receipt"] = self._client._async.publish_nowait(
+                    topic, data, qos=qos, retain=retain, properties=properties
+                )
             except BaseException as exc:  # noqa: BLE001
                 handoff["error"] = exc
             finally:
@@ -301,9 +305,10 @@ class MqttiumCompatAdapter:
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
         """Paho-shaped subscribe: return mid before SUBACK, then fire on_subscribe.
 
-        The façade (through a4) exposes ``Client.subscribe`` but has no ``on_subscribe``
-        hook, so the bench mirrors ``AsyncClient.subscribe`` registration
-        (queue + ``_sub_futs`` + effect drain) to deliver grants to the harness.
+        The façade (through 0.2.0b2) exposes ``Client.subscribe`` but has no
+        ``on_subscribe`` hook, so the bench mirrors ``AsyncClient.subscribe``
+        registration (queue + ``_sub_futs`` + effect drain) to deliver grants to
+        the harness.
         Mid must be returned before the callback: roles add mid to a wait-set
         only after ``subscribe()`` returns.
         """

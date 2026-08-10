@@ -16,8 +16,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install package
-        # zmqtt is experimental (outside [all]) but unit tests cover its adapter.
-        run: pip install -e ".[dev,all,zmqtt]"
+        # zmqtt and mqttium are experimental (outside [all]) but unit tests cover
+        # their adapters, including the private-API shape pins.
+        run: pip install -e ".[dev,all,zmqtt,mqttium]"
 
       - name: Run unit tests
         run: PYTHONPATH=src python -m unittest tests.test_unit -v

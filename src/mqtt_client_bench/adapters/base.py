@@ -35,6 +35,13 @@ class AdapterCapabilities:
     tls: bool = True
     max_inflight: bool = False
     max_queued: bool = False
+    # Whether the library bounds its outbound queue in *bytes* as well as in
+    # messages. Such a bound is invisible at small payloads and silently becomes
+    # the binding window at large ones, leaving the client with a queue far
+    # shallower than the `max_queued` messages every client is given. Declaring
+    # it lets the role worker size it from the point's payload so the message
+    # window is what binds, as it does for libraries with no byte bound at all.
+    max_queued_bytes: bool = False
     message_callback_add: bool = False
     # Native broker-side filter matching (Paho). Emulated matching must not enter
     # inter-client rankings for sub_callback_matching.
