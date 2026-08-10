@@ -25,6 +25,11 @@
     "client_version": "0.7.0",
     "implementation_language": "python",
     "io_model": "asyncio_bridged",
+    "private_api": {
+      "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+      "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+      "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+    },
     "stability": "stable",
     "synthetic_mids": true
   },
@@ -42,6 +47,7 @@
       "amqtt": "0.11.3",
       "awscrt": "0.35.0",
       "gmqtt": "0.7.0",
+      "mqttium": "0.2.0b2",
       "paho": "2.1.0",
       "zmqtt": "0.0.5"
     },
@@ -49,9 +55,9 @@
     "cpu_model": "Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz",
     "hostname": "yoch-HP",
     "loadavg": [
-      3.08935546875,
-      3.72265625,
-      4.39794921875
+      1.00634765625,
+      0.99755859375,
+      0.96533203125
     ],
     "machine": "x86_64",
     "physical_cpu_groups": [
@@ -72,18 +78,30 @@
         7
       ]
     ],
-    "platform": "Linux-6.8.0-134-lowlatency-x86_64-with-glibc2.39",
+    "platform": "Linux-6.8.0-136-lowlatency-x86_64-with-glibc2.39",
     "python": "3.12.3",
-    "scaling_governor": "schedutil"
+    "scaling_governor": "performance"
   },
+  "interleaved_with": [
+    "paho",
+    "aiomqtt",
+    "amqtt",
+    "awscrt",
+    "zmqtt",
+    "mqttium",
+    "mqttium-compat"
+  ],
+  "points_complete": true,
+  "points_expected": 3,
   "profile": "standard",
   "results": [
     {
       "point": {
         "cadence": "capacity",
         "description": "QoS 1 capacity across inflight windows.",
-        "drain_s": 10.0,
-        "duration_s": 20.0,
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 20,
         "inflight": 20,
         "loadgen_clients": 0,
         "max_queued": 200,
@@ -109,17 +127,39 @@
         "tls": false,
         "topic_topology": "single",
         "topology": "publisher_only",
-        "warmup_s": 5.0
+        "warmup_s": 3.0
       },
       "runs": [
         {
           "client": "gmqtt",
           "client_path": null,
+          "finished_at": "2026-08-07T10:31:59+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              1.16455078125,
+              1.01318359375,
+              1.00830078125
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "paho",
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat"
+          ],
+          "matrix_slot": 1,
           "point": {
             "cadence": "capacity",
             "description": "QoS 1 capacity across inflight windows.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 20,
             "inflight": 20,
             "loadgen_clients": 0,
             "max_queued": 200,
@@ -134,7 +174,7 @@
             "qos_subscribe": 0,
             "require_max_inflight": true,
             "require_max_queued": true,
-            "run_id": "1362dd33",
+            "run_id": "28428639",
             "scenario": "pub_qos1_inflight",
             "subscribers": 0,
             "subscription": "exact",
@@ -146,26 +186,49 @@
             "tls": false,
             "topic_topology": "single",
             "topology": "publisher_only",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:max_inflight",
             "not_implemented:max_queued"
           ],
-          "run_id": "1362dd33",
+          "run_id": "28428639",
           "run_index": 0,
           "schema_version": 1,
+          "started_at": "2026-08-07T10:31:59+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "gmqtt",
           "client_path": null,
+          "finished_at": "2026-08-07T10:33:31+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              0.8408203125,
+              0.9404296875,
+              0.98193359375
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho"
+          ],
+          "matrix_slot": 0,
           "point": {
             "cadence": "capacity",
             "description": "QoS 1 capacity across inflight windows.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 20,
             "inflight": 20,
             "loadgen_clients": 0,
             "max_queued": 200,
@@ -180,7 +243,7 @@
             "qos_subscribe": 0,
             "require_max_inflight": true,
             "require_max_queued": true,
-            "run_id": "19af92e3",
+            "run_id": "fde003e2",
             "scenario": "pub_qos1_inflight",
             "subscribers": 0,
             "subscription": "exact",
@@ -192,26 +255,49 @@
             "tls": false,
             "topic_topology": "single",
             "topology": "publisher_only",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:max_inflight",
             "not_implemented:max_queued"
           ],
-          "run_id": "19af92e3",
+          "run_id": "fde003e2",
           "run_index": 1,
           "schema_version": 1,
+          "started_at": "2026-08-07T10:33:31+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "gmqtt",
           "client_path": null,
+          "finished_at": "2026-08-07T10:37:18+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              1.0,
+              0.958984375,
+              0.98486328125
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho",
+            "gmqtt"
+          ],
+          "matrix_slot": 7,
           "point": {
             "cadence": "capacity",
             "description": "QoS 1 capacity across inflight windows.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 20,
             "inflight": 20,
             "loadgen_clients": 0,
             "max_queued": 200,
@@ -226,7 +312,7 @@
             "qos_subscribe": 0,
             "require_max_inflight": true,
             "require_max_queued": true,
-            "run_id": "1ebf63e9",
+            "run_id": "350dd950",
             "scenario": "pub_qos1_inflight",
             "subscribers": 0,
             "subscription": "exact",
@@ -238,15 +324,16 @@
             "tls": false,
             "topic_topology": "single",
             "topology": "publisher_only",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:max_inflight",
             "not_implemented:max_queued"
           ],
-          "run_id": "1ebf63e9",
+          "run_id": "350dd950",
           "run_index": 2,
           "schema_version": 1,
+          "started_at": "2026-08-07T10:37:18+00:00",
           "status": "inconclusive",
           "workers": []
         }
@@ -272,8 +359,9 @@
       "point": {
         "cadence": "capacity",
         "description": "QoS 1 capacity across inflight windows.",
-        "drain_s": 10.0,
-        "duration_s": 20.0,
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 1,
         "inflight": 1,
         "loadgen_clients": 0,
         "max_queued": 10,
@@ -299,17 +387,39 @@
         "tls": false,
         "topic_topology": "single",
         "topology": "publisher_only",
-        "warmup_s": 5.0
+        "warmup_s": 3.0
       },
       "runs": [
         {
           "client": "gmqtt",
           "client_path": null,
+          "finished_at": "2026-08-07T10:37:42+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              0.91357421875,
+              0.94580078125,
+              0.98095703125
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "paho",
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat"
+          ],
+          "matrix_slot": 1,
           "point": {
             "cadence": "capacity",
             "description": "QoS 1 capacity across inflight windows.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 1,
             "inflight": 1,
             "loadgen_clients": 0,
             "max_queued": 10,
@@ -324,7 +434,7 @@
             "qos_subscribe": 0,
             "require_max_inflight": true,
             "require_max_queued": true,
-            "run_id": "4e1904d5",
+            "run_id": "f1dcbbd6",
             "scenario": "pub_qos1_inflight",
             "subscribers": 0,
             "subscription": "exact",
@@ -336,26 +446,49 @@
             "tls": false,
             "topic_topology": "single",
             "topology": "publisher_only",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:max_inflight",
             "not_implemented:max_queued"
           ],
-          "run_id": "4e1904d5",
+          "run_id": "f1dcbbd6",
           "run_index": 0,
           "schema_version": 1,
+          "started_at": "2026-08-07T10:37:42+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "gmqtt",
           "client_path": null,
+          "finished_at": "2026-08-07T10:39:14+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              0.787109375,
+              0.87744140625,
+              0.95361328125
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho"
+          ],
+          "matrix_slot": 0,
           "point": {
             "cadence": "capacity",
             "description": "QoS 1 capacity across inflight windows.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 1,
             "inflight": 1,
             "loadgen_clients": 0,
             "max_queued": 10,
@@ -370,7 +503,7 @@
             "qos_subscribe": 0,
             "require_max_inflight": true,
             "require_max_queued": true,
-            "run_id": "8e201913",
+            "run_id": "8ee0b196",
             "scenario": "pub_qos1_inflight",
             "subscribers": 0,
             "subscription": "exact",
@@ -382,26 +515,49 @@
             "tls": false,
             "topic_topology": "single",
             "topology": "publisher_only",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:max_inflight",
             "not_implemented:max_queued"
           ],
-          "run_id": "8e201913",
+          "run_id": "8ee0b196",
           "run_index": 1,
           "schema_version": 1,
+          "started_at": "2026-08-07T10:39:14+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "gmqtt",
           "client_path": null,
+          "finished_at": "2026-08-07T10:43:01+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              0.86767578125,
+              0.849609375,
+              0.91748046875
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho",
+            "gmqtt"
+          ],
+          "matrix_slot": 7,
           "point": {
             "cadence": "capacity",
             "description": "QoS 1 capacity across inflight windows.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 1,
             "inflight": 1,
             "loadgen_clients": 0,
             "max_queued": 10,
@@ -416,7 +572,7 @@
             "qos_subscribe": 0,
             "require_max_inflight": true,
             "require_max_queued": true,
-            "run_id": "0494e960",
+            "run_id": "f5d79c94",
             "scenario": "pub_qos1_inflight",
             "subscribers": 0,
             "subscription": "exact",
@@ -428,15 +584,16 @@
             "tls": false,
             "topic_topology": "single",
             "topology": "publisher_only",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:max_inflight",
             "not_implemented:max_queued"
           ],
-          "run_id": "0494e960",
+          "run_id": "f5d79c94",
           "run_index": 2,
           "schema_version": 1,
+          "started_at": "2026-08-07T10:43:01+00:00",
           "status": "inconclusive",
           "workers": []
         }
@@ -462,8 +619,9 @@
       "point": {
         "cadence": "capacity",
         "description": "QoS 1 capacity across inflight windows.",
-        "drain_s": 10.0,
-        "duration_s": 20.0,
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 100,
         "inflight": 100,
         "loadgen_clients": 0,
         "max_queued": 1000,
@@ -489,17 +647,39 @@
         "tls": false,
         "topic_topology": "single",
         "topology": "publisher_only",
-        "warmup_s": 5.0
+        "warmup_s": 3.0
       },
       "runs": [
         {
           "client": "gmqtt",
           "client_path": null,
+          "finished_at": "2026-08-07T10:43:26+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              0.77001953125,
+              0.830078125,
+              0.908203125
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "paho",
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat"
+          ],
+          "matrix_slot": 1,
           "point": {
             "cadence": "capacity",
             "description": "QoS 1 capacity across inflight windows.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 100,
             "inflight": 100,
             "loadgen_clients": 0,
             "max_queued": 1000,
@@ -514,7 +694,7 @@
             "qos_subscribe": 0,
             "require_max_inflight": true,
             "require_max_queued": true,
-            "run_id": "161e64eb",
+            "run_id": "9051a21e",
             "scenario": "pub_qos1_inflight",
             "subscribers": 0,
             "subscription": "exact",
@@ -526,26 +706,49 @@
             "tls": false,
             "topic_topology": "single",
             "topology": "publisher_only",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:max_inflight",
             "not_implemented:max_queued"
           ],
-          "run_id": "161e64eb",
+          "run_id": "9051a21e",
           "run_index": 0,
           "schema_version": 1,
+          "started_at": "2026-08-07T10:43:26+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "gmqtt",
           "client_path": null,
+          "finished_at": "2026-08-07T10:44:58+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              0.76416015625,
+              0.8203125,
+              0.89990234375
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho"
+          ],
+          "matrix_slot": 0,
           "point": {
             "cadence": "capacity",
             "description": "QoS 1 capacity across inflight windows.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 100,
             "inflight": 100,
             "loadgen_clients": 0,
             "max_queued": 1000,
@@ -560,7 +763,7 @@
             "qos_subscribe": 0,
             "require_max_inflight": true,
             "require_max_queued": true,
-            "run_id": "559e3780",
+            "run_id": "e2fd0c88",
             "scenario": "pub_qos1_inflight",
             "subscribers": 0,
             "subscription": "exact",
@@ -572,26 +775,49 @@
             "tls": false,
             "topic_topology": "single",
             "topology": "publisher_only",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:max_inflight",
             "not_implemented:max_queued"
           ],
-          "run_id": "559e3780",
+          "run_id": "e2fd0c88",
           "run_index": 1,
           "schema_version": 1,
+          "started_at": "2026-08-07T10:44:58+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "gmqtt",
           "client_path": null,
+          "finished_at": "2026-08-07T10:48:45+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              1.00634765625,
+              0.99755859375,
+              0.96533203125
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho",
+            "gmqtt"
+          ],
+          "matrix_slot": 7,
           "point": {
             "cadence": "capacity",
             "description": "QoS 1 capacity across inflight windows.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 100,
             "inflight": 100,
             "loadgen_clients": 0,
             "max_queued": 1000,
@@ -606,7 +832,7 @@
             "qos_subscribe": 0,
             "require_max_inflight": true,
             "require_max_queued": true,
-            "run_id": "d919c6d4",
+            "run_id": "010fbdf4",
             "scenario": "pub_qos1_inflight",
             "subscribers": 0,
             "subscription": "exact",
@@ -618,15 +844,16 @@
             "tls": false,
             "topic_topology": "single",
             "topology": "publisher_only",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:max_inflight",
             "not_implemented:max_queued"
           ],
-          "run_id": "d919c6d4",
+          "run_id": "010fbdf4",
           "run_index": 2,
           "schema_version": 1,
+          "started_at": "2026-08-07T10:48:45+00:00",
           "status": "inconclusive",
           "workers": []
         }

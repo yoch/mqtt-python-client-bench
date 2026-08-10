@@ -42,6 +42,7 @@
       "amqtt": "0.11.3",
       "awscrt": "0.35.0",
       "gmqtt": "0.7.0",
+      "mqttium": "0.2.0b2",
       "paho": "2.1.0",
       "zmqtt": "0.0.5"
     },
@@ -49,9 +50,9 @@
     "cpu_model": "Intel(R) Core(TM) i7-3770 CPU @ 3.40GHz",
     "hostname": "yoch-HP",
     "loadavg": [
-      3.9970703125,
-      3.79833984375,
-      3.02783203125
+      3.666015625,
+      2.85107421875,
+      2.5458984375
     ],
     "machine": "x86_64",
     "physical_cpu_groups": [
@@ -72,10 +73,21 @@
         7
       ]
     ],
-    "platform": "Linux-6.8.0-134-lowlatency-x86_64-with-glibc2.39",
+    "platform": "Linux-6.8.0-136-lowlatency-x86_64-with-glibc2.39",
     "python": "3.12.3",
-    "scaling_governor": "schedutil"
+    "scaling_governor": "performance"
   },
+  "interleaved_with": [
+    "paho",
+    "gmqtt",
+    "aiomqtt",
+    "amqtt",
+    "zmqtt",
+    "mqttium",
+    "mqttium-compat"
+  ],
+  "points_complete": true,
+  "points_expected": 3,
   "profile": "standard",
   "results": [
     {
@@ -83,11 +95,12 @@
         "cadence": "capacity",
         "callback_filters": 16,
         "description": "Local Paho message_callback_add matching cost.",
-        "drain_s": 10.0,
-        "duration_s": 20.0,
-        "inflight": 20,
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 64,
+        "inflight": 64,
         "loadgen_clients": 32,
-        "max_queued": 200,
+        "max_queued": 640,
         "name": "sub_callback_matching",
         "network": "localhost",
         "non_comparable": false,
@@ -108,21 +121,43 @@
         "tls": false,
         "topic_topology": "fleet4k_uniform",
         "topology": "subscriber_ingress",
-        "warmup_s": 5.0
+        "warmup_s": 3.0
       },
       "runs": [
         {
           "client": "awscrt",
           "client_path": null,
+          "finished_at": "2026-08-07T11:48:49+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              2.0556640625,
+              2.53076171875,
+              2.58154296875
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "paho",
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat"
+          ],
+          "matrix_slot": 4,
           "point": {
             "cadence": "capacity",
             "callback_filters": 16,
             "description": "Local Paho message_callback_add matching cost.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
-            "inflight": 20,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
             "loadgen_clients": 32,
-            "max_queued": 200,
+            "max_queued": 640,
             "name": "sub_callback_matching",
             "network": "localhost",
             "non_comparable": false,
@@ -132,7 +167,7 @@
             "publishers": 1,
             "qos_publish": 0,
             "qos_subscribe": 0,
-            "run_id": "c3aac39c",
+            "run_id": "0cd15fcd",
             "scenario": "sub_callback_matching",
             "subscribers": 1,
             "subscription": "hash",
@@ -144,29 +179,52 @@
             "tls": false,
             "topic_topology": "fleet4k_uniform",
             "topology": "subscriber_ingress",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:native_message_callback_add"
           ],
-          "run_id": "c3aac39c",
+          "run_id": "0cd15fcd",
           "run_index": 0,
           "schema_version": 1,
+          "started_at": "2026-08-07T11:48:49+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "awscrt",
           "client_path": null,
+          "finished_at": "2026-08-07T11:49:57+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              1.71435546875,
+              2.34912109375,
+              2.51513671875
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho"
+          ],
+          "matrix_slot": 3,
           "point": {
             "cadence": "capacity",
             "callback_filters": 16,
             "description": "Local Paho message_callback_add matching cost.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
-            "inflight": 20,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
             "loadgen_clients": 32,
-            "max_queued": 200,
+            "max_queued": 640,
             "name": "sub_callback_matching",
             "network": "localhost",
             "non_comparable": false,
@@ -176,7 +234,7 @@
             "publishers": 1,
             "qos_publish": 0,
             "qos_subscribe": 0,
-            "run_id": "0df1e581",
+            "run_id": "04c99f24",
             "scenario": "sub_callback_matching",
             "subscribers": 1,
             "subscription": "hash",
@@ -188,29 +246,52 @@
             "tls": false,
             "topic_topology": "fleet4k_uniform",
             "topology": "subscriber_ingress",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:native_message_callback_add"
           ],
-          "run_id": "0df1e581",
+          "run_id": "04c99f24",
           "run_index": 1,
           "schema_version": 1,
+          "started_at": "2026-08-07T11:49:57+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "awscrt",
           "client_path": null,
+          "finished_at": "2026-08-07T11:51:38+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              2.095703125,
+              2.30712890625,
+              2.47998046875
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho",
+            "gmqtt"
+          ],
+          "matrix_slot": 2,
           "point": {
             "cadence": "capacity",
             "callback_filters": 16,
             "description": "Local Paho message_callback_add matching cost.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
-            "inflight": 20,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
             "loadgen_clients": 32,
-            "max_queued": 200,
+            "max_queued": 640,
             "name": "sub_callback_matching",
             "network": "localhost",
             "non_comparable": false,
@@ -220,7 +301,7 @@
             "publishers": 1,
             "qos_publish": 0,
             "qos_subscribe": 0,
-            "run_id": "9eb4a379",
+            "run_id": "bbd944db",
             "scenario": "sub_callback_matching",
             "subscribers": 1,
             "subscription": "hash",
@@ -232,14 +313,15 @@
             "tls": false,
             "topic_topology": "fleet4k_uniform",
             "topology": "subscriber_ingress",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:native_message_callback_add"
           ],
-          "run_id": "9eb4a379",
+          "run_id": "bbd944db",
           "run_index": 2,
           "schema_version": 1,
+          "started_at": "2026-08-07T11:51:38+00:00",
           "status": "inconclusive",
           "workers": []
         }
@@ -266,11 +348,12 @@
         "cadence": "capacity",
         "callback_filters": 1,
         "description": "Local Paho message_callback_add matching cost.",
-        "drain_s": 10.0,
-        "duration_s": 20.0,
-        "inflight": 20,
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 64,
+        "inflight": 64,
         "loadgen_clients": 32,
-        "max_queued": 200,
+        "max_queued": 640,
         "name": "sub_callback_matching",
         "network": "localhost",
         "non_comparable": false,
@@ -291,21 +374,43 @@
         "tls": false,
         "topic_topology": "fleet4k_uniform",
         "topology": "subscriber_ingress",
-        "warmup_s": 5.0
+        "warmup_s": 3.0
       },
       "runs": [
         {
           "client": "awscrt",
           "client_path": null,
+          "finished_at": "2026-08-07T11:54:02+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              1.8955078125,
+              2.212890625,
+              2.421875
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "paho",
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat"
+          ],
+          "matrix_slot": 4,
           "point": {
             "cadence": "capacity",
             "callback_filters": 1,
             "description": "Local Paho message_callback_add matching cost.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
-            "inflight": 20,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
             "loadgen_clients": 32,
-            "max_queued": 200,
+            "max_queued": 640,
             "name": "sub_callback_matching",
             "network": "localhost",
             "non_comparable": false,
@@ -315,7 +420,7 @@
             "publishers": 1,
             "qos_publish": 0,
             "qos_subscribe": 0,
-            "run_id": "c1bd9ed5",
+            "run_id": "f4edecd7",
             "scenario": "sub_callback_matching",
             "subscribers": 1,
             "subscription": "hash",
@@ -327,29 +432,52 @@
             "tls": false,
             "topic_topology": "fleet4k_uniform",
             "topology": "subscriber_ingress",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:native_message_callback_add"
           ],
-          "run_id": "c1bd9ed5",
+          "run_id": "f4edecd7",
           "run_index": 0,
           "schema_version": 1,
+          "started_at": "2026-08-07T11:54:02+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "awscrt",
           "client_path": null,
+          "finished_at": "2026-08-07T11:55:10+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              1.62060546875,
+              2.08837890625,
+              2.36328125
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho"
+          ],
+          "matrix_slot": 3,
           "point": {
             "cadence": "capacity",
             "callback_filters": 1,
             "description": "Local Paho message_callback_add matching cost.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
-            "inflight": 20,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
             "loadgen_clients": 32,
-            "max_queued": 200,
+            "max_queued": 640,
             "name": "sub_callback_matching",
             "network": "localhost",
             "non_comparable": false,
@@ -359,7 +487,7 @@
             "publishers": 1,
             "qos_publish": 0,
             "qos_subscribe": 0,
-            "run_id": "527cdc52",
+            "run_id": "b637f54d",
             "scenario": "sub_callback_matching",
             "subscribers": 1,
             "subscription": "hash",
@@ -371,29 +499,52 @@
             "tls": false,
             "topic_topology": "fleet4k_uniform",
             "topology": "subscriber_ingress",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:native_message_callback_add"
           ],
-          "run_id": "527cdc52",
+          "run_id": "b637f54d",
           "run_index": 1,
           "schema_version": 1,
+          "started_at": "2026-08-07T11:55:10+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "awscrt",
           "client_path": null,
+          "finished_at": "2026-08-07T11:56:51+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              1.7509765625,
+              2.04345703125,
+              2.32275390625
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho",
+            "gmqtt"
+          ],
+          "matrix_slot": 2,
           "point": {
             "cadence": "capacity",
             "callback_filters": 1,
             "description": "Local Paho message_callback_add matching cost.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
-            "inflight": 20,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
             "loadgen_clients": 32,
-            "max_queued": 200,
+            "max_queued": 640,
             "name": "sub_callback_matching",
             "network": "localhost",
             "non_comparable": false,
@@ -403,7 +554,7 @@
             "publishers": 1,
             "qos_publish": 0,
             "qos_subscribe": 0,
-            "run_id": "406742b0",
+            "run_id": "a92e4ed2",
             "scenario": "sub_callback_matching",
             "subscribers": 1,
             "subscription": "hash",
@@ -415,14 +566,15 @@
             "tls": false,
             "topic_topology": "fleet4k_uniform",
             "topology": "subscriber_ingress",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:native_message_callback_add"
           ],
-          "run_id": "406742b0",
+          "run_id": "a92e4ed2",
           "run_index": 2,
           "schema_version": 1,
+          "started_at": "2026-08-07T11:56:51+00:00",
           "status": "inconclusive",
           "workers": []
         }
@@ -449,11 +601,12 @@
         "cadence": "capacity",
         "callback_filters": 256,
         "description": "Local Paho message_callback_add matching cost.",
-        "drain_s": 10.0,
-        "duration_s": 20.0,
-        "inflight": 20,
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 64,
+        "inflight": 64,
         "loadgen_clients": 32,
-        "max_queued": 200,
+        "max_queued": 640,
         "name": "sub_callback_matching",
         "network": "localhost",
         "non_comparable": false,
@@ -474,21 +627,43 @@
         "tls": false,
         "topic_topology": "fleet4k_uniform",
         "topology": "subscriber_ingress",
-        "warmup_s": 5.0
+        "warmup_s": 3.0
       },
       "runs": [
         {
           "client": "awscrt",
           "client_path": null,
+          "finished_at": "2026-08-07T11:59:35+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              2.1552734375,
+              2.1484375,
+              2.3154296875
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "paho",
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat"
+          ],
+          "matrix_slot": 4,
           "point": {
             "cadence": "capacity",
             "callback_filters": 256,
             "description": "Local Paho message_callback_add matching cost.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
-            "inflight": 20,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
             "loadgen_clients": 32,
-            "max_queued": 200,
+            "max_queued": 640,
             "name": "sub_callback_matching",
             "network": "localhost",
             "non_comparable": false,
@@ -498,7 +673,7 @@
             "publishers": 1,
             "qos_publish": 0,
             "qos_subscribe": 0,
-            "run_id": "80e1176d",
+            "run_id": "922f7636",
             "scenario": "sub_callback_matching",
             "subscribers": 1,
             "subscription": "hash",
@@ -510,29 +685,52 @@
             "tls": false,
             "topic_topology": "fleet4k_uniform",
             "topology": "subscriber_ingress",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:native_message_callback_add"
           ],
-          "run_id": "80e1176d",
+          "run_id": "922f7636",
           "run_index": 0,
           "schema_version": 1,
+          "started_at": "2026-08-07T11:59:35+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "awscrt",
           "client_path": null,
+          "finished_at": "2026-08-07T12:01:03+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              2.64794921875,
+              2.27001953125,
+              2.33935546875
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho"
+          ],
+          "matrix_slot": 3,
           "point": {
             "cadence": "capacity",
             "callback_filters": 256,
             "description": "Local Paho message_callback_add matching cost.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
-            "inflight": 20,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
             "loadgen_clients": 32,
-            "max_queued": 200,
+            "max_queued": 640,
             "name": "sub_callback_matching",
             "network": "localhost",
             "non_comparable": false,
@@ -542,7 +740,7 @@
             "publishers": 1,
             "qos_publish": 0,
             "qos_subscribe": 0,
-            "run_id": "34fc419a",
+            "run_id": "d69a205c",
             "scenario": "sub_callback_matching",
             "subscribers": 1,
             "subscription": "hash",
@@ -554,29 +752,52 @@
             "tls": false,
             "topic_topology": "fleet4k_uniform",
             "topology": "subscriber_ingress",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:native_message_callback_add"
           ],
-          "run_id": "34fc419a",
+          "run_id": "d69a205c",
           "run_index": 1,
           "schema_version": 1,
+          "started_at": "2026-08-07T12:01:03+00:00",
           "status": "inconclusive",
           "workers": []
         },
         {
           "client": "awscrt",
           "client_path": null,
+          "finished_at": "2026-08-07T12:03:24+00:00",
+          "host_state": {
+            "cpu_count": 8,
+            "loadavg": [
+              2.40185546875,
+              2.38916015625,
+              2.376953125
+            ],
+            "scaling_governor": "performance"
+          },
+          "matrix_rotation": [
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho",
+            "gmqtt"
+          ],
+          "matrix_slot": 2,
           "point": {
             "cadence": "capacity",
             "callback_filters": 256,
             "description": "Local Paho message_callback_add matching cost.",
-            "drain_s": 10.0,
-            "duration_s": 20.0,
-            "inflight": 20,
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
             "loadgen_clients": 32,
-            "max_queued": 200,
+            "max_queued": 640,
             "name": "sub_callback_matching",
             "network": "localhost",
             "non_comparable": false,
@@ -586,7 +807,7 @@
             "publishers": 1,
             "qos_publish": 0,
             "qos_subscribe": 0,
-            "run_id": "4a76df76",
+            "run_id": "54a45407",
             "scenario": "sub_callback_matching",
             "subscribers": 1,
             "subscription": "hash",
@@ -598,14 +819,15 @@
             "tls": false,
             "topic_topology": "fleet4k_uniform",
             "topology": "subscriber_ingress",
-            "warmup_s": 5.0
+            "warmup_s": 3.0
           },
           "reasons": [
             "not_implemented:native_message_callback_add"
           ],
-          "run_id": "4a76df76",
+          "run_id": "54a45407",
           "run_index": 2,
           "schema_version": 1,
+          "started_at": "2026-08-07T12:03:24+00:00",
           "status": "inconclusive",
           "workers": []
         }
