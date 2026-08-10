@@ -223,6 +223,29 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_results(args: argparse.Namespace) -> int:
+    if args.action != "archive":
+        print(f"error: unknown results action {args.action}", file=sys.stderr)
+        return 2
+    from mqtt_client_bench.archive import archive_results
+
+    summary = archive_results(args.input, args.archive, dry_run=args.dry_run)
+    print(
+        json.dumps(
+            {
+                "files": summary["files"],
+                "bytes_before": summary["bytes_before"],
+                "bytes_after": summary["bytes_after"],
+                "saved_bytes": summary["saved_bytes"],
+                "archive": str(args.archive),
+                "dry_run": args.dry_run,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command")
@@ -295,6 +318,16 @@ def build_parser() -> argparse.ArgumentParser:
     report_p.add_argument("--input", default="results", help="Directory of committed JSON results")
     report_p.add_argument("--output", default="site", help="Output directory for the static site")
     report_p.set_defaults(func=cmd_report)
+
+    results_p = sub.add_parser(
+        "results",
+        help="Move raw per-message samples out of committed results into a gzipped archive",
+    )
+    results_p.add_argument("action", choices=["archive"])
+    results_p.add_argument("--input", default="results", help="Directory of JSON results")
+    results_p.add_argument("--archive", default="archive", help="Destination for *.json.gz")
+    results_p.add_argument("--dry-run", action="store_true", help="Report sizes, change nothing")
+    results_p.set_defaults(func=cmd_results)
 
     return parser
 
