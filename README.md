@@ -287,3 +287,12 @@ docstrings, scenario descriptions, commit messages and report output.
 - `awscrt` cannot set `TCP_NODELAY` (aws-c-io hides the fd) → RTT scenarios
   refused; its publish/ingress numbers are unaffected (pipelined writes).
 - Sync facade overhead for asyncio clients is intentional and documented.
+- The `sub_*` scenarios are **load-generator bound on the reference host**, not
+  client bound: every client lands within a few tens of msgs/s of the same
+  ~30 300 ceiling, which is the ingress offer rather than a property of the
+  library. Read them as a delivery-correctness check, not as a ranking.
+- The 64 KiB and 1 MiB points of `pub_payload_sweep_qos0` are **broker bound**:
+  Mosquitto saturates before most clients do, so a valid median survives mainly
+  for the clients too slow to saturate it. That inverts the ranking at those two
+  sizes, and they should not be read as a comparison until the broker has more
+  headroom than the clients.
