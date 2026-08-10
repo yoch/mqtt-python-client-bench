@@ -40,6 +40,12 @@ from mqtt_client_bench.metrics import (  # noqa: E402
     summarize_valid_runs,
 )
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, estimate_suite, expand_scenario, list_scenarios  # noqa: E402
+from mqtt_client_bench.sampling import (  # noqa: E402
+    ReservoirSampler,
+    SequenceTracker,
+    bound_payload_backlog,
+    integrity_from_summaries,
+)
 from mqtt_client_bench.workloads import (  # noqa: E402
     build_payload,
     callback_match_loadgen_topic,
@@ -171,6 +177,86 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(counts["duplicates"], 1)
         self.assertEqual(counts["missing"], 0)
         self.assertGreaterEqual(counts["out_of_order"], 1)
+
+
+class BoundedSamplingTests(unittest.TestCase):
+    def test_high_throughput_samples_remain_bounded(self):
+        import tracemalloc
+
+        tracemalloc.start()
+        sampler = ReservoirSampler(1024, seed=7)
+        sequences = SequenceTracker(1024)
+        for value in range(250_000):
+            sampler.add(value)
+            sequences.add(value)
+        current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        self.assertEqual(sampler.seen, 250_000)
+        self.assertEqual(len(sampler.snapshot()), 1024)
+        self.assertEqual(sampler.metadata()["retained"], 1024)
+        self.assertIsNone(sequences.exact_values())
+        self.assertLess(current, 512 * 1024)
+        self.assertLess(peak, 1024 * 1024)
+
+    def test_sequence_integrity_fingerprint_releases_exact_prefix_at_limit(self):
+        expected = SequenceTracker(1024)
+        received = SequenceTracker(1024)
+        for sequence in range(1, 100_001):
+            expected.add(sequence)
+            received.add(sequence)
+
+        self.assertIsNone(expected.exact_values())
+        self.assertIsNone(received.exact_values())
+        integrity = integrity_from_summaries(expected.summary(), received.summary())
+        self.assertTrue(integrity["digest_match"])
+        self.assertEqual(integrity["missing"], 0)
+        self.assertEqual(integrity["duplicates"], 0)
+
+        received.add(100_000)
+        mismatch = integrity_from_summaries(expected.summary(), received.summary())
+        self.assertFalse(mismatch["digest_match"])
+        self.assertEqual(mismatch["count_delta"], 1)
+
+    def test_large_payload_backlog_is_explicitly_capped(self):
+        backlog = bound_payload_backlog(64, 8 * 1024 * 1024, 64 * 1024 * 1024)
+        self.assertEqual(backlog["effective_outstanding"], 8)
+        self.assertEqual(backlog["maximum_bytes"], 64 * 1024 * 1024)
+
+        oversized = bound_payload_backlog(64, 128 * 1024 * 1024, 64 * 1024 * 1024)
+        self.assertEqual(oversized["effective_outstanding"], 1)
+        self.assertEqual(oversized["maximum_bytes"], 128 * 1024 * 1024)
+
+    def test_process_memory_reports_rss_uss_pss_and_exit_signal(self):
+        from unittest.mock import patch
+
+        from mqtt_client_bench.telemetry import (
+            process_exit_metadata,
+            process_memory_peaks,
+            process_stats,
+        )
+
+        def fake_read(path):
+            if path.endswith("/status"):
+                return "VmRSS:\t120 kB\nVmHWM:\t160 kB\n"
+            if path.endswith("/smaps_rollup"):
+                return (
+                    "Pss:\t90 kB\nPrivate_Clean:\t20 kB\n"
+                    "Private_Dirty:\t50 kB\nPrivate_Hugetlb:\t4 kB\n"
+                )
+            return None
+
+        with patch("mqtt_client_bench.telemetry._read_text", side_effect=fake_read):
+            stats = process_stats(123)
+        self.assertEqual(stats["rss_kb"], 120)
+        self.assertEqual(stats["rss_hwm_kb"], 160)
+        self.assertEqual(stats["uss_kb"], 74)
+        self.assertEqual(stats["pss_kb"], 90)
+
+        peaks = process_memory_peaks([{"processes": {"publisher": stats}}])
+        self.assertEqual(peaks["publisher"]["peak_uss_kb"], 74)
+        self.assertTrue(process_exit_metadata(-9)["possible_oom_or_sigkill"])
+        self.assertFalse(process_exit_metadata(0)["possible_oom_or_sigkill"])
 
 
 class WorkloadTests(unittest.TestCase):
@@ -594,7 +680,7 @@ class PublisherContractTests(unittest.TestCase):
             "socket_completed_qos0": 0,
             "completed_in_window": 0,
             "completed_during_drain": 0,
-            "latencies_ns": [],
+            "latencies_ns": ReservoirSampler(10),
             "phase": "measure",
             "lock": __import__("threading").Lock(),
         }
@@ -624,7 +710,7 @@ class PublisherContractTests(unittest.TestCase):
             "socket_completed_qos0": 0,
             "completed_in_window": 0,
             "completed_during_drain": 0,
-            "latencies_ns": [],
+            "latencies_ns": ReservoirSampler(10),
             "phase": "measure",
             "lock": __import__("threading").Lock(),
         }
@@ -672,8 +758,10 @@ class PublisherContractTests(unittest.TestCase):
             "socket_completed_qos0": 0,
             "completed_in_window": 0,
             "completed_during_drain": 0,
-            "latencies_ns": [],
-            "scheduler_lags_ns": [],
+            # The worker bounds these upstream now, so the loop calls .add() on a
+            # reservoir rather than appending to a list.
+            "latencies_ns": ReservoirSampler(1000, seed=11),
+            "scheduler_lags_ns": ReservoirSampler(1000, seed=29),
             "lock": threading.Lock(),
             "inflight_local": 0,
             "phase": "measure",
@@ -1933,9 +2021,18 @@ class DualProtocolTests(unittest.TestCase):
         for name in ("puback_latency_qos1", "application_rtt_qos1"):
             points = expand_scenario(SCENARIO_BY_NAME[name], "standard")
             fracs = sorted({float(p["load_fraction"]) for p in points})
-            self.assertEqual(fracs, [0.5, 0.9], name)
-            self.assertEqual(len(points), 4, name)  # 2 fractions × 2 protocols
+            self.assertEqual(fracs, [0.5, 0.75, 0.9, 1.0], name)
+            self.assertEqual(len(points), 8, name)  # 4 fractions × 2 protocols
             self.assertEqual({p["protocol"] for p in points}, {"MQTTv311", "MQTTv5"}, name)
+            self.assertEqual(
+                {(p["protocol"], float(p["load_fraction"])) for p in points},
+                {
+                    (protocol, fraction)
+                    for protocol in ("MQTTv311", "MQTTv5")
+                    for fraction in (0.5, 0.75, 0.9, 1.0)
+                },
+                name,
+            )
 
     def test_payload_sweep_stays_v311_only(self):
         points = expand_scenario(SCENARIO_BY_NAME["pub_payload_sweep_qos0"], "standard")
@@ -1946,8 +2043,65 @@ class DualProtocolTests(unittest.TestCase):
         from mqtt_client_bench.harness import protocols_for_client
 
         self.assertEqual(protocols_for_client("paho"), ["MQTTv311", "MQTTv5"])
+        self.assertEqual(protocols_for_client("gmqtt"), ["MQTTv311", "MQTTv5"])
         self.assertEqual(protocols_for_client("aiomqtt3"), ["MQTTv5"])
         self.assertEqual(protocols_for_client("amqtt"), ["MQTTv311"])
+
+    def test_gmqtt_calibration_populates_both_protocol_buckets(self):
+        import tempfile
+        from unittest.mock import patch
+
+        from mqtt_client_bench.harness import calibrate
+
+        calls = []
+
+        def fake_run_scenario(name, **kwargs):
+            point_filter = kwargs["point_filter"]
+            protocol = next(
+                protocol
+                for protocol in ("MQTTv311", "MQTTv5")
+                if point_filter({"qos_publish": 1, "protocol": protocol})
+            )
+            calls.append((name, protocol))
+            base = 10_000.0 if protocol == "MQTTv311" else 11_000.0
+            rate = base if name == "pub_qos_sweep_telemetry" else base / 2
+            return {
+                "results": [
+                    {
+                        "point": {"qos_publish": 1, "protocol": protocol},
+                        "summary": {"median": rate},
+                        "runs": [],
+                    }
+                ],
+                "broker": {"image_digest": "sha256:test"},
+                "environment": {"runner": "test"},
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = str(Path(tmp) / "gmqtt-calibration.json")
+            with (
+                patch("mqtt_client_bench.harness.run_scenario", side_effect=fake_run_scenario),
+                patch(
+                    "mqtt_client_bench.harness.adapter_identity",
+                    return_value={"client": "gmqtt", "client_version": "0.7.0"},
+                ),
+            ):
+                profile = calibrate(output, client="gmqtt", profile="smoke")
+
+        self.assertEqual(
+            calls,
+            [
+                ("pub_qos_sweep_telemetry", "MQTTv311"),
+                ("rtt_capacity_qos1", "MQTTv311"),
+                ("pub_qos_sweep_telemetry", "MQTTv5"),
+                ("rtt_capacity_qos1", "MQTTv5"),
+            ],
+        )
+        buckets = profile["protocol_capacities"]
+        self.assertEqual(buckets["MQTTv311"]["capacity_msgs_per_s"], 10_000.0)
+        self.assertEqual(buckets["MQTTv5"]["capacity_msgs_per_s"], 11_000.0)
+        self.assertEqual(buckets["MQTTv5"]["rtt_capacity_msgs_per_s"], 5_500.0)
+        self.assertEqual(buckets["MQTTv5"]["fractions"]["1.00"], 11_000.0)
 
     def test_capacity_from_load_profile_protocol_buckets(self):
         from mqtt_client_bench.harness import capacity_from_load_profile
