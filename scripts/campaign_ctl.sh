@@ -192,6 +192,23 @@ preflight() {
   else
     echo "ok       docker reachable"
   fi
+
+  # The managed broker uses network_mode: host, so anything already bound to its
+  # ports makes `broker up` fail closed at the first step of the campaign. Cheap
+  # to see now, and otherwise discovered hours later in a log.
+  local held=""
+  for port in 11883 11884; do
+    if ss -lnt 2>/dev/null | grep -q ":${port}\b"; then held="$held $port"; fi
+  done
+  if [[ -n "$held" ]]; then
+    echo "BLOCKER  broker port(s) already bound:$held"
+    ss -lntp 2>/dev/null | grep -E ":(11883|11884)\b" | sed 's/^/         /'
+    echo "         a foreign broker answers the health check while ours crash-loops;"
+    echo "         stop that listener, or the campaign dies at 'broker up'."
+    fatal=1
+  else
+    echo "ok       broker ports 11883/11884 free"
+  fi
   return $fatal
 }
 
