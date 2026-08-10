@@ -37,7 +37,10 @@ Rankings and the HTML matrix use `scenario · protocol` rows — **never** a
 cross-protocol comparison. `aiomqtt3` (v5 only) is compared with peers on the
 `MQTTv5` rows; `amqtt` skips v5.
 
-Open loop (`puback` / `application_rtt`): fractions **`0.50` and `0.90`** only (budget).
+Open loop (`puback` / `application_rtt`): the full matrix of fractions **`0.50`,
+`0.75`, `0.90`, `1.00`** for every client and every supported protocol. A single
+per-client calibration carries both protocol capacities and is reused across the
+whole matrix, so the baseline does not move between fractions.
 
 ### Fairness invariants enforced by the catalogue
 
@@ -188,7 +191,7 @@ limits, raise `loadgen_clients` **and** check that the broker is not saturated.
 ### `puback_latency_qos1`
 
 - **Goal**: open-loop PUBACK latency at fractions of the client's **publish capacity**.
-- **Topology**: `publisher_only` · fractions `0.50 / 0.90` · tag `dual_protocol`.
+- **Topology**: `publisher_only` · fractions `0.50 / 0.75 / 0.90 / 1.00` · tag `dual_protocol`.
 - **Requires**: `--load-profile` (or automatic calibration in `compare`).
 - **Invalidation**: `open_loop_rate_out_of_tolerance` when the achieved rate deviates > 2 % from target.
 
@@ -202,7 +205,7 @@ limits, raise `loadgen_clients` **and** check that the broker is not saturated.
 ### `application_rtt_qos1`
 
 - **Goal**: open-loop application RTT latency at fractions of **that** RTT capacity.
-- **Topology**: `application_rtt` · fractions `0.50 / 0.90` · tag `dual_protocol`.
+- **Topology**: `application_rtt` · fractions `0.50 / 0.75 / 0.90 / 1.00` · tag `dual_protocol`.
 - **Requires**: end-to-end `TCP_NODELAY` (broker + client); otherwise a Nagle artefact of ~84 ms/pair.
 - **Refusals**: `awscrt` → `not_implemented:tcp_nodelay`.
 
