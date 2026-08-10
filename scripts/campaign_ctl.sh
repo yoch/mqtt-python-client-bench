@@ -15,7 +15,18 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# `status` imports the bench package to expand scenarios, so it needs the same
+# env the campaign runs in. Without this it fails on ModuleNotFoundError unless
+# the caller happens to have the venv already activated.
+# shellcheck disable=SC1091
+source .venv/bin/activate
+export PYTHONPATH=src
+
 UNIT="${UNIT:-mqtt-bench-campaign}"
+# A point interrupted mid-measure has role workers, a loadgen container and a
+# barrier server to unwind; 30 s was not always enough, and the escalation past
+# it is SIGTERM, which skips that cleanup entirely.
+SIGINT_GRACE_S="${SIGINT_GRACE_S:-90}"
 
 find_pgid() {
   local pid
@@ -76,6 +87,15 @@ for scenario in REPR:
     print(f"  {scenario:<28} {state:>18}  ({fresh} complete client files)")
 print(f"\n  {done_n}/{len(REPR)} scenarios complete")
 PY
+  # The outcome line is what tells a finished campaign apart from one that ended
+  # with failed scenarios, which is the first thing to look at afterwards.
+  local last
+  last=$(grep -E 'CAMPAIGN_DONE|FAILED ' logs/campaign.log 2>/dev/null | tail -5)
+  if [[ -n "$last" ]]; then
+    echo
+    echo "last outcome lines (logs/campaign.log):"
+    sed 's/^/  /' <<<"$last"
+  fi
 }
 
 cmd_stop() {
@@ -86,7 +106,7 @@ cmd_stop() {
   if systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
     echo "stopping systemd --user unit '$UNIT' with SIGINT..."
     systemctl --user kill --signal=SIGINT "$UNIT" 2>/dev/null
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 "$SIGINT_GRACE_S"); do
       sleep 1
       systemctl --user is-active --quiet "$UNIT" 2>/dev/null || break
     done
@@ -101,12 +121,13 @@ cmd_stop() {
   fi
   echo "stopping campaign (process group $pgid) with SIGINT so workers are cleaned up..."
   kill -INT "-$pgid" 2>/dev/null
-  for _ in $(seq 1 30); do
+  for _ in $(seq 1 "$SIGINT_GRACE_S"); do
     sleep 1
     find_pgid >/dev/null 2>&1 || break
   done
   if find_pgid >/dev/null 2>&1; then
-    echo "still running after 30 s; escalating to SIGTERM"
+    echo "still running after ${SIGINT_GRACE_S} s; escalating to SIGTERM"
+    echo "  (SIGTERM skips the harness cleanup; check for orphaned workers below)"
     kill -TERM "-$pgid" 2>/dev/null
     sleep 3
   fi
@@ -190,14 +211,34 @@ cmd_resume() {
   fi
   echo
   local clients="${CLIENTS:-paho,gmqtt,aiomqtt,amqtt,awscrt,zmqtt,mqttium,mqttium-compat}"
+  local mgr_usable
   echo "resuming with clients=$clients (completed scenarios are skipped)"
   # `setsid` was not enough: the campaign died twice at session teardown, since
   # the terminal's cgroup is torn down with it whatever the process group says.
   # A transient systemd --user *service* (not --scope, which stays in the
   # caller's cgroup) is owned by the user manager and outlives the session.
-  if command -v systemd-run >/dev/null 2>&1 && systemctl --user is-system-running >/dev/null 2>&1; then
+  # Do not gate on `is-system-running` succeeding: it exits non-zero for
+  # "degraded", which one unrelated failed unit (a stale gnome-terminal VTE
+  # scope is enough) is sufficient to cause. That silently downgraded the launch
+  # to the setsid path below — the one that does not survive session teardown,
+  # i.e. exactly the failure this unit exists to prevent. Only a user manager we
+  # cannot talk to at all disqualifies systemd.
+  local mgr_state
+  mgr_state=$(systemctl --user is-system-running 2>/dev/null || true)
+  case "$mgr_state" in
+    running|degraded|starting|maintenance|stopping) mgr_usable=1 ;;
+    *) mgr_usable=0 ;;
+  esac
+  if command -v systemd-run >/dev/null 2>&1 && [[ "$mgr_usable" == "1" ]]; then
     systemctl --user reset-failed "$UNIT" >/dev/null 2>&1 || true
+    # Restart on failure: the campaign is resumable and skips finished
+    # scenarios, so a transient failure (docker hiccup, an OOM-killed worker)
+    # costs one scenario instead of the rest of the weekend. The burst limit
+    # stops a deterministic failure from spinning forever.
     if systemd-run --user --unit="$UNIT" --same-dir --collect \
+        --property=Restart=on-failure --property=RestartSec=120 \
+        --property=StartLimitIntervalSec=3600 --property=StartLimitBurst=5 \
+        --property='SuccessExitStatus=3 130 SIGINT' \
         --setenv=CLIENTS="$clients" --setenv=PYTHONPATH=src \
         bash scripts/run_campaign_5h.sh >/dev/null 2>&1; then
       echo "started as systemd --user unit '$UNIT' (survives this session)"
