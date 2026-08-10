@@ -122,10 +122,16 @@ def create_adapter(
     clean_session: bool = True,
     max_inflight: int = 20,
     max_queued: int = 200,
+    max_queued_bytes: Optional[int] = None,
     tls_ca_certs: Optional[str] = None,
 ) -> MqttClientAdapter:
     configure_client_path(client, client_path)
     cls = get_adapter_class(client)
+    extra = {}
+    # Passed only to adapters that declare a byte-based outbound bound, so an
+    # adapter never receives a knob it would silently fail to honour.
+    if max_queued_bytes is not None and cls.capabilities().max_queued_bytes:
+        extra["max_queued_bytes"] = int(max_queued_bytes)
     return cls.create(
         client_id=client_id,
         protocol=protocol,
@@ -133,6 +139,7 @@ def create_adapter(
         max_inflight=max_inflight,
         max_queued=max_queued,
         tls_ca_certs=tls_ca_certs,
+        **extra,
     )
 
 

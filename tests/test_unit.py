@@ -312,6 +312,74 @@ class AdapterRegistryTests(unittest.TestCase):
         for attr in ("_connection", "_persistent_storage", "_remove_message_from_query"):
             self.assertTrue(hasattr(client, attr), f"gmqtt no longer exposes {attr}")
 
+    def test_max_queued_bytes_only_reaches_declaring_adapters(self):
+        # A byte-bounded outbound queue silently becomes the binding window at
+        # large payloads. The knob equalises that, so it must reach every
+        # adapter that declares the bound and none that would ignore it.
+        import inspect
+
+        from mqtt_client_bench.adapters.registry import _ADAPTERS, get_adapter_class
+
+        declaring = {
+            name
+            for name in _ADAPTERS
+            if get_adapter_class(name).capabilities().max_queued_bytes
+        }
+        self.assertEqual(declaring, {"mqttium", "mqttium-compat"})
+        for name in declaring:
+            params = inspect.signature(get_adapter_class(name).create).parameters
+            self.assertIn("max_queued_bytes", params, name)
+        for name in set(_ADAPTERS) - declaring:
+            params = inspect.signature(get_adapter_class(name).create).parameters
+            self.assertNotIn("max_queued_bytes", params, name)
+
+    def test_mqttium_private_api_shape(self):
+        # mqttium moves fast (0.1.0a4 -> 0.2.0b2 in days) and the compat adapter
+        # rebuilds the façade's inner AsyncClient to equalise the in-flight
+        # window. If a release moves any of that, fail here rather than let the
+        # adapter silently measure something else.
+        import inspect
+
+        from mqttium.api import AsyncClient
+        from mqttium.compat import paho as mqtt
+
+        async_client = AsyncClient(client_id="shape-probe")
+        for attr in (
+            "publish_nowait",
+            "_engine",
+            "_engine_lock",
+            "_sub_futs",
+            "_collect_effects_locked",
+            "_drain_effects",
+            "_queue_qos0_on_loop",
+            "_queue_qosn_on_loop",
+            "_finalize_loop_commands",
+            "_reconfigure",
+        ):
+            self.assertTrue(hasattr(async_client, attr), f"mqttium no longer exposes {attr}")
+        # No on_subscribe hook is why the compat adapter mirrors the SUBACK
+        # future registration by hand.
+        self.assertFalse(hasattr(async_client, "on_subscribe"))
+
+        facade = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="shape-probe")
+        for attr in (
+            "_async",
+            "_loop",
+            "_submit",
+            "_run_loop_mutation",
+            "_queue_qos0_on_loop",
+            "_queue_qosn_on_loop",
+            "_finalize_async_commands",
+        ):
+            self.assertTrue(hasattr(facade, attr), f"mqttium façade no longer exposes {attr}")
+        # The rebuild exists only because the window cannot be set any other
+        # way. When either of these stops holding, drop it from the adapter.
+        self.assertNotIn(
+            "max_outbound_inflight", inspect.signature(mqtt.Client.__init__).parameters
+        )
+        with self.assertRaises(AttributeError):
+            facade._async._reconfigure(max_outbound_inflight=64)
+
     def test_gmqtt_v5_properties_align_payload_format(self):
         from mqtt_client_bench.adapters.gmqtt import GmqttAdapter
         from mqtt_client_bench.adapters.paho import build_paho_publish_properties
@@ -1904,6 +1972,76 @@ class DualProtocolTests(unittest.TestCase):
         self.assertEqual(capacity_from_load_profile(legacy, protocol="MQTTv311", kind="publish"), 2000.0)
         with self.assertRaises(ValueError):
             capacity_from_load_profile(legacy, protocol="MQTTv5", kind="publish")
+
+    def test_report_renders_multi_point_compare_verdicts(self):
+        # A compare over a multi-point scenario has no top-level ratio or CI:
+        # the aggregate verdict is the string "multi_point" and the statistics
+        # live on each point. The page used to render an empty verdict panel and
+        # "Points 0" for every campaign A/B, since pub_qos_sweep_telemetry always
+        # expands to MQTTv311/v5 x QoS 0/1/2.
+        import json
+        import tempfile
+
+        from mqtt_client_bench.report import build_site
+
+        def point(index, protocol, qos, verdict, ratio, effect, lo, hi):
+            return {
+                "point_index": index,
+                "point": {
+                    "name": "pub_qos_sweep_telemetry",
+                    "protocol": protocol,
+                    "qos_publish": qos,
+                },
+                "verdict": {
+                    "verdict": verdict,
+                    "median_ratio": ratio,
+                    "absolute_effect_pct": effect,
+                    "ci_low": lo,
+                    "ci_high": hi,
+                    "n_blocks": 4,
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            results, site = Path(tmp) / "results", Path(tmp) / "site"
+            results.mkdir()
+            (results / "compare-paho-awscrt.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "scenario": "pub_qos_sweep_telemetry",
+                        "profile": "standard",
+                        "baseline_client": "paho",
+                        "candidate_client": "awscrt",
+                        "order": ["A", "B", "B", "A"],
+                        "verdict": {
+                            "verdict": "multi_point",
+                            "points": [
+                                {"index": 0, "verdict": "improvement"},
+                                {"index": 1, "verdict": "inconclusive"},
+                            ],
+                        },
+                        "points": [
+                            point(0, "MQTTv311", 0, "improvement", 1.2078, 20.78, 0.1355, 0.2533),
+                            point(1, "MQTTv5", 2, "inconclusive", None, None, None, None),
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            build_site(results, site)
+            page = (site / "runs" / "compare-paho-awscrt.html").read_text(encoding="utf-8")
+            self.assertIn("Per-point verdicts", page)
+            # Both points are listed, with the statistics that only exist per point.
+            self.assertIn("MQTTv311 qos=0", page)
+            self.assertIn("MQTTv5 qos=2", page)
+            self.assertIn("1.208", page)
+            self.assertIn("20.78", page)
+            self.assertIn("0.136", page)
+            # And the point count reflects the compare payload, not doc.points.
+            self.assertNotIn(
+                '<p class="stat-label">Points</p>\n          <p class="stat-value">0</p>', page
+            )
 
     def test_report_splits_dual_protocol_rows(self):
         import json

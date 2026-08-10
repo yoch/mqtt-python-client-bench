@@ -128,6 +128,11 @@ def main(argv=None) -> int:
                 return
             _consume_completion_locked(state, qos, send_ns, now, failed, mid=mid)
 
+    # Byte-equivalent of the requested queue depth, for libraries that also bound
+    # their outbound queue in bytes. Without it their effective window collapses
+    # with payload size while the message-bounded clients keep the full depth.
+    payload_bytes = len(body) if isinstance(body, (bytes, bytearray)) else len(str(body).encode())
+
     adapter = create_adapter(
         client_name,
         client_path=client_path,
@@ -136,6 +141,7 @@ def main(argv=None) -> int:
         clean_session=not bool(cfg.get("session_persistent", False)),
         max_inflight=inflight,
         max_queued=max_queued,
+        max_queued_bytes=max_queued * max(1, payload_bytes),
         tls_ca_certs=cfg.get("ca_certs") if cfg.get("tls") else None,
     )
     adapter.on_connect = on_connect
@@ -168,7 +174,6 @@ def main(argv=None) -> int:
 
     # Cap worker RSS. Default is generous next to the ~180 MB a well-behaved
     # client uses on 1 MiB payloads, but far below what takes a host down.
-    payload_bytes = len(body) if isinstance(body, (bytes, bytearray)) else len(str(body).encode())
     memory_guard = MemoryGuard(
         float(cfg.get("memory_limit_mb", 1536)), payload_bytes=payload_bytes
     )

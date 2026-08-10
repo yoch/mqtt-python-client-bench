@@ -1,4 +1,4 @@
-"""MQTTium native adapter — AsyncClient via AsyncioBridge (PyPI ≥0.1.0a4)."""
+"""MQTTium native adapter — AsyncClient via AsyncioBridge (PyPI ≥0.2.0b2)."""
 
 from __future__ import annotations
 
@@ -13,17 +13,23 @@ from mqtt_client_bench.adapters.base import AdapterCapabilities, PublishResult, 
 class MqttiumAdapter(BridgedAdapterBase):
     """Bench the native ``mqttium.api.AsyncClient`` API (not the Paho façade).
 
-    On the bridge loop, prefer ``publish_nowait()`` (0.1.0a4+): loop-bound,
-    non-suspending admission + coalesced effect flush. Fall back to
-    ``await publish(..., nowait=True)`` on older wheels. Completions still
-    report via synthetic mid + ``on_publish`` after ``receipt.wait()``.
+    Publishes go through ``publish_nowait()``: loop-bound, non-suspending
+    admission + coalesced effect flush. Completions report via synthetic mid +
+    ``on_publish`` after ``receipt.wait()``, which returns immediately for QoS0
+    and raises whatever the admission path recorded, so a refused publish is
+    counted as a failure rather than as a completion.
+
+    This adapter sets no ``AsyncClient.on_publish``: it fires the bench callback
+    itself. That is deliberate — mqttium's direct QoS0 transport write is only
+    taken while ``on_publish is None`` (``_direct_qos0_ready``), so installing a
+    library-level callback would benchmark the slower path.
     """
 
     _NAME = "mqttium"
     _NOTES = (
         "MQTTium AsyncClient (https://pypi.org/project/mqttium/) — async-native MQTT "
         "3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop "
-        "(PyPI ≥0.1.0a4). Alpha; ranked under --suite experimental. Paho VERSION2 "
+        "(PyPI ≥0.2.0b2). Beta; ranked under --suite experimental. Paho VERSION2 "
         "façade is `mqttium-compat`."
     )
 
@@ -36,6 +42,7 @@ class MqttiumAdapter(BridgedAdapterBase):
         self._tls_ca_certs: Optional[str] = None
         self._max_inflight = 20
         self._max_queued = 200
+        self._max_queued_bytes: Optional[int] = None
 
     @classmethod
     def capabilities(cls) -> AdapterCapabilities:
@@ -49,6 +56,7 @@ class MqttiumAdapter(BridgedAdapterBase):
             tls=True,
             max_inflight=True,
             max_queued=True,
+            max_queued_bytes=True,
             message_callback_add=True,
             native_message_callback_add=False,
             v5_publish_properties=True,
@@ -94,6 +102,7 @@ class MqttiumAdapter(BridgedAdapterBase):
         clean_session: bool = True,
         max_inflight: int = 20,
         max_queued: int = 200,
+        max_queued_bytes: Optional[int] = None,
         tls_ca_certs: Optional[str] = None,
     ) -> "MqttiumAdapter":
         try:
@@ -109,6 +118,7 @@ class MqttiumAdapter(BridgedAdapterBase):
         adapter._tls_ca_certs = tls_ca_certs
         adapter._max_inflight = max_inflight
         adapter._max_queued = max_queued
+        adapter._max_queued_bytes = max_queued_bytes
         return adapter
 
     def connect(self, host: str, port: int, keepalive: int = 60) -> None:
@@ -125,6 +135,22 @@ class MqttiumAdapter(BridgedAdapterBase):
         async def _connect():
             # a2+ removed EngineConfig.max_queued — map bench max_queued onto
             # max_pending_outbound_messages (admission before MID allocation).
+            #
+            # 0.2.0b2 also bounds the write pump in bytes (max_outbound_bytes,
+            # 1 MiB by default), and publish_nowait raises FlowControlError as
+            # soon as *either* bound is full. At 1 MiB that is 16 slots for a
+            # 64 KiB payload and 1 for a 1 MiB one, i.e. a queue orders of
+            # magnitude shallower than the max_queued messages every client is
+            # given — measured as a 76-98% refusal rate on the payload sweep.
+            # Size the byte bounds from the requested depth so the message
+            # window is what binds, and never shrink them below the library's
+            # own defaults.
+            kwargs = {}
+            if self._max_queued_bytes:
+                kwargs["max_outbound_bytes"] = max(1 << 20, int(self._max_queued_bytes))
+                kwargs["max_pending_outbound_bytes"] = max(
+                    64 << 20, int(self._max_queued_bytes)
+                )
             self._client = AsyncClient(
                 client_id=self._client_id,
                 protocol=proto,
@@ -133,6 +159,7 @@ class MqttiumAdapter(BridgedAdapterBase):
                 max_outbound_inflight=max(1, int(self._max_inflight)),
                 max_pending_outbound_messages=max(0, int(self._max_queued)),
                 message_delivery="callback",
+                **kwargs,
             )
 
             def _on_message(msg) -> None:
@@ -190,9 +217,9 @@ class MqttiumAdapter(BridgedAdapterBase):
         if isinstance(data, str):
             data = data.encode("utf-8")
 
-        # QoS0 contract: on_publish = handed to transport. Prefer a sync
-        # loop-thread callback (no asyncio.Task per message) via schedule_call.
-        if int(qos) == 0 and getattr(client, "publish_nowait", None) is not None:
+        # QoS0 contract: on_publish = handed to transport. A sync loop-thread
+        # callback (no asyncio.Task per message) via schedule_call.
+        if int(qos) == 0:
 
             def _publish_qos0() -> None:
                 try:
@@ -210,22 +237,12 @@ class MqttiumAdapter(BridgedAdapterBase):
             try:
                 # publish_nowait is loop-bound (not cross-thread). schedule_coro
                 # runs this coroutine on the client loop, so it is the hot path.
-                publish_nowait = getattr(client, "publish_nowait", None)
-                if publish_nowait is not None:
-                    receipt = publish_nowait(
-                        topic, data, qos=qos, retain=retain, properties=properties
-                    )
-                else:
-                    receipt = await client.publish(
-                        topic,
-                        data,
-                        qos=qos,
-                        retain=retain,
-                        properties=properties,
-                        nowait=True,
-                    )
-                if receipt._event is not None:
-                    await receipt.wait()
+                receipt = client.publish_nowait(
+                    topic, data, qos=qos, retain=retain, properties=properties
+                )
+                # QoS1 = PUBACK, QoS2 = PUBCOMP: wait() returns only once the
+                # receipt is resolved, and re-raises an admission failure.
+                await receipt.wait()
                 self._fire_on_publish(mid, reason_code=0)
             except Exception:  # noqa: BLE001
                 self._fire_on_publish(mid, reason_code=128)
