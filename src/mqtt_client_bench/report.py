@@ -1207,6 +1207,18 @@ def _page_shell(title: str, body: str, *, relative_root: str = ".") -> str:
 """
 
 
+def _doc_point_count(doc: "ResultDoc") -> int:
+    """Points a document actually measured.
+
+    Compare docs keep ``points`` empty because their per-point payload has a
+    different shape from a scenario's, so counting ``doc.points`` reported 0 for
+    every A/B run.
+    """
+    if doc.kind == "compare":
+        return len(doc.raw_meta.get("points") or [])
+    return len(doc.points)
+
+
 def _status_badge(status: str, non_comparable: bool = False) -> str:
     label = status
     if non_comparable:
@@ -1552,6 +1564,49 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
                     f"<li>point {_esc(point.get('point_index'))}: {_esc(json.dumps(cals))}</li>"
                 )
         loadgen = doc.raw_meta.get("loadgen") or {}
+        # A compare over a multi-point scenario carries no top-level ratio or CI:
+        # the aggregate verdict is the string "multi_point" and every statistic
+        # lives on the individual points. Rendering only the single-point shape
+        # showed an empty verdict panel for every campaign comparison, since
+        # `pub_qos_sweep_telemetry` always expands to MQTTv311/v5 x QoS 0/1/2.
+        per_point_rows = []
+        for point in doc.raw_meta.get("points") or []:
+            pv = point.get("verdict") or {}
+            if not pv:
+                continue
+            spec = point.get("point") or {}
+            label = f"{spec.get('protocol', '?')} qos={spec.get('qos_publish', '?')}"
+            per_point_rows.append(
+                "<tr>"
+                f"<td>{_esc(label)}</td>"
+                f"<td>{_status_badge(str(pv.get('verdict', 'inconclusive')))}</td>"
+                f"<td>{_esc(_fmt_num(pv.get('median_ratio'), digits=3))}</td>"
+                f"<td>{_esc(_fmt_num(pv.get('absolute_effect_pct'), digits=2))}</td>"
+                f"<td>{_esc(_fmt_num(pv.get('ci_low'), digits=3))} … "
+                f"{_esc(_fmt_num(pv.get('ci_high'), digits=3))}</td>"
+                f"<td>{_esc(pv.get('n_blocks'))}</td>"
+                "</tr>"
+            )
+        per_point_table = ""
+        if per_point_rows:
+            per_point_table = f"""
+        <h3>Per-point verdicts</h3>
+        <p class="hint">Ratio is candidate over baseline; the interval is the
+        bootstrap CI of the relative effect, so it excludes zero exactly when the
+        verdict is not inconclusive.</p>
+        <div class="table-wrap">
+        <table>
+          <thead><tr><th>point</th><th>verdict</th><th>median ratio</th>
+          <th>effect %</th><th>effect CI</th><th>blocks</th></tr></thead>
+          <tbody>{''.join(per_point_rows)}</tbody>
+        </table>
+        </div>"""
+        aggregate_bits = ""
+        if doc.verdict.get("median_ratio") is not None:
+            aggregate_bits = f"""
+          <li><strong>median ratio</strong> {_esc(_fmt_num(doc.verdict.get('median_ratio'), digits=3))}</li>
+          <li><strong>effect %</strong> {_esc(_fmt_num(doc.verdict.get('absolute_effect_pct'), digits=2))}</li>
+          <li><strong>CI</strong> {_esc(_fmt_num(doc.verdict.get('ci_low'), digits=3))} … {_esc(_fmt_num(doc.verdict.get('ci_high'), digits=3))}</li>"""
         compare_block = f"""
       <section class="panel">
         <h2>A/B verdict</h2>
@@ -1559,13 +1614,11 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
         <ul class="kv">
           <li><strong>profile</strong> {_esc(doc.profile)}</li>
           <li><strong>cooldown_s</strong> {_esc(doc.raw_meta.get('cooldown_s'))}</li>
-          <li><strong>order</strong> {_esc(doc.raw_meta.get('order'))}</li>
-          <li><strong>median ratio</strong> {_esc(_fmt_num(doc.verdict.get('median_ratio'), digits=3))}</li>
-          <li><strong>effect %</strong> {_esc(_fmt_num(doc.verdict.get('absolute_effect_pct'), digits=2))}</li>
-          <li><strong>CI</strong> {_esc(_fmt_num(doc.verdict.get('ci_low'), digits=3))} … {_esc(_fmt_num(doc.verdict.get('ci_high'), digits=3))}</li>
+          <li><strong>order</strong> {_esc(doc.raw_meta.get('order'))}</li>{aggregate_bits}
           <li><strong>loadgen</strong> {_esc(loadgen.get('image'))} digest={_esc(loadgen.get('image_digest'))}</li>
           {''.join(identity_bits)}
         </ul>
+        {per_point_table}
         {"<h3>Per-client calibrations</h3><ul>" + ''.join(point_cal) + "</ul>" if point_cal else ""}
       </section>
 """
@@ -1687,7 +1740,7 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
         </article>
         <article>
           <p class="stat-label">Points</p>
-          <p class="stat-value">{_esc(len(doc.points))}</p>
+          <p class="stat-value">{_esc(_doc_point_count(doc))}</p>
         </article>
       </section>
 
