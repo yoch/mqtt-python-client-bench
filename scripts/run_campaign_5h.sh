@@ -125,6 +125,17 @@ REPR=(
   application_rtt_qos1
 )
 
+# Scenarios tagged `diagnostic` are outside the representative ranking set, but
+# `report build` still lists them in the front-page matrix. Leaving them on an
+# older harness generation therefore publishes two generations side by side with
+# nothing marking the difference, so they run in the same campaign.
+DIAGNOSTIC=(
+  rtt_capacity_qos1
+  remaining_length_boundaries
+)
+
+SCENARIOS=("${REPR[@]}" "${DIAGNOSTIC[@]}")
+
 # Skip only when every listed client already has a result for this scenario
 # *from the current harness*. Results predating the fairness fixes carry no run
 # provenance, so they are correctly treated as missing and re-run.
@@ -160,7 +171,7 @@ raise SystemExit(0)
 PY
 }
 
-for s in "${REPR[@]}"; do
+for s in "${SCENARIOS[@]}"; do
   if [[ "$FORCE" != "1" ]] && scenario_complete "$s" "$CLIENTS" python; then
     echo "==> matrix $s (already complete, skipping)" | tee -a logs/campaign.log
     continue
@@ -184,7 +195,7 @@ if [[ -n "$AIOMQTT3_VENV" && -x "$AIOMQTT3_VENV/bin/python" ]]; then
   A3PY="$AIOMQTT3_VENV/bin/python"
   export PYTHONPATH="${PYTHONPATH:-src}"
   calibrate_client aiomqtt3 "$A3PY" || true
-  for s in "${REPR[@]}"; do
+  for s in "${SCENARIOS[@]}"; do
     if [[ "$FORCE" != "1" ]] && scenario_complete "$s" aiomqtt3 "$A3PY"; then
       echo "==> aiomqtt3 $s (already complete, skipping)" | tee -a logs/campaign.log
       continue
