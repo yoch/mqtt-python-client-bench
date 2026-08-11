@@ -11,10 +11,31 @@ from typing import Any, Dict, List, Optional
 
 
 def write_json(path: str, payload: Dict[str, Any]) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, sort_keys=True)
-        fh.write("\n")
+    """Write a JSON document atomically.
+
+    Opening the destination with "w" truncates it before the first byte is
+    written, so a SIGINT — which is exactly how a campaign is paused — leaves a
+    half-written file behind. That happened to a matrix checkpoint: the scenario
+    had reached its last point, the interrupt landed during the closing write,
+    and the result was an unparseable document, costing the whole scenario on
+    resume. Writing a sibling temp file and renaming it means a reader sees
+    either the previous complete document or the new one, never a partial one.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.tmp{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        # Including KeyboardInterrupt: leave no stray temp file behind, and
+        # leave whatever was already on disk untouched.
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def read_json(path: str) -> Dict[str, Any]:
