@@ -40,6 +40,7 @@ from mqtt_client_bench.workloads import (
     encode_header,
     make_bytes_of_size,
     rl_boundary_payloads,
+    payload_tail,
     single_topic,
     wrap_with_header,
 )
@@ -453,6 +454,15 @@ def _run_publish_loop(
 ):
     sequence = sequence_start
     sent_sequences = sequence_tracker(sequence_exact_limit, enabled=track_sequences)
+    # The body is fixed for the run; only the header changes. Slicing it per
+    # message cost two full-payload allocations each time (about 1 ms on 1 MiB),
+    # so the tails are cut once here and the loop only concatenates. Indexed in
+    # parallel with the corpus rather than keyed by identity, which a collected
+    # and reused id() would silently corrupt.
+    body_tail = payload_tail(body) if isinstance(body, (bytes, bytearray)) else None
+    corpus_tails = [
+        payload_tail(c) if isinstance(c, (bytes, bytearray)) else None for c in corpus
+    ]
     loop_start = time.perf_counter()
     next_send = loop_start
     interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0
@@ -508,10 +518,13 @@ def _run_publish_loop(
             send_ns = time.perf_counter_ns()
             header = encode_header(run_id, 1, sequence, sequence, send_ns)
             if corpus:
-                payload_body = corpus[corpus_i % len(corpus)]
+                idx = corpus_i % len(corpus)
+                payload_body = corpus[idx]
+                tail = corpus_tails[idx]
                 corpus_i += 1
             else:
                 payload_body = body
+                tail = body_tail
             if isinstance(payload_body, str):
                 if force_header:
                     raw = payload_body.encode("utf-8")
@@ -522,7 +535,7 @@ def _run_publish_loop(
                 if force_header and len(payload_body) < HEADER_SIZE:
                     payload = header
                 elif len(payload_body) >= HEADER_SIZE:
-                    payload = wrap_with_header(payload_body, header)
+                    payload = (header + tail) if tail is not None else wrap_with_header(payload_body, header)
                 elif len(payload_body) == 0:
                     payload = header if force_header else b""
                 else:
