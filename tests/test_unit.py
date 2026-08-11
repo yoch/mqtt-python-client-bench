@@ -2150,6 +2150,27 @@ class DualProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             capacity_from_load_profile(legacy, protocol="MQTTv5", kind="publish")
 
+    def test_precomputed_tail_stamps_the_same_bytes(self):
+        # The publisher stopped calling wrap_with_header per message and now
+        # concatenates a tail cut once per run. The wire payload must be
+        # identical, or every integrity check and decode is measuring a
+        # different message than before.
+        from mqtt_client_bench.workloads import (
+            HEADER_SIZE,
+            encode_header,
+            payload_tail,
+            wrap_with_header,
+        )
+
+        header = encode_header(b"abcdefgh", 1, 42, 42, 123456789)
+        for size in (0, 1, HEADER_SIZE - 1, HEADER_SIZE, HEADER_SIZE + 1, 256, 65536):
+            body = bytes(range(256)) * (size // 256) + b"z" * (size % 256)
+            self.assertEqual(len(body), size)
+            if len(body) >= HEADER_SIZE:
+                tail = payload_tail(body)
+                self.assertEqual(header + tail, wrap_with_header(body, header), f"size={size}")
+                self.assertEqual(len(header + tail), size, f"size={size}")
+
     def test_reservoir_keeps_a_uniform_sample(self):
         # The percentiles the report publishes are only as good as this sample.
         # Pin the property, not the algorithm, so a future attempt to make `add`
