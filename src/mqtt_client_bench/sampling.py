@@ -109,6 +109,7 @@ class SequenceTracker:
 
     def summary(self) -> dict:
         return {
+            "tracked": True,
             "count": self.count,
             "first": self.first,
             "last": self.last,
@@ -183,7 +184,21 @@ class _NullSequenceTracker:
         return []
 
     def summary(self) -> dict:
-        return {"strategy": "not_tracked", "count": 0}
+        # Same keys as SequenceTracker.summary(): the result assembly reads
+        # them positionally by name, and a shorter dict crashed every
+        # publisher_only worker with KeyError('first') until a smoke run caught
+        # it. `tracked` is what tells the two apart downstream.
+        return {
+            "tracked": False,
+            "count": 0,
+            "first": None,
+            "last": None,
+            "digest_sum64": None,
+            "digest_xor64": None,
+            "out_of_order": 0,
+            "exact_limit": 0,
+            "exact_retained": False,
+        }
 
 
 def sequence_tracker(limit: int, *, enabled: bool = True):

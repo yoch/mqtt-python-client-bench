@@ -2232,8 +2232,12 @@ class DualProtocolTests(unittest.TestCase):
 
         off = sequence_tracker(100, enabled=False)
         off.add(7)
-        self.assertEqual(off.summary(), {"strategy": "not_tracked", "count": 0})
         self.assertEqual(off.exact_values(), [])
+        self.assertFalse(off.summary()["tracked"])
+        self.assertEqual(off.summary()["count"], 0)
+        # Same keys as the real one: the worker reads them by name, and a
+        # shorter dict crashed every publisher_only run with KeyError('first').
+        self.assertEqual(set(off.summary()), set(live.summary()))
 
     def test_write_json_never_leaves_a_partial_document(self):
         # A campaign is paused with SIGINT, which can land in the middle of a
