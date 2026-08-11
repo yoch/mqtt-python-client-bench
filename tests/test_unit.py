@@ -2150,6 +2150,32 @@ class DualProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             capacity_from_load_profile(legacy, protocol="MQTTv5", kind="publish")
 
+    def test_write_json_never_leaves_a_partial_document(self):
+        # A campaign is paused with SIGINT, which can land in the middle of a
+        # checkpoint write. Truncate-then-write cost a whole scenario once; the
+        # destination must only ever hold a complete document.
+        import json
+        import tempfile
+        from unittest import mock
+
+        from mqtt_client_bench.control import write_json
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "checkpoint.json"
+            write_json(str(target), {"results": ["first"]})
+
+            # Interrupt the replacement exactly as a SIGINT would.
+            with mock.patch("mqtt_client_bench.control.os.replace", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    write_json(str(target), {"results": ["second"]})
+
+            # The previous document survives intact, and no temp file is left.
+            self.assertEqual(json.loads(target.read_text())["results"], ["first"])
+            self.assertEqual([p.name for p in Path(tmp).iterdir()], ["checkpoint.json"])
+
+            write_json(str(target), {"results": ["second"]})
+            self.assertEqual(json.loads(target.read_text())["results"], ["second"])
+
     def test_archive_drops_raw_samples_but_never_a_statistic(self):
         # Raw sample vectors are 97% of a result file and are read only once, to
         # produce statistics that are stored beside them. Archiving them must
