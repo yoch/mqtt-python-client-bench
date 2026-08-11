@@ -164,3 +164,28 @@ def bound_payload_backlog(
         "limit_bytes": limit_bytes,
         "maximum_bytes": effective * payload_bytes,
     }
+
+
+class _NullSequenceTracker:
+    """Drop-in tracker for runs whose sequences nobody reconciles.
+
+    A publisher_only point has no subscriber to compare against, so the exact
+    values and the fingerprints are computed and then discarded. Keeping the
+    same shape means the loop needs no branch on the hot path.
+    """
+
+    __slots__ = ()
+
+    def add(self, sequence: int) -> None:
+        return None
+
+    def exact_values(self) -> list[int]:
+        return []
+
+    def summary(self) -> dict:
+        return {"strategy": "not_tracked", "count": 0}
+
+
+def sequence_tracker(limit: int, *, enabled: bool = True):
+    """Return a real tracker, or a no-op when nothing will read it."""
+    return SequenceTracker(limit) if enabled else _NullSequenceTracker()
