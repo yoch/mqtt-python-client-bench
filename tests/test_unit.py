@@ -821,6 +821,24 @@ class PublisherContractTests(unittest.TestCase):
         adapter.flush()
         return state
 
+    def test_publish_loop_counters_survive_being_hoisted(self):
+        # The loop keeps its single-writer counters in locals and flushes them to
+        # `state` on the way out, which is worth a per-message dict lookup but
+        # only if no exit path can drop them. These identities catch a missed
+        # flush immediately: every offer is a call, and every call either lands
+        # or is rejected.
+        for ack_mode in ("sync", "deferred"):
+            with self.subTest(ack_mode=ack_mode):
+                state = self._drive_publish_loop(ack_mode=ack_mode, until_s=0.05)
+                self.assertGreater(state["publish_calls"], 0)
+                self.assertEqual(state["offered"], state["publish_calls"])
+                self.assertEqual(state["submitted"], state["publish_accepted"])
+                self.assertEqual(state["sync_rejected"], state["publish_rejected"])
+                self.assertEqual(
+                    state["publish_calls"],
+                    state["submitted"] + state["sync_rejected"] + state["missed_due_to_backpressure"],
+                )
+
     def test_publish_loop_tracker_matches_outstanding_mids(self):
         # seen_mids_inflight is maintained incrementally (no per-message rebuild):
         # it must stay exactly the set of submitted-but-uncompleted mids.

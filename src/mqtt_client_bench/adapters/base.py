@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, List, NamedTuple, Optional, Protocol, runtime_checkable
 
 
 class AdapterNotImplemented(NotImplementedError):
     """Raised when an adapter method or capability is not yet wired."""
 
 
-@dataclass(frozen=True)
-class PublishResult:
+class PublishResult(NamedTuple):
+    """Outcome of one publish call.
+
+    A NamedTuple rather than a frozen dataclass because every adapter builds one
+    for every message: the frozen dataclass __init__ routes through
+    object.__setattr__ and measured 495 ns against 315 ns here, a cost the
+    harness imposes on every client. Still immutable, so the guarantee that made
+    it frozen is intact; a mutable slots dataclass was faster still and was not
+    taken for that reason.
+    """
+
     rc: int
     mid: Optional[int] = None
 

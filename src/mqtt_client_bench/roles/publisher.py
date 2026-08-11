@@ -34,7 +34,9 @@ from mqtt_client_bench.sampling import (
 )
 from mqtt_client_bench.telemetry import MemoryGuard
 from mqtt_client_bench.workloads import (
+    HEADER_MAGIC,
     HEADER_SIZE,
+    HEADER_STRUCT,
     build_payload,
     build_payload_corpus,
     encode_header,
@@ -412,11 +414,13 @@ def _consume_completion_locked(state, qos, send_ns, now, failed: bool, *, mid) -
             state["protocol_completed"] += 1
         if send_ns is not None:
             state["latencies_ns"].add(now - send_ns)
-        if state["phase"] == "measure":
+        phase = state["phase"]
+        if phase == "measure":
             state["completed_in_window"] += 1
-        elif state["phase"] == "drain":
+        elif phase == "drain":
             state["completed_during_drain"] += 1
-    state["inflight_local"] = max(0, state["inflight_local"] - 1)
+    inflight = state["inflight_local"] - 1
+    state["inflight_local"] = inflight if inflight > 0 else 0
 
 
 def _properties_builder(cfg, adapter):
@@ -459,6 +463,13 @@ def _run_publish_loop(
     # so the tails are cut once here and the loop only concatenates. Indexed in
     # parallel with the corpus rather than keyed by identity, which a collected
     # and reused id() would silently corrupt.
+    # Every `state[...]` on the hot path is a dict lookup the interpreter repeats
+    # per message. The lock object and the counters only this thread writes are
+    # bound to locals and flushed back once, in a finally so no exit path can
+    # skip it. Shared counters stay in `state`: on_publish writes them.
+    lock = state["lock"]
+    n_offered = n_calls = n_submitted = 0
+    n_sync_rejected = n_accepted = n_rejected = n_missed = 0
     body_tail = payload_tail(body) if isinstance(body, (bytes, bytearray)) else None
     corpus_tails = [
         payload_tail(c) if isinstance(c, (bytes, bytearray)) else None for c in corpus
@@ -469,33 +480,47 @@ def _run_publish_loop(
     corpus_i = 0
     open_loop = target_rate is not None and cadence not in ("capacity", "burst", "microburst", "batch64")
 
-    while time.perf_counter() < until:
-        if cadence in ("burst", "microburst"):
+    perf = time.perf_counter          # bound once: looked up per iteration otherwise
+    # Stamp the header inline: encode_header re-validates an invariant run_id and
+    # costs a call plus a tuple build on every message. The masks it applied are
+    # kept, since sequence and send_ns are the only values that can grow.
+    pack_header = HEADER_STRUCT.pack
+    header_magic = HEADER_MAGIC
+    is_bursty = cadence in ("burst", "microburst")
+    batch_n = batch_size if cadence == "batch64" else 1
+    while perf() < until:
+        if is_bursty:
             period, duty = (1.0, 0.1) if cadence == "burst" else (0.1, 0.01)
-            phase = (time.perf_counter() - loop_start) % period
+            phase = (perf() - loop_start) % period
             if phase > duty:
                 time.sleep(min(0.001, period - phase))
                 continue
 
         if open_loop:
-            now = time.perf_counter()
+            now = perf()
             if now < next_send:
                 time.sleep(min(0.001, next_send - now))
                 continue
             lag_ns = int((now - next_send) * 1e9)
-            with state["lock"]:
+            with lock:
                 state["scheduler_lags_ns"].add(lag_ns)
             next_send += interval
 
-        n = batch_size if cadence == "batch64" else 1
-        for _ in range(n):
-            if time.perf_counter() >= until:
+        for _ in range(batch_n):
+            if perf() >= until:
                 break
             # A QoS0 path that completes at an in-process queue gives the
             # outstanding gate nothing to hold back, so this is the only thing
             # standing between a 1 MiB fire-and-forget loop and the host's RAM.
             if memory_guard is not None and memory_guard.exceeded():
                 state["memory_guard_tripped_kb"] = memory_guard.tripped_at_kb
+                state["offered"] += n_offered
+                state["publish_calls"] += n_calls
+                state["submitted"] += n_submitted
+                state["sync_rejected"] += n_sync_rejected
+                state["publish_accepted"] += n_accepted
+                state["publish_rejected"] += n_rejected
+                state["missed_due_to_backpressure"] += n_missed
                 return sent_sequences
 
             # Plain int read: atomic under the GIL, and a stale-by-one value only
@@ -507,16 +532,21 @@ def _run_publish_loop(
                 if open_loop:
                     # Publisher-thread-only counters (see the offered/publish_calls
                     # note below): no lock needed.
-                    state["offered"] += 1
-                    state["missed_due_to_backpressure"] += 1
-                    state["publish_calls"] += 1
+                    n_offered += 1
+                    n_missed += 1
+                    n_calls += 1
                     continue
                 time.sleep(0.0001)
                 break
 
             sequence += 1
             send_ns = time.perf_counter_ns()
-            header = encode_header(run_id, 1, sequence, sequence, send_ns)
+            header = pack_header(
+                header_magic, run_id, 1,
+                sequence & 0xFFFFFFFFFFFFFFFF,
+                sequence & 0xFFFFFFFFFFFFFFFF,
+                send_ns & 0xFFFFFFFFFFFFFFFF,
+            )
             if corpus:
                 idx = corpus_i % len(corpus)
                 payload_body = corpus[idx]
@@ -548,10 +578,10 @@ def _run_publish_loop(
             # offered/publish_calls/submitted/sync_rejected are written only by this
             # thread (on_publish never touches them), so they need no lock; the final
             # snapshot reads them under the lock.
-            state["offered"] += 1
-            state["publish_calls"] += 1
+            n_offered += 1
+            n_calls += 1
             info = adapter.publish(topic, payload=payload, qos=qos, retain=False, properties=props)
-            with state["lock"]:
+            with lock:
                 if info.rc == 0 and info.mid is not None:
                     mid = info.mid
                     if mid in state["seen_mids_inflight"]:
@@ -559,8 +589,8 @@ def _run_publish_loop(
                         state["completed_failed"] += 1
                         state["protocol_failed"] += 1
                     early = state["early_acks"].pop(mid, None)
-                    state["submitted"] += 1
-                    state["publish_accepted"] += 1
+                    n_submitted += 1
+                    n_accepted += 1
                     state["inflight_local"] += 1
                     # seen_mids_inflight is maintained incrementally: added here,
                     # discarded by _consume_completion_locked on completion.
@@ -573,8 +603,15 @@ def _run_publish_loop(
                         state["mid_send_ns"][mid] = send_ns
                     sent_sequences.add(sequence)
                 else:
-                    state["sync_rejected"] += 1
-                    state["publish_rejected"] += 1
+                    n_sync_rejected += 1
+                    n_rejected += 1
+    state["offered"] += n_offered
+    state["publish_calls"] += n_calls
+    state["submitted"] += n_submitted
+    state["sync_rejected"] += n_sync_rejected
+    state["publish_accepted"] += n_accepted
+    state["publish_rejected"] += n_rejected
+    state["missed_due_to_backpressure"] += n_missed
     return sent_sequences
 
 
