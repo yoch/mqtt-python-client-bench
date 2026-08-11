@@ -19,7 +19,7 @@ HEADER_SIZE = 40
 # Compiled once. struct.pack re-looks-up the format on every call; the publisher
 # stamps a header on every message, so that lookup is pure per-message harness
 # cost — 410 ns against 168 ns for the compiled form.
-_HEADER_STRUCT = struct.Struct("!4s8sIQQQ")
+HEADER_STRUCT = struct.Struct("!4s8sIQQQ")
 
 
 def encode_header(
@@ -31,7 +31,7 @@ def encode_header(
 ) -> bytes:
     if len(run_id) != 8:
         raise ValueError("run_id must be exactly 8 bytes")
-    return _HEADER_STRUCT.pack(
+    return HEADER_STRUCT.pack(
         HEADER_MAGIC,
         run_id,
         publisher_id & 0xFFFFFFFF,
