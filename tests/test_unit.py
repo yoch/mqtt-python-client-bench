@@ -2150,6 +2150,52 @@ class DualProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             capacity_from_load_profile(legacy, protocol="MQTTv5", kind="publish")
 
+    def test_reservoir_keeps_a_uniform_sample(self):
+        # The percentiles the report publishes are only as good as this sample.
+        # Pin the property, not the algorithm, so a future attempt to make `add`
+        # cheaper cannot quietly bias which part of the run is retained — an
+        # Algorithm-L rewrite was tried here and reverted for measuring no
+        # faster at this bench's n/k, but the next one should be free to try.
+        import statistics
+
+        from mqtt_client_bench.sampling import ReservoirSampler
+
+        n, k, trials = 2_000, 20, 400
+        counts = [0] * n
+        for seed in range(trials):
+            s = ReservoirSampler(k, seed=seed)
+            for i in range(n):
+                s.add(i)
+            self.assertEqual(s.seen, n)
+            self.assertEqual(len(s.snapshot()), k)
+            for v in s.snapshot():
+                counts[v] += 1
+
+        expected = trials * k / n  # 4.0
+        # Split the stream in five and compare occupancy: a reservoir that
+        # favours early or late items shows up immediately here.
+        chunk = n // 5
+        buckets = [sum(counts[i * chunk:(i + 1) * chunk]) / chunk for i in range(5)]
+        for b in buckets:
+            self.assertGreater(b, expected * 0.55, f"bucket occupancy {buckets}")
+            self.assertLess(b, expected * 1.45, f"bucket occupancy {buckets}")
+        self.assertAlmostEqual(statistics.mean(buckets), expected, delta=expected * 0.1)
+
+    def test_sequences_are_not_fingerprinted_when_nobody_reads_them(self):
+        # The fingerprints cost 1.2 us per message and are only ever compared
+        # against a subscriber's. A publisher_only point has none.
+        from mqtt_client_bench.sampling import SequenceTracker, sequence_tracker
+
+        live = sequence_tracker(100, enabled=True)
+        self.assertIsInstance(live, SequenceTracker)
+        live.add(7)
+        self.assertEqual(live.summary()["count"], 1)
+
+        off = sequence_tracker(100, enabled=False)
+        off.add(7)
+        self.assertEqual(off.summary(), {"strategy": "not_tracked", "count": 0})
+        self.assertEqual(off.exact_values(), [])
+
     def test_write_json_never_leaves_a_partial_document(self):
         # A campaign is paused with SIGINT, which can land in the middle of a
         # checkpoint write. Truncate-then-write cost a whole scenario once; the

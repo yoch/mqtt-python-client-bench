@@ -29,6 +29,7 @@ from mqtt_client_bench.sampling import (
     DEFAULT_SEQUENCE_EXACT_LIMIT,
     ReservoirSampler,
     SequenceTracker,
+    sequence_tracker,
     bound_payload_backlog,
 )
 from mqtt_client_bench.telemetry import MemoryGuard
@@ -80,6 +81,9 @@ def main(argv=None) -> int:
     payload_backlog_limit = cfg.get(
         "max_harness_payload_bytes", DEFAULT_PAYLOAD_BACKLOG_BYTES
     )
+    # publisher_only points have no subscriber to reconcile against, so the
+    # harness tells the worker not to fingerprint what nobody will read.
+    track_sequences = bool(cfg.get("track_sequences", True))
     if payload_backlog_limit is not None:
         payload_backlog_limit = int(payload_backlog_limit)
 
@@ -225,6 +229,7 @@ def main(argv=None) -> int:
         sequence_start=1 << 40,
         memory_guard=memory_guard,
         sequence_exact_limit=sequence_exact_limit,
+        track_sequences=track_sequences,
     )
 
     # Drain warmup outstanding; fail closed if still active when the deadline hits.
@@ -304,6 +309,7 @@ def main(argv=None) -> int:
         force_header=bool(cfg.get("force_header", False)),
         memory_guard=memory_guard,
         sequence_exact_limit=sequence_exact_limit,
+        track_sequences=track_sequences,
     )
     t1 = time.perf_counter()
     cpu_ns_in_window = time.process_time_ns() - cpu_ns_start
@@ -443,9 +449,10 @@ def _run_publish_loop(
     memory_guard=None,
     sequence_start=0,
     sequence_exact_limit=DEFAULT_SEQUENCE_EXACT_LIMIT,
+    track_sequences=True,
 ):
     sequence = sequence_start
-    sent_sequences = SequenceTracker(sequence_exact_limit)
+    sent_sequences = sequence_tracker(sequence_exact_limit, enabled=track_sequences)
     loop_start = time.perf_counter()
     next_send = loop_start
     interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0

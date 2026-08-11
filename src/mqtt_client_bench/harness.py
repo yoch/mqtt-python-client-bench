@@ -756,6 +756,12 @@ def run_point(
     try:
         if topology == "publisher_only":
             cfg = base_cfg("publisher", "publisher")
+            # Nobody will read the published sequences back: integrity is
+            # reconciled against a subscriber, and there is none here. Computing
+            # the per-message fingerprints anyway cost 1.2 us on every message of
+            # the throughput scenarios — the ones whose per-message budget is
+            # tightest, and where instrumentation therefore distorts most.
+            cfg["track_sequences"] = False
             cfg_path = work_dir / f"publisher-{run_id}.cfg.json"
             write_json(str(cfg_path), cfg)
             workers.append(_spawn_role("publisher.py", str(cfg_path), cpusets.get("sut")))
