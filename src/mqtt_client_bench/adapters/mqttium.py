@@ -1,4 +1,4 @@
-"""MQTTium native adapter — AsyncClient via AsyncioBridge (PyPI ≥0.2.0b4)."""
+"""MQTTium native adapter — AsyncClient via AsyncioBridge (PyPI ≥1.0.0rc1)."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ class MqttiumAdapter(BridgedAdapterBase):
     _NOTES = (
         "MQTTium AsyncClient (https://pypi.org/project/mqttium/) — async-native MQTT "
         "3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop "
-        "(PyPI ≥0.2.0b4). Beta; ranked under --suite experimental. Paho VERSION2 "
+        "(PyPI ≥1.0.0rc1). Release candidate; ranked under --suite experimental. Paho VERSION2 "
         "façade is `mqttium-compat`."
     )
 

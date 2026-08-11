@@ -20,9 +20,9 @@ class MqttiumCompatAdapter:
 
     MQTT_ERR_SUCCESS = 0
     # See GmqttAdapter._PRIVATE_API for the rationale of this inventory.
-    # Re-verified against mqttium 0.2.0b4; MqttiumPrivateApiShapeTests pins it.
+    # Re-verified against mqttium 1.0.0rc1; MqttiumPrivateApiShapeTests pins it.
     _PRIVATE_API = {
-        "Client._async": "façade ctor exposes no max_outbound_inflight (through 0.2.0b4); the inner AsyncClient is rebuilt so QoS>=1 runs the same window as peers",
+        "Client._async": "façade ctor exposes no max_outbound_inflight (through 1.0.0rc1); the inner AsyncClient is rebuilt so QoS>=1 runs the same window as peers",
         "Client._loop": "needed to schedule the properties publish path on the façade's own loop",
         "Client._submit": "connect() must pass an SSLContext, which the façade's own connect() does not accept",
         "Client._run_loop_mutation": "applies the bench keepalive on the façade's loop before connecting",
@@ -129,7 +129,7 @@ class MqttiumCompatAdapter:
             clean_session=clean_session,
             max_pending_outbound_messages=pending,
         )
-        # Through 0.2.0b4: max_outbound_inflight is attach-time only; the façade
+        # Through 1.0.0rc1: max_outbound_inflight is attach-time only; the façade
         # ctor does not expose it and it is absent from
         # _RUNTIME_MUTABLE_ENGINE_CONFIG_FIELDS, so _reconfigure() rejects it
         # once attached. Replace the inner AsyncClient before loop_start/connect
@@ -305,7 +305,7 @@ class MqttiumCompatAdapter:
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
         """Paho-shaped subscribe: return mid before SUBACK, then fire on_subscribe.
 
-        The façade (through 0.2.0b4) exposes ``Client.subscribe`` but has no
+        The façade (through 1.0.0rc1) exposes ``Client.subscribe`` but has no
         ``on_subscribe`` hook, so the bench mirrors ``AsyncClient.subscribe``
         registration (queue + ``_sub_futs`` + effect drain) to deliver grants to
         the harness.

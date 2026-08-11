@@ -27,7 +27,7 @@ generalized behind a per-library adapter layer.
 |---|---|---|
 | `zmqtt` | [faststream-community/zMQTT](https://github.com/faststream-community/zMQTT) | Pure asyncio MQTT 3.1.1/5 (Alpha) — `pip install 'mqtt-client-bench[zmqtt]'` |
 | `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | aiomqtt **v3** alpha (mqtt5 sans-io, MQTT5 only). **Cannot** share an env with `aiomqtt` v2 |
-| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (beta ≥0.2.0b4, `publish_nowait` on bridge loop) — `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
+| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (RC ≥1.0.0rc1, `publish_nowait` on bridge loop) — `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
 | `mqttium-compat` | same | Paho VERSION2 façade only (`mqttium.compat.paho`) — ranked separately from `mqttium` |
 
 ```bash
@@ -197,14 +197,14 @@ that its peers do not. Rankings remain peer-grouped by `io_model` (sync vs
 asyncio_bridged vs CRT); do not treat paho and aiomqtt as interchangeable.
 
 `mqttium` uses ``AsyncClient.publish_nowait`` on the bridge event-loop thread
-(PyPI ≥0.2.0b4; loop-bound, not cross-thread). QoS≥1 completion is
+(PyPI ≥1.0.0rc1; loop-bound, not cross-thread). QoS≥1 completion is
 ``receipt.wait()``, which also re-raises an admission failure so a refused
 publish is not counted as a completion. The adapter installs no
 ``AsyncClient.on_publish``: mqttium takes its direct QoS0 transport write only
 while that callback is unset, so setting one would benchmark the slower path.
 The Paho façade remains a separate client id (`mqttium-compat`). Bench
 ``max_queued`` maps to ``max_pending_outbound_messages``
-(``EngineConfig.max_queued`` was removed in 0.1.0a2). Through 0.2.0b4 the façade
+(``EngineConfig.max_queued`` was removed in 0.1.0a2). Through 1.0.0rc1 the façade
 does not expose ``max_outbound_inflight`` and the engine refuses it once
 attached; the compat adapter rebuilds the inner ``AsyncClient`` before connect so
 QoS≥1 scenarios stay comparable. Campaign helpers:
