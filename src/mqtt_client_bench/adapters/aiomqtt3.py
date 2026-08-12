@@ -72,6 +72,8 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
             io_model="asyncio_bridged",
             implementation_language="python",
             completion_mechanism="awaited",
+            native_async=True,
+            publish_sync_on_loop=False,
             synthetic_mids=True,
             notes=cls._NOTES,
         )
@@ -117,6 +119,15 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
         return adapter
 
     def connect(self, host: str, port: int, keepalive: int = 60) -> None:
+        self._ensure_bridge()
+        self._bridge.run(self.aconnect(host, port, keepalive))
+
+    async def aconnect(self, host: str, port: int, keepalive: int = 60) -> None:
+        """The library calls, on whichever loop is running.
+
+        The sync facade hands this to the bridge; the native driver awaits it on
+        the role worker's own loop. One call site either way.
+        """
         aiomqtt = _require_aiomqtt_v3()
         self._ensure_bridge()
         self._stopping = False
@@ -134,23 +145,20 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
 
             kwargs["ssl_context"] = ssl.create_default_context(cafile=self._tls_ca_certs)
 
-        async def _connect():
-            self._client = aiomqtt.Client(**kwargs)
-            await self._client.__aenter__()
-            # Align with other asyncio adapters / Mosquitto set_tcp_nodelay.
-            try:
-                import socket
+        self._client = aiomqtt.Client(**kwargs)
+        await self._client.__aenter__()
+        # Align with other asyncio adapters / Mosquitto set_tcp_nodelay.
+        try:
+            import socket
 
-                sock = getattr(self._client, "_socket", None)
-                if sock is not None:
-                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            except OSError:
-                pass
-            self._connected = True
-            self._fire_on_connect(flags={}, reason_code=0, properties=None)
-            self._start_pump()
-
-        self._bridge.run(_connect())
+            sock = getattr(self._client, "_socket", None)
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
+        self._connected = True
+        self._fire_on_connect(flags={}, reason_code=0, properties=None)
+        self._start_pump()
 
     async def _message_pump(self) -> None:
         assert self._client is not None
@@ -185,23 +193,53 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
             if not self._stopping:
                 raise
 
+    async def adisconnect(self) -> None:
+        await self._stop_pump()
+        client = self._client
+        self._client = None
+        self._connected = False
+        if client is not None:
+            await client.__aexit__(None, None, None)
+
     def disconnect(self) -> None:
         if self._client is None or not self._connected:
             return
         self._ensure_bridge()
-
-        async def _disconnect():
-            await self._stop_pump()
-            client = self._client
-            self._client = None
-            self._connected = False
-            if client is not None:
-                await client.__aexit__(None, None, None)
-
         try:
-            self._bridge.run(_disconnect(), timeout=10.0)
+            self._bridge.run(self.adisconnect(), timeout=10.0)
         except Exception:  # noqa: BLE001
             self._connected = False
+
+    async def apublish(
+        self,
+        topic: str,
+        payload: Any = None,
+        qos: int = 0,
+        retain: bool = False,
+        properties: Any = None,
+    ) -> Optional[int]:
+        """Await one publish to completion; the await *is* the completion."""
+        client = self._client
+        if client is None or not self._connected:
+            raise RuntimeError("aiomqtt3 client is not connected")
+        data = b"" if payload is None else payload
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        # v3 publish: QoS IntEnum + packet_id required for QoS>=1.
+        kwargs: dict[str, Any] = {"qos": _qos_enum(qos), "retain": retain}
+        if int(qos) > 0:
+            kwargs["packet_id"] = next(client.packet_ids)
+        await client.publish(topic, data, **kwargs)
+        return self.alloc_mid()
+
+    async def asubscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
+        client = self._client
+        if client is None or not self._connected:
+            raise RuntimeError("aiomqtt3 client is not connected")
+        await client.subscribe(topic, max_qos=_qos_enum(qos))
+        mid = self.alloc_mid()
+        self._fire_on_subscribe(mid, [qos], None)
+        return SubscribeResult(rc=0, mid=mid)
 
     def publish(
         self,

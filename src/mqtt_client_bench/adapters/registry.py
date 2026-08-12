@@ -12,7 +12,10 @@ from mqtt_client_bench.adapters.amqtt import AmqttAdapter
 from mqtt_client_bench.adapters.awscrt import AwscrtAdapter
 from mqtt_client_bench.adapters.base import AdapterCapabilities, MqttClientAdapter
 from mqtt_client_bench.adapters.gmqtt import GmqttAdapter
+from mqtt_client_bench.adapters.gmqtt_async import GmqttAsyncAdapter
 from mqtt_client_bench.adapters.mqttium import MqttiumAdapter
+from mqtt_client_bench.adapters.mqttium_async import MqttiumAsyncAdapter
+from mqtt_client_bench.adapters.native import native_async_for
 from mqtt_client_bench.adapters.mqttium_compat import MqttiumCompatAdapter
 from mqtt_client_bench.adapters.paho import PahoAdapter
 from mqtt_client_bench.adapters.zmqtt import ZmqttAdapter
@@ -27,6 +30,19 @@ _ADAPTERS: Dict[str, Type] = {
     "aiomqtt3": Aiomqtt3Adapter,
     "mqttium": MqttiumAdapter,
     "mqttium-compat": MqttiumCompatAdapter,
+}
+
+# Adapters driven directly on the role worker's own loop. A client is listed
+# here only once its native path is implemented AND its capabilities declare
+# native_async; the two are cross-checked at startup so a half-migrated client
+# falls back to the sync facade instead of running an untested path.
+_ASYNC_ADAPTERS: Dict[str, Type] = {
+    "mqttium": MqttiumAsyncAdapter,
+    "gmqtt": GmqttAsyncAdapter,
+    "aiomqtt": native_async_for(AiomqttAdapter),
+    "aiomqtt3": native_async_for(Aiomqtt3Adapter),
+    "amqtt": native_async_for(AmqttAdapter),
+    "zmqtt": native_async_for(ZmqttAdapter),
 }
 
 CLIENT_NAMES = tuple(_ADAPTERS.keys())
@@ -131,6 +147,43 @@ def create_adapter(
     extra = {}
     # Passed only to adapters that declare a byte-based outbound bound, so an
     # adapter never receives a knob it would silently fail to honour.
+    if max_queued_bytes is not None and cls.capabilities().max_queued_bytes:
+        extra["max_queued_bytes"] = int(max_queued_bytes)
+    return cls.create(
+        client_id=client_id,
+        protocol=protocol,
+        clean_session=clean_session,
+        max_inflight=max_inflight,
+        max_queued=max_queued,
+        tls_ca_certs=tls_ca_certs,
+        **extra,
+    )
+
+
+def has_async_adapter(client: str) -> bool:
+    """True when this client can be driven without a bridge."""
+    cls = _ASYNC_ADAPTERS.get(client)
+    return cls is not None and bool(cls.capabilities().native_async)
+
+
+def create_async_adapter(
+    client: str,
+    *,
+    client_path: Optional[str] = None,
+    client_id: str,
+    protocol: str = "MQTTv311",
+    clean_session: bool = True,
+    max_inflight: int = 20,
+    max_queued: int = 200,
+    max_queued_bytes: Optional[int] = None,
+    tls_ca_certs: Optional[str] = None,
+):
+    """Build the native async adapter; raises if the client has none."""
+    configure_client_path(client, client_path)
+    cls = _ASYNC_ADAPTERS.get(client)
+    if cls is None:
+        raise KeyError(f"no native async adapter for client: {client}")
+    extra = {}
     if max_queued_bytes is not None and cls.capabilities().max_queued_bytes:
         extra["max_queued_bytes"] = int(max_queued_bytes)
     return cls.create(

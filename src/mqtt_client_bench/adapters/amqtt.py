@@ -45,6 +45,8 @@ class AmqttAdapter(BridgedAdapterBase):
             io_model="asyncio_bridged",
             implementation_language="python",
             completion_mechanism="awaited",
+            native_async=True,
+            publish_sync_on_loop=False,
             synthetic_mids=True,
             notes=cls._NOTES,
             unimplemented=[],
@@ -101,22 +103,25 @@ class AmqttAdapter(BridgedAdapterBase):
 
     def connect(self, host: str, port: int, keepalive: int = 60) -> None:
         self._ensure_bridge()
+        self._bridge.run(self.aconnect(host, port, keepalive))
+
+    async def aconnect(self, host: str, port: int, keepalive: int = 60) -> None:
+        """The library calls, on whichever loop is running.
+
+        The sync facade hands this to the bridge; the native driver awaits it on
+        the role worker's own loop. One call site either way.
+        """
         self._stopping = False
         scheme = "mqtts" if self._tls_ca_certs else "mqtt"
         uri = f"{scheme}://{host}:{port}/"
-        cafile = self._tls_ca_certs
-
-        async def _connect():
-            await self._client.connect(
-                uri,
-                cleansession=self._clean_session,
-                cafile=cafile,
-            )
-            self._connected = True
-            self._fire_on_connect(flags={}, reason_code=0, properties=None)
-            self._start_pump()
-
-        self._bridge.run(_connect())
+        await self._client.connect(
+            uri,
+            cleansession=self._clean_session,
+            cafile=self._tls_ca_certs,
+        )
+        self._connected = True
+        self._fire_on_connect(flags={}, reason_code=0, properties=None)
+        self._start_pump()
 
     async def _message_pump(self) -> None:
         """Drain inbound publishes from amqtt's delivery queue.
@@ -152,22 +157,55 @@ class AmqttAdapter(BridgedAdapterBase):
                 )
             )
 
+    async def adisconnect(self) -> None:
+        await self._stop_pump()
+        try:
+            await self._client.disconnect()
+        finally:
+            self._connected = False
+
     def disconnect(self) -> None:
         if self._client is None or not self._connected:
             return
         self._ensure_bridge()
-
-        async def _disconnect():
-            await self._stop_pump()
-            try:
-                await self._client.disconnect()
-            finally:
-                self._connected = False
-
         try:
-            self._bridge.run(_disconnect(), timeout=10.0)
+            self._bridge.run(self.adisconnect(), timeout=10.0)
         except Exception:  # noqa: BLE001
             self._connected = False
+
+    @staticmethod
+    def _as_bytes(payload: Any) -> bytes:
+        if payload is None:
+            return b""
+        if isinstance(payload, (bytes, bytearray)):
+            return bytes(payload)
+        if isinstance(payload, str):
+            return payload.encode("utf-8")
+        return bytes(payload)
+
+    async def apublish(
+        self,
+        topic: str,
+        payload: Any = None,
+        qos: int = 0,
+        retain: bool = False,
+        properties: Any = None,
+    ) -> Optional[int]:
+        """Await one publish to completion; the await *is* the completion."""
+        client = self._client
+        if client is None or not self._connected:
+            raise RuntimeError("amqtt client is not connected")
+        await client.publish(topic, self._as_bytes(payload), qos=qos, retain=retain)
+        return self.alloc_mid()
+
+    async def asubscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
+        client = self._client
+        if client is None or not self._connected:
+            raise RuntimeError("amqtt client is not connected")
+        grants = await client.subscribe([(topic, qos)])
+        mid = self.alloc_mid()
+        self._fire_on_subscribe(mid, list(grants) if grants else [qos], None)
+        return SubscribeResult(rc=0, mid=mid)
 
     def publish(
         self,

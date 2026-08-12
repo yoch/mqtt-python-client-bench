@@ -15,13 +15,20 @@ Primary throughput uses completed_success in the measure window only.
 from __future__ import annotations
 
 import argparse
+import asyncio
+import functools
 import gc
 import json
 import os
 import threading
 import time
 
-from mqtt_client_bench.adapters.registry import adapter_identity, create_adapter
+from mqtt_client_bench.adapters.registry import (
+    adapter_identity,
+    create_adapter,
+    create_async_adapter,
+    has_async_adapter,
+)
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
 from mqtt_client_bench.sampling import (
     DEFAULT_METRIC_SAMPLE_LIMIT,
@@ -139,6 +146,13 @@ def main(argv=None) -> int:
         "early_acks": {},
         "warmup_drain_ok": True,
         "seen_mids_inflight": set(),
+        # Async path only: the future the loop parks on, the deadline flag, and
+        # the two slots that let a publish acknowledged inside its own call
+        # complete without going through the early-ack dictionaries.
+        "gate_waiter": None,
+        "loop_expired": False,
+        "pending_send_ns": None,
+        "completed_inline": None,
     }
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
@@ -146,27 +160,17 @@ def main(argv=None) -> int:
         if rc == 0:
             state["connected"].set()
 
-    def on_publish(client, userdata, mid, reason_code=None, properties=None):
-        now = time.perf_counter_ns()
-        with state["lock"]:
-            failed = False
-            if reason_code is not None:
-                rc = int(getattr(reason_code, "value", reason_code))
-                if rc >= 128:
-                    failed = True
-            send_ns = state["mid_send_ns"].pop(mid, None)
-            if send_ns is None:
-                # Callback raced ahead of publish() return — stash until registered.
-                state["early_acks"][mid] = (now, failed)
-                return
-            _consume_completion_locked(state, qos, send_ns, now, failed, mid=mid)
-
     # Byte-equivalent of the requested queue depth, for libraries that also bound
     # their outbound queue in bytes. Without it their effective window collapses
     # with payload size while the message-bounded clients keep the full depth.
     payload_bytes = len(body) if isinstance(body, (bytes, bytearray)) else len(str(body).encode())
 
-    adapter = create_adapter(
+    # A client with a native path is driven on its own loop unless the point
+    # explicitly asks otherwise. Which path ran is recorded in the result: a run
+    # through the bridge and a native run are not comparable with each other.
+    native = bool(cfg.get("native_async", True)) and has_async_adapter(client_name)
+    build = create_async_adapter if native else create_adapter
+    adapter = build(
         client_name,
         client_path=client_path,
         client_id=cfg.get("client_id", f"pub-{cfg['run_id']}"),
@@ -177,22 +181,23 @@ def main(argv=None) -> int:
         max_queued_bytes=max_queued * max(1, payload_bytes),
         tls_ca_certs=cfg.get("ca_certs") if cfg.get("tls") else None,
     )
+    driver = _AsyncDriver(adapter) if native else _SyncDriver(adapter)
+    publish_path = "native_async" if native else "sync_facade"
     adapter.on_connect = on_connect
-    adapter.on_publish = on_publish
+    adapter.on_publish = _make_on_publish(state, qos, lock=None if native else state["lock"])
 
     host = cfg["host"]
     port = int(cfg["port"])
-    adapter.connect(host, port, keepalive=int(cfg.get("keepalive", 60)))
-    adapter.loop_start()
-    if not state["connected"].wait(timeout=30):
+    driver.connect(host, port, int(cfg.get("keepalive", 60)))
+    if not driver.blocking(state["connected"].wait, 30):
         write_json(cfg["result_path"], {"ok": False, "error": "connect_timeout", **identity})
-        adapter.loop_stop()
+        driver.close()
         return 1
 
     touch(cfg["ready_path"], {"role": "publisher", "pid": os.getpid(), **identity})
 
     barrier = barrier_client_session(cfg["barrier_path"], timeout_s=float(cfg.get("barrier_timeout_s", 120)))
-    barrier.wait("T0")
+    driver.blocking(barrier.wait, "T0")
 
     open_loop_rate = None
     if cadence in ("steady50", "loaded75", "loaded90", "periodic10") or cfg.get("load_fraction"):
@@ -215,8 +220,7 @@ def main(argv=None) -> int:
     gc_start = gc.get_count()
     state["phase"] = "warmup"
     warmup_end = time.perf_counter() + warmup_s
-    _run_publish_loop(
-        adapter,
+    driver.run_loop(
         state,
         topic=topic,
         qos=qos,
@@ -241,7 +245,7 @@ def main(argv=None) -> int:
         with state["lock"]:
             if state["inflight_local"] == 0 and not state["mid_send_ns"] and not state["early_acks"]:
                 break
-        time.sleep(0.01)
+        driver.sleep(0.01)
     with state["lock"]:
         if state["inflight_local"] or state["mid_send_ns"] or state["early_acks"]:
             state["warmup_drain_ok"] = False
@@ -268,9 +272,9 @@ def main(argv=None) -> int:
             state["inflight_local"] = 0
             state["seen_mids_inflight"].clear()
 
-    barrier.ack("WARMUP_DRAINED")
+    driver.blocking(barrier.ack, "WARMUP_DRAINED")
     # Second barrier: all roles start measure together.
-    barrier.wait("T_MEASURE")
+    driver.blocking(barrier.wait, "T_MEASURE")
     barrier.close()
 
     if not state["warmup_drain_ok"]:
@@ -283,8 +287,7 @@ def main(argv=None) -> int:
                 **identity,
             },
         )
-        adapter.disconnect()
-        adapter.loop_stop()
+        driver.close()
         return 1
 
     state["phase"] = "measure"
@@ -294,8 +297,7 @@ def main(argv=None) -> int:
     cpu_ns_start = time.process_time_ns()
     t0 = time.perf_counter()
     measure_end = t0 + duration_s
-    measure_sequences = _run_publish_loop(
-        adapter,
+    measure_sequences = driver.run_loop(
         state,
         topic=topic,
         qos=qos,
@@ -325,7 +327,7 @@ def main(argv=None) -> int:
             pending_mids = len(state["mid_send_ns"])
         if inflight_local == 0 and pending_mids == 0:
             break
-        time.sleep(0.01)
+        driver.sleep(0.01)
 
     with state["lock"]:
         backlog = state["inflight_local"]
@@ -353,8 +355,7 @@ def main(argv=None) -> int:
             "warmup_drain_ok": state["warmup_drain_ok"],
         }
 
-    adapter.disconnect()
-    adapter.loop_stop()
+    driver.close()
 
     window = max(t1 - t0, 1e-9)
     sequence_summary = measure_sequences.summary()
@@ -368,6 +369,7 @@ def main(argv=None) -> int:
         "payload": payload_name,
         "payload_bytes": payload_len,
         "cadence": cadence,
+        "publish_path": publish_path,
         "t0_s": t0,
         "t1_s": t1,
         "duration_s": window,
@@ -399,6 +401,144 @@ def main(argv=None) -> int:
     }
     write_json(cfg["result_path"], result)
     return 0
+
+
+
+# How long a publish already awaiting an acknowledgement may run past the end of
+# the window before it is cancelled. Short enough to bound the phase, long enough
+# that a normal in-flight publish is never aborted.
+_AWAITED_GRACE_S = 2.0
+
+
+class _MemoryGuardTripped(Exception):
+    """Internal: unwinds the async publish loop through its counter flush."""
+
+
+def _wake_gate(state) -> None:
+    """Release the async loop parked on the outstanding gate.
+
+    Only the async path ever parks; on the sync path the slot stays empty and
+    this is one dict lookup per completion.
+    """
+    fut = state.get("gate_waiter")
+    if fut is not None:
+        state["gate_waiter"] = None
+        if not fut.done():
+            fut.set_result(None)
+
+
+def _make_on_publish(state, qos, *, lock):
+    """Completion handler shared by both paths.
+
+    `lock` is None on the async path: the loop, the transport and this callback
+    all run on the same thread, so there is nothing to serialise against and an
+    uncontended acquire per message would be pure harness tax on exactly the
+    clients this path exists to stop taxing.
+    """
+    mid_send_ns = state["mid_send_ns"]
+    early_acks = state["early_acks"]
+
+    def on_publish(client, userdata, mid, reason_code=None, properties=None):
+        now = time.perf_counter_ns()
+        failed = False
+        if reason_code is not None:
+            rc = int(getattr(reason_code, "value", reason_code))
+            if rc >= 128:
+                failed = True
+        if lock is None:
+            send_ns = mid_send_ns.pop(mid, None)
+            if send_ns is None:
+                pending = state["pending_send_ns"]
+                if pending is not None:
+                    # Acknowledged inside the publish call itself, which is what
+                    # a QoS 0 transport hand-off looks like. The mid the loop is
+                    # about to see is this one, so complete it here and tell the
+                    # loop to skip registering it: the dict insert, the dict pop
+                    # and the in-flight set churn were all pure harness cost.
+                    state["completed_inline"] = mid
+                    _consume_completion_locked(state, qos, pending, now, failed, mid=mid)
+                    return
+                early_acks[mid] = (now, failed)
+                return
+            _consume_completion_locked(state, qos, send_ns, now, failed, mid=mid)
+            if state["gate_waiter"] is not None:
+                _wake_gate(state)
+            return
+        with lock:
+            send_ns = mid_send_ns.pop(mid, None)
+            if send_ns is None:
+                # Callback raced ahead of publish() return - stash until registered.
+                early_acks[mid] = (now, failed)
+                return
+            _consume_completion_locked(state, qos, send_ns, now, failed, mid=mid)
+
+    return on_publish
+
+
+class _SyncDriver:
+    """Drives an adapter through the sync facade and its bridge thread."""
+
+    native_async = False
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+
+    def connect(self, host, port, keepalive):
+        self.adapter.connect(host, port, keepalive=keepalive)
+        self.adapter.loop_start()
+
+    def blocking(self, fn, *args, **kwargs):
+        return fn(*args, **kwargs)
+
+    def sleep(self, seconds):
+        time.sleep(seconds)
+
+    def run_loop(self, state, **kwargs):
+        return _run_publish_loop(self.adapter, state, **kwargs)
+
+    def close(self):
+        self.adapter.disconnect()
+        self.adapter.loop_stop()
+
+
+class _AsyncDriver:
+    """Drives an async adapter on this thread's own loop - no bridge at all.
+
+    The bridge it replaces cost a measured 18.5 us per message. That is a fixed
+    cost, so it compressed the field: at 25,000 msgs/s it inflated a client's
+    period by 46%, at 6,000 msgs/s by 11%. Removing it is not an optimisation,
+    it is the difference between comparing libraries and comparing them through
+    a filter that favours the slow ones.
+    """
+
+    native_async = True
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+
+    def connect(self, host, port, keepalive):
+        self.loop.run_until_complete(self.adapter.connect(host, port, keepalive=keepalive))
+
+    def blocking(self, fn, *args, **kwargs):
+        # Barrier waits and connect acks would otherwise stall this thread with
+        # nobody reading the socket - a 30 s wait is a keepalive timeout. Hand
+        # them to a helper thread and keep the loop turning.
+        call = functools.partial(fn, *args, **kwargs)
+        return self.loop.run_until_complete(self.loop.run_in_executor(None, call))
+
+    def sleep(self, seconds):
+        self.loop.run_until_complete(asyncio.sleep(seconds))
+
+    def run_loop(self, state, **kwargs):
+        return self.loop.run_until_complete(
+            _run_publish_loop_async(self.adapter, state, **kwargs)
+        )
+
+    def close(self):
+        self.loop.run_until_complete(self.adapter.disconnect())
+        self.loop.close()
 
 
 def _consume_completion_locked(state, qos, send_ns, now, failed: bool, *, mid) -> None:
@@ -612,6 +752,419 @@ def _run_publish_loop(
     state["publish_accepted"] += n_accepted
     state["publish_rejected"] += n_rejected
     state["missed_due_to_backpressure"] += n_missed
+    return sent_sequences
+
+
+def _make_stamper(body, corpus, run_id, force_header):
+    """Build the per-message payload closure once, outside the loop.
+
+    The payload's *shape* - bytes or str, shorter or longer than the header,
+    corpus or single body - is fixed for the whole run, so it is resolved here
+    and the returned closure carries no branch on it. Re-deciding it per message
+    cost 811 ns; the specialised forms cost about a third of that, and at 25,000
+    msgs/s that difference is 1% of the client's entire period.
+    """
+    pack_header = HEADER_STRUCT.pack
+    header_magic = HEADER_MAGIC
+    mask = 0xFFFFFFFFFFFFFFFF
+
+    if corpus:
+        tails = [payload_tail(c) if isinstance(c, (bytes, bytearray)) else None for c in corpus]
+        bodies = list(corpus)
+        n = len(bodies)
+        cursor = [0]
+
+        def stamp_corpus(sequence, send_ns):
+            masked = sequence & mask
+            header = pack_header(header_magic, run_id, 1, masked, masked, send_ns & mask)
+            idx = cursor[0]
+            cursor[0] = 0 if idx + 1 >= n else idx + 1
+            tail = tails[idx]
+            return (header + tail) if tail is not None else wrap_with_header(bodies[idx], header)
+
+        return stamp_corpus
+
+    if isinstance(body, str):
+        if not force_header:
+            return lambda sequence, send_ns: body
+        raw = body.encode("utf-8")
+
+        def stamp_str(sequence, send_ns):
+            masked = sequence & mask
+            header = pack_header(header_magic, run_id, 1, masked, masked, send_ns & mask)
+            return wrap_with_header(raw if len(raw) >= HEADER_SIZE else header + raw, header)
+
+        return stamp_str
+
+    if len(body) >= HEADER_SIZE:
+        tail = payload_tail(body)
+
+        def stamp_bytes(sequence, send_ns):
+            masked = sequence & mask
+            return pack_header(header_magic, run_id, 1, masked, masked, send_ns & mask) + tail
+
+        return stamp_bytes
+
+    if not force_header:
+        # Too short to carry a header and nobody asked for one: nothing to stamp.
+        return lambda sequence, send_ns: body
+
+    def stamp_short(sequence, send_ns):
+        masked = sequence & mask
+        return pack_header(header_magic, run_id, 1, masked, masked, send_ns & mask)
+
+    return stamp_short
+
+
+def _account_awaited(state, qos, send_ns, now, failed) -> None:
+    """Completion accounting for the awaited shape.
+
+    An awaited publish *is* its own completion, so there is no mid to correlate
+    and no early-ack window: the counters move here directly instead of through
+    the callback path. Same fields, same meaning.
+    """
+    if failed:
+        state["completed_failed"] += 1
+        state["protocol_failed"] += 1
+        return
+    state["completed_success"] += 1
+    if qos == 0:
+        state["socket_completed_qos0"] += 1
+    else:
+        state["protocol_completed"] += 1
+    state["latencies_ns"].add(now - send_ns)
+    phase = state["phase"]
+    if phase == "measure":
+        state["completed_in_window"] += 1
+    elif phase == "drain":
+        state["completed_during_drain"] += 1
+
+
+async def _run_publish_loop_async(adapter, state, **kwargs):
+    """Dispatch to the shape this client's API actually supports.
+
+    Resolved once per phase, never per message. Both shapes keep the same
+    contract as the sync loop - same completion definition, same outstanding
+    window, same counters - and differ only in how the library lets a caller
+    keep more than one publish in flight.
+    """
+    if adapter.capabilities().publish_sync_on_loop:
+        return await _publish_loop_sync_on_loop(adapter, state, **kwargs)
+    return await _publish_loop_awaited(adapter, state, **kwargs)
+
+
+async def _publish_loop_sync_on_loop(
+    adapter,
+    state,
+    *,
+    topic,
+    qos,
+    body,
+    corpus,
+    run_id,
+    outstanding,
+    cadence,
+    until,
+    target_rate,
+    properties_builder,
+    batch_size=1,
+    reset_sequence=False,
+    force_header=False,
+    memory_guard=None,
+    sequence_start=0,
+    sequence_exact_limit=DEFAULT_SEQUENCE_EXACT_LIMIT,
+    track_sequences=True,
+):
+    """One coroutine, for libraries that admit a publish on the loop.
+
+    The sync loop's twin: same contract, same counters, same gate. What is gone
+    is the thread boundary - no lock per message, no cross-thread wakeup, no
+    coroutine allocated per message.
+    """
+    sequence = sequence_start
+    sent_sequences = sequence_tracker(sequence_exact_limit, enabled=track_sequences)
+    n_offered = n_calls = n_submitted = 0
+    n_sync_rejected = n_accepted = n_rejected = n_missed = 0
+    stamp = _make_stamper(body, corpus, run_id, force_header)
+    loop_start = time.perf_counter()
+    next_send = loop_start
+    interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0
+    open_loop = target_rate is not None and cadence not in ("capacity", "burst", "microburst", "batch64")
+
+    perf = time.perf_counter
+    is_bursty = cadence in ("burst", "microburst")
+    batch_n = batch_size if cadence == "batch64" else 1
+
+    loop = asyncio.get_running_loop()
+    publish_nowait = adapter.publish_nowait
+    mid_send_ns = state["mid_send_ns"]
+    early_acks = state["early_acks"]
+    seen_inflight = state["seen_mids_inflight"]
+    lag_add = state["scheduler_lags_ns"].add
+
+    # One timer for the whole loop, not one per park: a client that stops
+    # completing must not leave the loop parked past the window's end.
+    state["loop_expired"] = False
+
+    def _expire():
+        state["loop_expired"] = True
+        _wake_gate(state)
+
+    expiry = loop.call_later(max(0.0, until - perf()), _expire)
+
+    # A publisher that never parks on the gate - QoS 0 completes inside the
+    # publish call - would never hand control back, so the transport would never
+    # be read. Yield once per outstanding-window of messages: the scenario
+    # already declares that window, so this is not a new tuning knob.
+    yield_every = max(1, outstanding)
+    since_yield = 0
+
+    try:
+        # Both conditions on purpose: the flag is what a completion-starved loop
+        # would never see, since the timer that sets it can only fire if the loop
+        # gets control. The deadline read costs ~40 ns per outer iteration and
+        # removes any dependency on that.
+        while not state["loop_expired"] and perf() < until:
+            if is_bursty:
+                period, duty = (1.0, 0.1) if cadence == "burst" else (0.1, 0.01)
+                phase = (perf() - loop_start) % period
+                if phase > duty:
+                    await asyncio.sleep(min(0.001, period - phase))
+                    since_yield = 0
+                    continue
+
+            if open_loop:
+                now = perf()
+                if now < next_send:
+                    await asyncio.sleep(min(0.001, next_send - now))
+                    since_yield = 0
+                    continue
+                lag_add(int((now - next_send) * 1e9))
+                next_send += interval
+
+            for _ in range(batch_n):
+                if state["loop_expired"] or perf() >= until:
+                    break
+                if memory_guard is not None and memory_guard.exceeded():
+                    state["memory_guard_tripped_kb"] = memory_guard.tripped_at_kb
+                    raise _MemoryGuardTripped
+
+                if state["inflight_local"] >= outstanding:
+                    if open_loop:
+                        n_offered += 1
+                        n_missed += 1
+                        n_calls += 1
+                        continue
+                    # Park until a completion frees a slot. This is the steady
+                    # state of a closed-loop capacity run, and the same shape a
+                    # native application would use.
+                    fut = loop.create_future()
+                    state["gate_waiter"] = fut
+                    try:
+                        await fut
+                    finally:
+                        state["gate_waiter"] = None
+                    since_yield = 0
+                    break
+
+                sequence += 1
+                send_ns = time.perf_counter_ns()
+                payload = stamp(sequence, send_ns)
+                props = properties_builder()
+                n_offered += 1
+                n_calls += 1
+                state["inflight_local"] += 1
+                state["pending_send_ns"] = send_ns
+                mid = publish_nowait(topic, payload, qos, False, props)
+                state["pending_send_ns"] = None
+
+                if mid is None:
+                    state["inflight_local"] -= 1
+                    n_sync_rejected += 1
+                    n_rejected += 1
+                    continue
+                n_submitted += 1
+                n_accepted += 1
+                if state["completed_inline"] == mid:
+                    state["completed_inline"] = None
+                    sent_sequences.add(sequence)
+                    since_yield += 1
+                    if since_yield >= yield_every:
+                        since_yield = 0
+                        await asyncio.sleep(0)
+                    continue
+                if mid in seen_inflight:
+                    # Synthetic MID collision while still inflight.
+                    state["completed_failed"] += 1
+                    state["protocol_failed"] += 1
+                early = early_acks.pop(mid, None)
+                seen_inflight.add(mid)
+                if early is not None:
+                    early_now, early_failed = early
+                    mid_send_ns.pop(mid, None)
+                    _consume_completion_locked(state, qos, send_ns, early_now, early_failed, mid=mid)
+                else:
+                    mid_send_ns[mid] = send_ns
+                sent_sequences.add(sequence)
+
+                since_yield += 1
+                if since_yield >= yield_every:
+                    since_yield = 0
+                    await asyncio.sleep(0)
+    except _MemoryGuardTripped:
+        pass
+    finally:
+        expiry.cancel()
+        _wake_gate(state)
+        state["offered"] += n_offered
+        state["publish_calls"] += n_calls
+        state["submitted"] += n_submitted
+        state["sync_rejected"] += n_sync_rejected
+        state["publish_accepted"] += n_accepted
+        state["publish_rejected"] += n_rejected
+        state["missed_due_to_backpressure"] += n_missed
+    return sent_sequences
+
+
+async def _publish_loop_awaited(
+    adapter,
+    state,
+    *,
+    topic,
+    qos,
+    body,
+    corpus,
+    run_id,
+    outstanding,
+    cadence,
+    until,
+    target_rate,
+    properties_builder,
+    batch_size=1,
+    reset_sequence=False,
+    force_header=False,
+    memory_guard=None,
+    sequence_start=0,
+    sequence_exact_limit=DEFAULT_SEQUENCE_EXACT_LIMIT,
+    track_sequences=True,
+):
+    """`outstanding` concurrent workers, for await-only publish APIs.
+
+    Awaiting publishes one after another would pin the window at 1 and measure
+    round-trip time instead of capacity. The window is what the scenario asks
+    for, so it becomes the worker count: `outstanding` coroutines, each awaiting
+    its own publish. That is how an application with this API gets concurrency,
+    and it costs one reused coroutine per slot rather than one task per message.
+    """
+    sent_sequences = sequence_tracker(sequence_exact_limit, enabled=track_sequences)
+    stamp = _make_stamper(body, corpus, run_id, force_header)
+    perf = time.perf_counter
+    loop_start = perf()
+    interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0
+    open_loop = target_rate is not None and cadence not in ("capacity", "burst", "microburst", "batch64")
+    is_bursty = cadence in ("burst", "microburst")
+    publish = adapter.publish
+    lag_add = state["scheduler_lags_ns"].add
+
+    counters = {
+        "offered": 0, "calls": 0, "submitted": 0,
+        "sync_rejected": 0, "accepted": 0, "rejected": 0, "missed": 0,
+    }
+    cursor = {"sequence": sequence_start, "next_send": loop_start, "stop": False, "since_yield": 0}
+    # `await publish(...)` is not a guarantee that the loop gets to run: a QoS 0
+    # path that only enqueues has no suspension point, so a worker can spin
+    # through its whole window without the client's own writer task ever being
+    # scheduled - its outbound queue then grows without bound. Measured: amqtt
+    # QoS 0 tripped the 1.5 GB memory guard where the bridged path, which
+    # crossed a thread and therefore always yielded, sustained 10,315 msgs/s.
+    # One yield per outstanding-window of messages, same discipline as the
+    # sync-on-loop shape.
+    yield_every = max(1, outstanding)
+
+    async def worker():
+        while not cursor["stop"] and perf() < until:
+            if is_bursty:
+                period, duty = (1.0, 0.1) if cadence == "burst" else (0.1, 0.01)
+                phase = (perf() - loop_start) % period
+                if phase > duty:
+                    await asyncio.sleep(min(0.001, period - phase))
+                    continue
+
+            if open_loop:
+                now = perf()
+                slot = cursor["next_send"]
+                if now < slot:
+                    await asyncio.sleep(min(0.001, slot - now))
+                    continue
+                # Every worker busy means slots went by unserved. They are
+                # offers the client could not take, which is exactly what the
+                # sync loop counts when the gate is full.
+                if interval and now > slot + interval:
+                    skipped = int((now - slot) / interval)
+                    counters["offered"] += skipped
+                    counters["calls"] += skipped
+                    counters["missed"] += skipped
+                    slot += skipped * interval
+                lag_add(int((now - slot) * 1e9))
+                cursor["next_send"] = slot + interval
+
+            if memory_guard is not None and memory_guard.exceeded():
+                state["memory_guard_tripped_kb"] = memory_guard.tripped_at_kb
+                cursor["stop"] = True
+                return
+
+            sequence = cursor["sequence"] + 1
+            cursor["sequence"] = sequence
+            send_ns = time.perf_counter_ns()
+            payload = stamp(sequence, send_ns)
+            props = properties_builder()
+            counters["offered"] += 1
+            counters["calls"] += 1
+            counters["submitted"] += 1
+            counters["accepted"] += 1
+            state["inflight_local"] += 1
+            failed = False
+            try:
+                await publish(topic, payload, qos, False, props)
+            except asyncio.CancelledError:
+                # The slot has to be released on every exit path: a cancelled
+                # worker that left its slot held made the warmup drain time out,
+                # which is a harness fault reported as a client fault.
+                state["inflight_local"] -= 1
+                raise
+            except Exception:  # noqa: BLE001
+                failed = True
+            state["inflight_local"] -= 1
+            _account_awaited(state, qos, send_ns, time.perf_counter_ns(), failed)
+            sent_sequences.add(sequence)
+
+            cursor["since_yield"] += 1
+            if cursor["since_yield"] >= yield_every:
+                cursor["since_yield"] = 0
+                await asyncio.sleep(0)
+
+    loop = asyncio.get_running_loop()
+    workers = [asyncio.ensure_future(worker()) for _ in range(max(1, outstanding))]
+    # Close the window with a flag, then give the publishes already awaiting an
+    # acknowledgement a bounded grace to land. Cancelling at the deadline instead
+    # would abort one publish per worker mid-flight and charge the client for it.
+    stopper = loop.call_later(max(0.0, until - perf()), lambda: cursor.__setitem__("stop", True))
+    try:
+        await asyncio.wait(workers, timeout=max(0.0, until - perf()) + _AWAITED_GRACE_S)
+    finally:
+        stopper.cancel()
+        cursor["stop"] = True
+        for task in workers:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        state["offered"] += counters["offered"]
+        state["publish_calls"] += counters["calls"]
+        state["submitted"] += counters["submitted"]
+        state["sync_rejected"] += counters["sync_rejected"]
+        state["publish_accepted"] += counters["accepted"]
+        state["publish_rejected"] += counters["rejected"]
+        state["missed_due_to_backpressure"] += counters["missed"]
     return sent_sequences
 
 

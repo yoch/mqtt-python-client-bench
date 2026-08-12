@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ssl
 from pathlib import Path
 from typing import Any, Optional
@@ -45,6 +46,8 @@ class ZmqttAdapter(BridgedAdapterBase):
             io_model="asyncio_bridged",
             implementation_language="python",
             completion_mechanism="awaited",
+            native_async=True,
+            publish_sync_on_loop=False,
             synthetic_mids=True,
             notes=cls._NOTES,
         )
@@ -99,31 +102,33 @@ class ZmqttAdapter(BridgedAdapterBase):
         return adapter
 
     def connect(self, host: str, port: int, keepalive: int = 60) -> None:
+        self._ensure_bridge()
+        self._bridge.run(self.aconnect(host, port, keepalive))
+
+    async def aconnect(self, host: str, port: int, keepalive: int = 60) -> None:
+        """The library calls, on whichever loop is running.
+
+        The sync facade hands this to the bridge; the native driver awaits it on
+        the role worker's own loop. One call site either way.
+        """
         import zmqtt
 
-        self._ensure_bridge()
         self._stopping = False
-        version = "5.0" if self._protocol == "MQTTv5" else "3.1.1"
         tls: Any = False
         if self._tls_ca_certs:
-            ctx = ssl.create_default_context(cafile=self._tls_ca_certs)
-            tls = ctx
-
-        async def _connect():
-            self._client = zmqtt.create_client(
-                host,
-                port,
-                client_id=self._client_id,
-                keepalive=keepalive,
-                clean_session=self._clean_session,
-                tls=tls,
-                version=version,
-            )
-            await self._client.connect()
-            self._connected = True
-            self._fire_on_connect(flags={}, reason_code=0, properties=None)
-
-        self._bridge.run(_connect())
+            tls = ssl.create_default_context(cafile=self._tls_ca_certs)
+        self._client = zmqtt.create_client(
+            host,
+            port,
+            client_id=self._client_id,
+            keepalive=keepalive,
+            clean_session=self._clean_session,
+            tls=tls,
+            version="5.0" if self._protocol == "MQTTv5" else "3.1.1",
+        )
+        await self._client.connect()
+        self._connected = True
+        self._fire_on_connect(flags={}, reason_code=0, properties=None)
 
     async def _message_pump(self) -> None:
         # Activated after first subscribe via _ensure_subscription_pump.
@@ -150,24 +155,72 @@ class ZmqttAdapter(BridgedAdapterBase):
                     )
 
         sub = self._client.subscribe(topic, qos=qos_enum)
-        self._bridge.create_task(_pump(sub))
+        # Native mode has no bridge: the running loop is the client's own.
+        if self._bridge is not None:
+            self._bridge.create_task(_pump(sub))
+        else:
+            asyncio.ensure_future(_pump(sub))
+
+    async def adisconnect(self) -> None:
+        self._stopping = True
+        try:
+            await self._client.disconnect()
+        finally:
+            self._connected = False
 
     def disconnect(self) -> None:
         if self._client is None or not self._connected:
             return
         self._ensure_bridge()
-
-        async def _disconnect():
-            self._stopping = True
-            try:
-                await self._client.disconnect()
-            finally:
-                self._connected = False
-
         try:
-            self._bridge.run(_disconnect(), timeout=10.0)
+            self._bridge.run(self.adisconnect(), timeout=10.0)
         except Exception:  # noqa: BLE001
             self._connected = False
+
+    def _publish_kwargs(self, qos: int, retain: bool, properties: Any) -> dict:
+        import zmqtt
+
+        kwargs: dict[str, Any] = {"qos": zmqtt.QoS(qos), "retain": retain}
+        if properties is not None and self._protocol == "MQTTv5":
+            props = properties
+            if isinstance(properties, dict):
+                props = zmqtt.PublishProperties(
+                    content_type=properties.get("content_type"),
+                    message_expiry_interval=properties.get("message_expiry_interval"),
+                    correlation_data=properties.get("correlation_data"),
+                    response_topic=properties.get("response_topic"),
+                    payload_format_indicator=properties.get("payload_format_indicator"),
+                    user_properties=tuple(properties.get("user_property") or ()),
+                )
+            kwargs["properties"] = props
+        return kwargs
+
+    async def apublish(
+        self,
+        topic: str,
+        payload: Any = None,
+        qos: int = 0,
+        retain: bool = False,
+        properties: Any = None,
+    ) -> Optional[int]:
+        """Await one publish to completion; the await *is* the completion."""
+        client = self._client
+        if client is None or not self._connected:
+            raise RuntimeError("zmqtt client is not connected")
+        await client.publish(
+            topic, b"" if payload is None else payload,
+            **self._publish_kwargs(qos, retain, properties),
+        )
+        return self.alloc_mid()
+
+    async def asubscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
+        client = self._client
+        if client is None or not self._connected:
+            raise RuntimeError("zmqtt client is not connected")
+        await self._ensure_subscription_pump(topic, qos)
+        mid = self.alloc_mid()
+        self._fire_on_subscribe(mid, [qos], None)
+        return SubscribeResult(rc=0, mid=mid)
 
     def publish(
         self,

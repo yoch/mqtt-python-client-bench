@@ -53,6 +53,8 @@ class AiomqttAdapter(BridgedAdapterBase):
             io_model="asyncio_bridged",
             implementation_language="python",
             completion_mechanism="awaited",
+            native_async=True,
+            publish_sync_on_loop=False,
             synthetic_mids=True,
             notes=cls._NOTES,
             unimplemented=[],
@@ -113,9 +115,18 @@ class AiomqttAdapter(BridgedAdapterBase):
         return aiomqtt.ProtocolVersion.V311
 
     def connect(self, host: str, port: int, keepalive: int = 60) -> None:
+        self._ensure_bridge()
+        self._bridge.run(self.aconnect(host, port, keepalive))
+
+    async def aconnect(self, host: str, port: int, keepalive: int = 60) -> None:
+        """The library calls, on whichever loop is running.
+
+        The sync facade hands this to the bridge; the native driver awaits it on
+        the role worker's own loop. One call site either way, so the two paths
+        cannot drift into measuring different things.
+        """
         import aiomqtt
 
-        self._ensure_bridge()
         self._stopping = False
         tls_params = None
         if self._tls_ca_certs:
@@ -148,26 +159,23 @@ class AiomqttAdapter(BridgedAdapterBase):
         else:
             kwargs["clean_session"] = self._clean_session
 
-        async def _connect():
-            self._client = aiomqtt.Client(**kwargs)
-            # Skip the per-publish pending-calls warning branch entirely.
-            self._client.pending_calls_threshold = 1 << 30
-            await self._client.__aenter__()
-            # aiomqtt drives paho's raw socket itself (Nagle left on); align
-            # with asyncio clients which enable TCP_NODELAY by default.
-            # aiomqtt claims on_socket_open for its loop glue, so set the
-            # option on the live socket instead.
-            try:
-                sock = self._client._client.socket()  # noqa: SLF001
-                if sock is not None:
-                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            except (OSError, ValueError, AttributeError):
-                pass
-            self._connected = True
-            self._fire_on_connect(flags={}, reason_code=0, properties=None)
-            self._start_pump()
-
-        self._bridge.run(_connect())
+        self._client = aiomqtt.Client(**kwargs)
+        # Skip the per-publish pending-calls warning branch entirely.
+        self._client.pending_calls_threshold = 1 << 30
+        await self._client.__aenter__()
+        # aiomqtt drives paho's raw socket itself (Nagle left on); align
+        # with asyncio clients which enable TCP_NODELAY by default.
+        # aiomqtt claims on_socket_open for its loop glue, so set the
+        # option on the live socket instead.
+        try:
+            sock = self._client._client.socket()  # noqa: SLF001
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except (OSError, ValueError, AttributeError):
+            pass
+        self._connected = True
+        self._fire_on_connect(flags={}, reason_code=0, properties=None)
+        self._start_pump()
 
     async def _message_pump(self) -> None:
         assert self._client is not None
@@ -186,23 +194,45 @@ class AiomqttAdapter(BridgedAdapterBase):
             if not self._stopping:
                 raise
 
+    async def adisconnect(self) -> None:
+        await self._stop_pump()
+        client = self._client
+        self._client = None
+        self._connected = False
+        if client is not None:
+            await client.__aexit__(None, None, None)
+
     def disconnect(self) -> None:
         if self._client is None or not self._connected:
             return
         self._ensure_bridge()
-
-        async def _disconnect():
-            await self._stop_pump()
-            client = self._client
-            self._client = None
-            self._connected = False
-            if client is not None:
-                await client.__aexit__(None, None, None)
-
         try:
-            self._bridge.run(_disconnect(), timeout=10.0)
+            self._bridge.run(self.adisconnect(), timeout=10.0)
         except Exception:  # noqa: BLE001
             self._connected = False
+
+    async def apublish(
+        self,
+        topic: str,
+        payload: Any = None,
+        qos: int = 0,
+        retain: bool = False,
+        properties: Any = None,
+    ) -> Optional[int]:
+        """Await one publish to completion; the await *is* the completion.
+
+        aiomqtt has no publish callback, so there is nothing to correlate: the
+        awaited return is the QoS-appropriate acknowledgement. The native driver
+        accounts the completion where this returns.
+        """
+        client = self._client
+        if client is None or not self._connected:
+            raise RuntimeError("aiomqtt client is not connected")
+        kwargs: dict[str, Any] = {"payload": payload, "qos": qos, "retain": retain}
+        if properties is not None:
+            kwargs["properties"] = properties
+        await client.publish(topic, **kwargs)
+        return self.alloc_mid()
 
     def publish(
         self,
@@ -229,6 +259,16 @@ class AiomqttAdapter(BridgedAdapterBase):
 
         self.schedule_coro(_publish())
         return PublishResult(rc=0, mid=mid)
+
+    async def asubscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
+        client = self._client
+        if client is None or not self._connected:
+            raise RuntimeError("aiomqtt client is not connected")
+        result = await client.subscribe(topic, qos=qos)
+        grants = list(result) if isinstance(result, (list, tuple)) else [0]
+        mid = self.alloc_mid()
+        self._fire_on_subscribe(mid, grants, None)
+        return SubscribeResult(rc=0, mid=mid)
 
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
         mid = self.alloc_mid()

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import re
+import threading
+import time
 import sys
 import unittest
 from pathlib import Path
@@ -13,6 +16,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from mqtt_client_bench.adapters import registry  # noqa: E402
+from mqtt_client_bench.adapters.base import AdapterCapabilities  # noqa: E402
+from mqtt_client_bench.adapters.native import NativeAsyncAdapter  # noqa: E402
+from mqtt_client_bench.roles import publisher  # noqa: E402
 from mqtt_client_bench.adapters.registry import (  # noqa: E402
     EXPERIMENTAL_CLIENTS,
     STABLE_CLIENTS,
@@ -2610,6 +2617,242 @@ class DualProtocolTests(unittest.TestCase):
             self.assertIn("pub_qos_sweep_telemetry · MQTTv311", index)
             self.assertIn("pub_qos_sweep_telemetry · MQTTv5", index)
             self.assertIn("comparable only within the same protocol", index)
+
+
+
+
+class _FakeSyncOnLoopAdapter:
+    """A client that admits a publish on the loop and acknowledges it later.
+
+    Stands in for mqttium and gmqtt so the loop can be measured with no library
+    and no socket in the way.
+    """
+
+    def __init__(self, complete_after: int = 1):
+        self._complete_after = max(1, complete_after)
+        self._pending: list[int] = []
+        self._mid = 0
+        self.on_connect = None
+        self.on_publish = None
+        self.on_message = None
+
+    @classmethod
+    def capabilities(cls):
+        return AdapterCapabilities(name="fake-sync-on-loop", native_async=True, publish_sync_on_loop=True)
+
+    def publish_nowait(self, topic, payload=None, qos=0, retain=False, properties=None):
+        self._mid = 1 if self._mid >= 65535 else self._mid + 1
+        mid = self._mid
+        self._pending.append(mid)
+        if len(self._pending) >= self._complete_after:
+            for done in self._pending:
+                if self.on_publish is not None:
+                    self.on_publish(self, None, done, 0, None)
+            self._pending.clear()
+        return mid
+
+
+class _FakeAwaitedAdapter:
+    """A client whose only publish API is awaitable, with a fixed service time."""
+
+    def __init__(self, delay_s: float = 0.001):
+        self._delay = delay_s
+        self._mid = 0
+        self.concurrent = 0
+        self.max_concurrent = 0
+        self.on_connect = None
+        self.on_publish = None
+        self.on_message = None
+
+    @classmethod
+    def capabilities(cls):
+        return AdapterCapabilities(name="fake-awaited", native_async=True, publish_sync_on_loop=False)
+
+    async def publish(self, topic, payload=None, qos=0, retain=False, properties=None):
+        self.concurrent += 1
+        self.max_concurrent = max(self.max_concurrent, self.concurrent)
+        try:
+            await asyncio.sleep(self._delay)
+        finally:
+            self.concurrent -= 1
+        self._mid = 1 if self._mid >= 65535 else self._mid + 1
+        return self._mid
+
+
+class NativeAsyncPathTests(unittest.TestCase):
+    """The publish path that runs on the role worker's own loop.
+
+    These guard the property the path exists for: the harness must not charge a
+    client for work the harness did, and it must not quietly shrink a client's
+    in-flight window. Both failures look like a slow library.
+    """
+
+    @staticmethod
+    def _state():
+        return {
+            "offered": 0, "submitted": 0, "sync_rejected": 0,
+            "completed_success": 0, "completed_failed": 0,
+            "missed_due_to_backpressure": 0,
+            "publish_calls": 0, "publish_accepted": 0, "publish_rejected": 0,
+            "protocol_completed": 0, "protocol_failed": 0,
+            "socket_completed_qos0": 0,
+            "completed_in_window": 0, "completed_during_drain": 0,
+            "latencies_ns": ReservoirSampler(1000, seed=11),
+            "scheduler_lags_ns": ReservoirSampler(1000, seed=29),
+            "inflight_local": 0,
+            "phase": "measure",
+            "mid_send_ns": {}, "early_acks": {},
+            "warmup_drain_ok": True, "seen_mids_inflight": set(),
+            "gate_waiter": None, "loop_expired": False,
+            "pending_send_ns": None, "completed_inline": None,
+        }
+
+    @staticmethod
+    def _loop_kwargs(**over):
+        kwargs = dict(
+            topic="bench/t", qos=1, body=b"x" * 64, corpus=[],
+            run_id=b"testrun1", outstanding=8, cadence="capacity",
+            until=time.perf_counter() + 0.25, target_rate=None,
+            properties_builder=lambda: None, track_sequences=False,
+        )
+        kwargs.update(over)
+        return kwargs
+
+    def test_registry_and_capabilities_agree(self):
+        """A client is driven natively only if it declares it can be.
+
+        The two lists drifting apart is how a half-migrated client would end up
+        on an untested path without anyone noticing.
+        """
+        for name, cls in registry._ASYNC_ADAPTERS.items():
+            self.assertTrue(
+                cls.capabilities().native_async,
+                f"{name} has a native adapter but does not declare native_async",
+            )
+        for name, cls in registry._ADAPTERS.items():
+            if cls.capabilities().native_async:
+                self.assertIn(
+                    name, registry._ASYNC_ADAPTERS,
+                    f"{name} declares native_async with no native adapter registered",
+                )
+
+    def test_every_bridged_adapter_exposes_its_coroutines(self):
+        """One call site per library, so the two drive modes cannot diverge."""
+        for name, cls in registry._ADAPTERS.items():
+            if not cls.capabilities().async_bridged:
+                continue
+            native = registry._ASYNC_ADAPTERS.get(name)
+            if native is None or not issubclass(native, NativeAsyncAdapter):
+                continue  # hand-written native adapter, checked by its own tests
+            for method in ("aconnect", "apublish", "asubscribe", "adisconnect"):
+                self.assertTrue(
+                    callable(getattr(cls, method, None)),
+                    f"{name} is driven natively through the generic wrapper but "
+                    f"does not expose {method}()",
+                )
+
+    def test_sync_on_loop_respects_the_outstanding_window(self):
+        """The gate is the scenario's, not the loop's convenience."""
+        outstanding = 8
+        adapter = _FakeSyncOnLoopAdapter(complete_after=4)
+        state = self._state()
+        adapter.on_publish = publisher._make_on_publish(state, 1, lock=None)
+        peak = []
+
+        async def drive():
+            task = asyncio.ensure_future(
+                publisher._run_publish_loop_async(
+                    adapter, state, **self._loop_kwargs(outstanding=outstanding)
+                )
+            )
+            while not task.done():
+                peak.append(state["inflight_local"])
+                await asyncio.sleep(0.005)
+            return await task
+
+        asyncio.new_event_loop().run_until_complete(drive())
+        self.assertLessEqual(max(peak, default=0), outstanding)
+        self.assertGreater(state["completed_success"], 0)
+        self.assertEqual(state["offered"], state["submitted"])
+
+    def test_awaited_shape_keeps_the_window_full(self):
+        """An await-only API still gets `outstanding` publishes in flight.
+
+        Awaiting one publish before starting the next would pin the window at 1
+        and report round-trip time as capacity - a harness artefact that would
+        read as a library being four times slower than it is.
+        """
+        outstanding = 8
+        adapter = _FakeAwaitedAdapter(delay_s=0.002)
+        state = self._state()
+
+        async def drive():
+            return await publisher._run_publish_loop_async(
+                adapter, state, **self._loop_kwargs(outstanding=outstanding)
+            )
+
+        asyncio.new_event_loop().run_until_complete(drive())
+        self.assertEqual(adapter.max_concurrent, outstanding)
+        self.assertGreater(state["completed_success"], 0)
+
+    def test_awaited_shape_releases_every_slot(self):
+        """A cancelled publish must not leave its slot held.
+
+        It did, once: the workers were cancelled mid-await at the end of the
+        window, the window never drained, and the run was failed as
+        `warmup_drain_timeout` - the harness's fault, reported as the client's.
+        """
+        adapter = _FakeAwaitedAdapter(delay_s=5.0)  # never completes in time
+        state = self._state()
+
+        async def drive():
+            return await publisher._run_publish_loop_async(
+                adapter, state, **self._loop_kwargs(until=time.perf_counter() + 0.1)
+            )
+
+        asyncio.new_event_loop().run_until_complete(drive())
+        self.assertEqual(state["inflight_local"], 0)
+
+    def test_harness_cost_per_message_stays_under_budget(self):
+        """The harness's own per-message cost, measured against a null client.
+
+        The cost matters because it is *fixed* per message, so it does not tax
+        clients equally: it inflates a fast client's period by a larger fraction
+        than a slow one's, which compresses - and can reorder - a ranking.
+
+        Where it stands, measured on this loop with no library in the way:
+        about 4.8 us, against 18.5 us through the bridge this path replaced.
+        Component costs: completion accounting ~1.45 us, reservoir sample
+        ~0.49 us, header stamp ~0.44 us, publish call ~0.22 us, three clock
+        reads ~0.22 us. The target is 5% of the fastest measured client's
+        period (~2 us at 25,000 msgs/s) and it is *not* met yet; at 4.8 us the
+        distortion between a 46,000 msgs/s client and a 6,000 msgs/s one is
+        about 19%, down from 66%.
+
+        The bound below is set to catch a regression toward bridged cost, not
+        to certify the target. Tighten it as the remaining cost comes out.
+        """
+        adapter = _FakeSyncOnLoopAdapter(complete_after=1)
+        state = self._state()
+        adapter.on_publish = publisher._make_on_publish(state, 0, lock=None)
+
+        async def drive():
+            started = time.perf_counter()
+            await publisher._run_publish_loop_async(
+                adapter, state,
+                **self._loop_kwargs(qos=0, until=started + 0.5, outstanding=64)
+            )
+            return time.perf_counter() - started
+
+        elapsed = asyncio.new_event_loop().run_until_complete(drive())
+        sent = state["offered"]
+        self.assertGreater(sent, 1000, "null-client loop did not run enough messages")
+        ns_per_message = (elapsed * 1e9) / sent
+        self.assertLess(
+            ns_per_message, 7000.0,
+            f"harness costs {ns_per_message:.0f} ns/message; the bridged path it "
+            "replaced cost 18500 ns, so this is a regression toward it",
+        )
 
 
 if __name__ == "__main__":

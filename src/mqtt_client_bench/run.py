@@ -100,6 +100,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         output=args.output,
         load_profile_path=args.load_profile,
         seed=args.seed,
+        publish_path=getattr(args, "publish_path", "native"),
     )
     if not args.output:
         # Compact stdout summary.
@@ -276,6 +277,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--load-profile", help="JSON from calibrate")
     run_p.add_argument("--output")
     run_p.add_argument("--seed", type=int, default=42)
+    run_p.add_argument(
+        "--publish-path",
+        choices=("native", "sync"),
+        default="native",
+        help="Diagnostic A/B: force a native-capable client through the sync facade",
+    )
     run_p.set_defaults(func=cmd_run)
 
     matrix_p = sub.add_parser(
