@@ -70,6 +70,7 @@ class AwscrtAdapter:
             io_model="crt_event_loop",
             implementation_language="native",
             # mqtt3 QoS0 and all mqtt5 publishes use counter-allocated mids.
+            completion_mechanism="callback",
             synthetic_mids=True,
             # aws-c-io exposes no TCP_NODELAY knob and hides the fd; RTT
             # ping-pong would measure an ~84 ms Nagle plateau, so refuse it.
@@ -93,6 +94,7 @@ class AwscrtAdapter:
             "stability": caps.stability,
             "io_model": caps.io_model,
             "implementation_language": caps.implementation_language,
+            "completion_mechanism": caps.completion_mechanism,
             "synthetic_mids": caps.synthetic_mids,
         }
 

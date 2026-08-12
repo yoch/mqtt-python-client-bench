@@ -64,6 +64,15 @@ class AdapterCapabilities:
     stability: str = "stable"  # stable | experimental
     io_model: str = "sync"  # sync | asyncio_bridged | crt_event_loop
     implementation_language: str = "python"  # python | native
+    # How a QoS>=1 completion reaches the role worker. Not cosmetic: an adapter
+    # whose coroutine stays suspended for the whole round trip pays a resume per
+    # message that one correlating the ack in a callback does not, measured at
+    # 11-34% on this bench and growing with load. Five of the six bridged
+    # clients are "awaited" because `await client.publish(...)` is the only API
+    # their library offers; gmqtt and mqttium expose a cheaper path and take it.
+    # Rule: every adapter uses the cheapest mechanism its library exposes, and
+    # records which one, so a reader can see who was forced onto the slow path.
+    completion_mechanism: str = "sync"  # sync | callback | awaited
     synthetic_mids: bool = False
     # Whether the transport runs with TCP_NODELAY (set by the adapter or by the
     # runtime, e.g. asyncio). Without it, request/response scenarios measure a

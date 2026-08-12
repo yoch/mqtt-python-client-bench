@@ -399,6 +399,29 @@ class AdapterRegistryTests(unittest.TestCase):
         for attr in ("_connection", "_persistent_storage", "_remove_message_from_query"):
             self.assertTrue(hasattr(client, attr), f"gmqtt no longer exposes {attr}")
 
+    def test_every_adapter_declares_how_completions_reach_the_worker(self):
+        """An adapter that suspends a coroutine per publish pays a resume the
+        others do not — measured at 11-34% here, growing with load. Five of six
+        bridged clients are forced onto that path by their library's API; the
+        rule is that anyone with a cheaper path takes it, and that everyone
+        records which path they are on, so a ranking can be read honestly."""
+        from mqtt_client_bench.adapters.registry import _ADAPTERS, adapter_identity, get_adapter_class
+
+        expected = {
+            "paho": "sync", "mqttium-compat": "sync",
+            "gmqtt": "callback", "awscrt": "callback", "mqttium": "callback",
+            "aiomqtt": "awaited", "amqtt": "awaited", "zmqtt": "awaited",
+            "aiomqtt3": "awaited",
+        }
+        self.assertEqual(set(expected), set(_ADAPTERS), "a client gained or lost a declaration")
+        for name, want in expected.items():
+            caps = get_adapter_class(name).capabilities()
+            self.assertEqual(caps.completion_mechanism, want, name)
+            self.assertIn(caps.completion_mechanism, ("sync", "callback", "awaited"), name)
+
+        # And it must reach the result document, or a reader cannot see it.
+        self.assertEqual(adapter_identity("gmqtt")["completion_mechanism"], "callback")
+
     def test_max_queued_bytes_only_reaches_declaring_adapters(self):
         # A byte-bounded outbound queue silently becomes the binding window at
         # large payloads. The knob equalises that, so it must reach every
@@ -419,6 +442,44 @@ class AdapterRegistryTests(unittest.TestCase):
         for name in set(_ADAPTERS) - declaring:
             params = inspect.signature(get_adapter_class(name).create).parameters
             self.assertNotIn("max_queued_bytes", params, name)
+
+    def test_mqttium_keeps_the_qos0_fast_path_unarmed(self):
+        """mqttium takes its direct QoS0 transport write only while on_publish
+        is None. The adapter needs that callback to correlate QoS>=1 acks, and
+        installing it at connect cost 38% of the QoS0 rate — 39,118 msgs/s down
+        to 24,039 — because it disarmed the fast path for every point. QoS is
+        fixed per measurement point, so the callback is installed by the first
+        QoS>=1 publish and a QoS0 point must never arm it. Asserted rather than
+        inferred from a rate, which run-to-run noise would hide."""
+        from mqtt_client_bench.adapters.mqttium import MqttiumAdapter
+
+        class StubReceipt:
+            mid = 7
+
+        class StubClient:
+            def __init__(self):
+                self.on_publish = None
+                self.published = 0
+
+            def publish_nowait(self, *a, **k):
+                self.published += 1
+                return StubReceipt()
+
+        for qos, armed in ((0, False), (1, True), (2, True)):
+            with self.subTest(qos=qos):
+                adapter = MqttiumAdapter()
+                stub = StubClient()
+                adapter._client = stub
+                adapter._connected = True
+                adapter._on_publish_cb = lambda mid, reason=None: None
+                adapter.schedule_call = lambda fn: fn()
+                adapter.schedule_coro = lambda coro: coro.close()
+                adapter.publish("t", b"x" * 64, qos=qos)
+                self.assertEqual(stub.published, 1, "the publish must reach the client")
+                self.assertEqual(
+                    stub.on_publish is not None, armed,
+                    f"qos={qos}: on_publish {'must' if armed else 'must not'} be armed",
+                )
 
     def test_mqttium_private_api_shape(self):
         # mqttium moves fast (0.1.0a4 -> 0.2.0b2 in days) and the compat adapter
