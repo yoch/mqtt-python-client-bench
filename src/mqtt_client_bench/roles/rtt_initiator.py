@@ -222,12 +222,20 @@ def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, unt
         seq += 1
         send_ns = time.perf_counter_ns()
         payload = encode_header(run_id, 1, seq, seq, send_ns)
+
+        # Register the correlation before entering the client API. A synchronous
+        # or cross-thread publish handoff may give the network loop enough time
+        # to receive the response before publish() returns; registering after the
+        # call turns that valid response into an unmatchable orphan.
+        with state["lock"]:
+            state["inflight"][seq] = send_ns
         info = adapter.publish(topic, payload=payload, qos=qos, retain=False)
-        if info.rc == 0:
-            with state["lock"]:
-                state["inflight"][seq] = send_ns
+        with state["lock"]:
+            if info.rc == 0:
                 if state["phase"] == "measure":
                     state["sent_in_window"] += 1
+            else:
+                state["inflight"].pop(seq, None)
 
 
 if __name__ == "__main__":
