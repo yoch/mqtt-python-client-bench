@@ -45,6 +45,9 @@ echo "CAMPAIGN start $(date -Is) clients=$CLIENTS" | tee -a logs/campaign.log
 # Set FORCE=1 to redo everything from scratch.
 FORCE="${FORCE:-0}"
 
+# Identifies the measurement path that produced a result; see provenance.py.
+HARNESS_STAMP="$(python -c 'from mqtt_client_bench.harness import HARNESS_FINGERPRINT; print(HARNESS_FINGERPRINT)')"
+
 IFS=',' read -ra CLIENT_LIST <<<"$CLIENTS"
 
 # A calibration is reusable only when the harness itself would accept it, so the
@@ -145,6 +148,7 @@ import json, sys
 from pathlib import Path
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario
 from mqtt_client_bench.adapters.registry import adapter_identity
+from mqtt_client_bench.harness import HARNESS_FINGERPRINT
 
 scenario, clients = sys.argv[1], sys.argv[2].split(",")
 expected = len(expand_scenario(SCENARIO_BY_NAME[scenario], "standard"))
@@ -177,6 +181,14 @@ for client in clients:
     installed = adapter_identity(client).get("client_version")
     if recorded and installed and recorded != installed:
         print(f"    {client} {scenario}: measured on {recorded}, installed {installed}", file=sys.stderr)
+        raise SystemExit(1)
+    # The client can sit still while the harness moves under it. A measurement
+    # path that changed makes the old numbers incomparable with the new ones,
+    # and the client-version check above cannot see that.
+    stamps = {r.get("harness_fingerprint") for b in blocks for r in (b.get("runs") or [])}
+    if stamps != {HARNESS_FINGERPRINT}:
+        seen = ", ".join(sorted(str(x) for x in stamps))
+        print(f"    {client} {scenario}: harness {seen or 'unstamped'}, now {HARNESS_FINGERPRINT}", file=sys.stderr)
         raise SystemExit(1)
 raise SystemExit(0)
 PY
@@ -235,7 +247,12 @@ fi
 # latency arrays, and parsing one just to decide whether to skip it would cost
 # seconds and gigabytes.
 compare_complete() {  # <output-path>
-  [[ -s "$1" ]] && grep -q '"started_at"' "$1"
+  [[ -s "$1" ]] || return 1
+  grep -q '"started_at"' "$1" || return 1
+  # Same rule as the scenarios: an ABBA produced by a different measurement path
+  # is not comparable with the matrix it is published beside. Both compare files
+  # were silently reused across a harness rewrite before this existed.
+  grep -q "\"harness_fingerprint\": \"${HARNESS_STAMP}\"" "$1"
 }
 
 run_abba() {  # <label> <clients> <output>

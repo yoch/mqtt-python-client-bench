@@ -55,6 +55,7 @@ from mqtt_client_bench.sampling import (
     DEFAULT_SEQUENCE_EXACT_LIMIT,
     integrity_from_summaries,
 )
+from mqtt_client_bench.provenance import harness_fingerprint
 from mqtt_client_bench.scenarios import (
     SCENARIO_BY_NAME,
     default_runs,
@@ -89,6 +90,11 @@ from mqtt_client_bench.workloads import (
 # Extra wait so the last $SYS tick (sys_interval = 1 s) lands before the
 # after-snapshot is taken.
 SYS_SETTLE_S = 1.5
+
+# Computed once: a result is only comparable with another from the same
+# measurement path (see provenance.py).
+HARNESS_FINGERPRINT = harness_fingerprint()
+
 
 # Topologies where a single SUT publisher is the *only* source of PUBLISHes, so
 # the broker's received-publish counter can be compared with what the adapter
@@ -609,6 +615,7 @@ def run_point(
     if missing:
         return {
             "schema_version": 1,
+        "harness_fingerprint": HARNESS_FINGERPRINT,
             "run_id": run_id,
             "started_at": started_at,
             "finished_at": _utc_now(),
@@ -631,6 +638,7 @@ def run_point(
         except ValueError as exc:
             return {
                 "schema_version": 1,
+        "harness_fingerprint": HARNESS_FINGERPRINT,
                 "run_id": run_id,
                 "started_at": started_at,
                 "finished_at": _utc_now(),
@@ -652,6 +660,7 @@ def run_point(
         kind = "rtt" if point.get("topology") == "application_rtt" else "publish"
         return {
             "schema_version": 1,
+        "harness_fingerprint": HARNESS_FINGERPRINT,
             "run_id": run_id,
             "started_at": started_at,
             "finished_at": _utc_now(),
@@ -669,6 +678,7 @@ def run_point(
     if network != "localhost" and not net_result.get("applied"):
         return {
             "schema_version": 1,
+        "harness_fingerprint": HARNESS_FINGERPRINT,
             "run_id": run_id,
             "started_at": started_at,
             "finished_at": _utc_now(),
@@ -841,6 +851,7 @@ def run_point(
                 result = _run_connect_churn(point, client, client_path, host, endpoint_port, use_tls, certs)
             return {
                 "schema_version": 1,
+        "harness_fingerprint": HARNESS_FINGERPRINT,
                 "run_id": run_id,
                 "started_at": started_at,
                 "finished_at": _utc_now(),
@@ -860,6 +871,7 @@ def run_point(
                 result = _run_fleet_idle(point, client, client_path, host, endpoint_port, use_tls, certs)
             return {
                 "schema_version": 1,
+        "harness_fingerprint": HARNESS_FINGERPRINT,
                 "run_id": run_id,
                 "started_at": started_at,
                 "finished_at": _utc_now(),
@@ -877,6 +889,7 @@ def run_point(
         else:
             return {
                 "schema_version": 1,
+        "harness_fingerprint": HARNESS_FINGERPRINT,
                 "run_id": run_id,
                 "started_at": started_at,
                 "finished_at": _utc_now(),
@@ -1241,6 +1254,7 @@ def run_point(
 
         return {
             "schema_version": 1,
+        "harness_fingerprint": HARNESS_FINGERPRINT,
             "run_id": run_id,
             "started_at": started_at,
             "finished_at": _utc_now(),
@@ -1390,6 +1404,7 @@ def _scenario_payload(
     """Build the per-client result document consumed by the report."""
     payload = {
         "schema_version": 1,
+        "harness_fingerprint": HARNESS_FINGERPRINT,
         "scenario": name,
         "profile": profile,
         "runs": runs,
@@ -1873,6 +1888,7 @@ def calibrate(
     identity = adapter_identity(client, client_path)
     payload = {
         "schema_version": 1,
+        "harness_fingerprint": HARNESS_FINGERPRINT,
         "client": client,
         "client_path": str(Path(client_path).resolve()) if client_path else None,
         "client_identity": identity,
@@ -2019,6 +2035,7 @@ def compare_clients(
     }
     payload = {
         "schema_version": 1,
+        "harness_fingerprint": HARNESS_FINGERPRINT,
         "scenario": scenario,
         "profile": profile,
         "point": points[0] if len(points) == 1 else None,
