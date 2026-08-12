@@ -195,6 +195,18 @@ limits, raise `loadgen_clients` **and** check that the broker is not saturated.
 - **Requires**: `--load-profile` (or automatic calibration in `compare`).
 - **Invalidation**: `open_loop_rate_out_of_tolerance` when the achieved rate deviates > 2 % from target.
 
+### `puback_latency_fixed_rate`
+
+- **Goal**: PUBACK latency at **absolute** offered rates, identical for every client.
+- **Topology**: `publisher_only` · rates `1,000 / 2,500 / 5,000 / 10,000` msg/s · tag `dual_protocol`.
+- **Requires**: nothing — the rate is absolute, so no calibration is involved.
+- **Reading**: this is the scenario for comparing latency *between* clients. The
+  fraction-based `puback_latency_qos1` is not: it paces each client at a share of
+  its own ceiling, so a client with more headroom is offered a higher absolute
+  rate and compares unfavourably for that reason alone.
+- **Refusals**: a client that cannot sustain a rate is `offer_limited`, which is
+  the honest outcome and is more informative than a number.
+
 ### `rtt_capacity_qos1`
 
 - **Goal**: closed-loop capacity of application RTT pairs (same library on both sides).

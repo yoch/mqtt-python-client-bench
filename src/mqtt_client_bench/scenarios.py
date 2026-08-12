@@ -262,6 +262,27 @@ SCENARIOS: List[Scenario] = [
         variants=tuple({"load_fraction": f} for f in (0.50, 0.75, 0.90, 1.00)),
     ),
     Scenario(
+        # Latency at a fraction of each client's *own* capacity answers "how does
+        # this client behave near its own ceiling", and that is a real question —
+        # but it is not a cross-client comparison, because a faster client is
+        # thereby offered a higher absolute rate and sits further along its own
+        # latency-versus-load curve. Reading the fraction-based table across
+        # clients produced a published claim that MQTTium had a 2.95x latency
+        # floor; at a matched absolute rate the ratio was 1.24x, and the whole
+        # difference was the rate. This scenario offers every client the same
+        # absolute rates, so the comparison is equal by construction and a client
+        # that cannot sustain one simply comes back inconclusive.
+        name="puback_latency_fixed_rate",
+        suite="core",
+        tags=("representative", "dual_protocol"),
+        topology="publisher_only",
+        description="Open-loop PUBACK latency at absolute offered rates, identical for every client.",
+        qos_publish=1,
+        payload="telemetry256",
+        cadence="loaded75",
+        variants=tuple({"target_rate": r} for r in (1000.0, 2500.0, 5000.0, 10000.0)),
+    ),
+    Scenario(
         # The bench measured publisher-side PUBACK latency and full application
         # RTT, but never the one-way broker -> subscriber delivery latency, which
         # is what a consumer-shaped application actually experiences. The
