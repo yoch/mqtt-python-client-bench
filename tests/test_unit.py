@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import re
 import sys
 import unittest

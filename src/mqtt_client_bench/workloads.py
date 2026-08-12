@@ -54,6 +54,24 @@ def payload_tail(body: bytes) -> bytes:
     return body[HEADER_SIZE:] if len(body) > HEADER_SIZE else b""
 
 
+def decode_sequence_send_ns(payload: bytes):
+    """Read just the two fields a subscriber needs, without building a dict.
+
+    ``decode_header`` allocates a five-key dict and a 40-byte slice for every
+    delivered message. The subscriber only ever reads ``sequence`` and
+    ``send_ns``, and it reads them once per message at ingress rates, so both
+    allocations are pure per-message harness cost. ``unpack_from`` reads in
+    place; the magic is still checked, and a bad header raises ValueError
+    exactly as before so the callers' except clauses are unchanged.
+    """
+    if len(payload) < HEADER_SIZE:
+        raise ValueError("payload too short for header")
+    magic, _run_id, _pub, sequence, _corr, send_ns = HEADER_STRUCT.unpack_from(payload, 0)
+    if magic != HEADER_MAGIC:
+        raise ValueError("invalid payload magic")
+    return sequence, send_ns
+
+
 def decode_header(payload: bytes) -> dict:
     if len(payload) < HEADER_SIZE:
         raise ValueError("payload too short for header")
