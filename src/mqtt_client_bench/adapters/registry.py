@@ -67,7 +67,8 @@ def list_clients() -> List[dict]:
                 "stability": caps.stability,
                 "io_model": caps.io_model,
                 "implementation_language": caps.implementation_language,
-                "synthetic_mids": caps.synthetic_mids,
+                "completion_mechanism": caps.completion_mechanism,
+            "synthetic_mids": caps.synthetic_mids,
                 "unimplemented": list(caps.unimplemented),
                 "notes": caps.notes,
             }

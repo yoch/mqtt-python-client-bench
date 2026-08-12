@@ -63,6 +63,7 @@ class MqttiumCompatAdapter:
             stability="experimental",
             io_model="sync",
             implementation_language="python",
+            completion_mechanism="sync",
             synthetic_mids=True,
             tcp_nodelay=True,
             notes=(
@@ -92,6 +93,7 @@ class MqttiumCompatAdapter:
             "stability": caps.stability,
             "io_model": caps.io_model,
             "implementation_language": caps.implementation_language,
+            "completion_mechanism": caps.completion_mechanism,
             "synthetic_mids": caps.synthetic_mids,
             "display_note": caps.notes,
             "private_api": dict(cls._PRIVATE_API),

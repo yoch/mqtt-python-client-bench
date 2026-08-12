@@ -52,6 +52,7 @@ class AiomqttAdapter(BridgedAdapterBase):
             stability="stable",
             io_model="asyncio_bridged",
             implementation_language="python",
+            completion_mechanism="awaited",
             synthetic_mids=True,
             notes=cls._NOTES,
             unimplemented=[],
@@ -70,6 +71,7 @@ class AiomqttAdapter(BridgedAdapterBase):
             "stability": caps.stability,
             "io_model": caps.io_model,
             "implementation_language": caps.implementation_language,
+            "completion_mechanism": caps.completion_mechanism,
             "synthetic_mids": caps.synthetic_mids,
             "private_api": dict(cls._PRIVATE_API),
         }

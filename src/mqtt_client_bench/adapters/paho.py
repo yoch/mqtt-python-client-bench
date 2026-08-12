@@ -70,6 +70,7 @@ class PahoAdapter:
             v5_publish_properties=True,
             stability="stable",
             io_model="sync",
+            completion_mechanism="sync",
             implementation_language="python",
             notes="Eclipse Paho MQTT Python (callback API v2).",
         )
@@ -97,6 +98,7 @@ class PahoAdapter:
             "stability": caps.stability,
             "io_model": caps.io_model,
             "implementation_language": caps.implementation_language,
+            "completion_mechanism": caps.completion_mechanism,
             "synthetic_mids": caps.synthetic_mids,
         }
 

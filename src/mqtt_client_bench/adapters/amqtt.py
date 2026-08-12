@@ -44,6 +44,7 @@ class AmqttAdapter(BridgedAdapterBase):
             stability="stable",
             io_model="asyncio_bridged",
             implementation_language="python",
+            completion_mechanism="awaited",
             synthetic_mids=True,
             notes=cls._NOTES,
             unimplemented=[],
@@ -62,6 +63,7 @@ class AmqttAdapter(BridgedAdapterBase):
             "stability": caps.stability,
             "io_model": caps.io_model,
             "implementation_language": caps.implementation_language,
+            "completion_mechanism": caps.completion_mechanism,
             "synthetic_mids": caps.synthetic_mids,
         }
 

@@ -60,6 +60,7 @@ class GmqttAdapter(BridgedAdapterBase):
             implementation_language="python",
             # publish() returns synthetic mids; PUBACKs are translated back
             # from real packet ids via an on-loop mapping.
+            completion_mechanism="callback",
             synthetic_mids=True,
             notes=cls._NOTES,
             unimplemented=[],
@@ -78,6 +79,7 @@ class GmqttAdapter(BridgedAdapterBase):
             "stability": caps.stability,
             "io_model": caps.io_model,
             "implementation_language": caps.implementation_language,
+            "completion_mechanism": caps.completion_mechanism,
             "synthetic_mids": caps.synthetic_mids,
             "private_api": dict(cls._PRIVATE_API),
         }
