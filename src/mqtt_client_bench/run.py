@@ -152,6 +152,7 @@ def cmd_matrix(args: argparse.Namespace) -> int:
             output_dir=args.output_dir,
             load_profiles=load_profiles,
             seed=args.seed,
+            variant_index=args.variant_index,
         )
         for client, doc in result["documents"].items():
             medians = [
@@ -294,6 +295,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     matrix_p.add_argument("--output-dir", default="results", help="Where to write <client>-<scenario>.json")
     matrix_p.add_argument("--seed", type=int, default=42)
+    matrix_p.add_argument("--variant-index", type=int, default=None, help="Run a single variant index (default: all)")
     matrix_p.set_defaults(func=cmd_matrix)
 
     cal_p = sub.add_parser("calibrate", help="Create open-loop load profile from baseline capacity")

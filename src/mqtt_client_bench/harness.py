@@ -1434,6 +1434,7 @@ def run_matrix(
     client_paths: Optional[Dict[str, str]] = None,
     load_profiles: Optional[Dict[str, str]] = None,
     seed: int = 42,
+    variant_index: Optional[int] = None,
 ) -> dict:
     """Run several clients interleaved **within each point**, not one after another.
 
@@ -1453,6 +1454,10 @@ def run_matrix(
         raise ValueError("run_matrix needs at least two clients; use `run` for one")
     client_paths = client_paths or {}
     points = expand_scenario(scenario, profile)
+    if variant_index is not None:
+        # Used by the pre-launch validation, which needs to prove every role
+        # still runs without paying for a full sweep of variants.
+        points = [points[variant_index]]
     if network:
         for p in points:
             p["network"] = network
