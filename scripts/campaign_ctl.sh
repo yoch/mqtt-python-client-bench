@@ -27,6 +27,7 @@ UNIT="${UNIT:-mqtt-bench-campaign}"
 # barrier server to unwind; 30 s was not always enough, and the escalation past
 # it is SIGTERM, which skips that cleanup entirely.
 SIGINT_GRACE_S="${SIGINT_GRACE_S:-90}"
+VALIDATE_CHECK="$(cd "$(dirname "$0")" && pwd)/_validate_check.py"
 
 find_pgid() {
   local pid
@@ -141,6 +142,57 @@ cmd_stop() {
   echo "Resume later with: bash scripts/campaign_ctl.sh resume"
 }
 
+
+# Exercise the harness for real before committing 12 h to it.
+#
+# Every regression this project has hit was invisible to the unit suite and
+# visible in the first seconds of a run: a worker that died on a KeyError, an
+# adapter broken by a library bump, a config knob nothing honoured. The suite
+# passed in every one of those cases. So the gate is not "do the tests pass" but
+# "does every role, on every client, still produce a result".
+#
+# Validity is deliberately NOT the criterion: a smoke run shares cores and
+# saturates the broker, so `inconclusive` is normal and says nothing about
+# correctness. A worker that produced no result at all is the failure that
+# matters, and it is exactly what a code regression looks like.
+VALIDATE_SCENARIOS="${VALIDATE_SCENARIOS:-pub_qos_sweep_telemetry e2e_integrity rtt_capacity_qos1 sub_exact_telemetry}"
+
+cmd_validate() {
+  local clients="${CLIENTS:-paho,gmqtt,aiomqtt,amqtt,awscrt,zmqtt,mqttium,mqttium-compat}"
+  local tmp; tmp=$(mktemp -d)
+  local failed=0
+
+  echo "1/2 unit suite"
+  if ! python -m unittest tests.test_unit >"$tmp/tests.log" 2>&1; then
+    echo "  FAIL — see $tmp/tests.log"
+    tail -15 "$tmp/tests.log" | sed 's/^/     /'
+    return 1
+  fi
+  echo "  ok   $(grep -oE 'Ran [0-9]+ tests' "$tmp/tests.log" | head -1)"
+
+  echo "2/2 smoke: one scenario per topology, every client, first variant only"
+  for s in $VALIDATE_SCENARIOS; do
+    printf '  %-28s' "$s"
+    if ! python -m mqtt_client_bench.run matrix --clients "$clients" --scenario "$s" \
+         --profile smoke --runs 1 --variant-index 0 --output-dir "$tmp" \
+         >"$tmp/$s.log" 2>&1; then
+      echo "FAIL (see $tmp/$s.log)"; failed=1; continue
+    fi
+    local bad
+    bad=$(python "$VALIDATE_CHECK" "$tmp" "$s")
+    if [[ -n "$bad" ]]; then echo "FAIL  $bad"; failed=1; else echo "ok"; fi
+  done
+
+  if (( failed )); then
+    echo
+    echo "validation failed — logs in $tmp"
+    return 1
+  fi
+  rm -rf "$tmp"
+  echo
+  echo "validation passed: every role produced a result on every client"
+}
+
 # Refuse to start a campaign that is already doomed. A full run is ~6.5 h; every
 # one of these makes the harness mark runs inconclusive or risks the host, and
 # each is cheap to check now and expensive to discover afterwards.
@@ -229,6 +281,14 @@ cmd_resume() {
     echo "campaign is already running; nothing to do"
     return 0
   fi
+  echo "validation (a 12 h run deserves a few minutes of proof):"
+  if ! cmd_validate; then
+    echo
+    echo "refusing to start: the harness itself does not work. Fix it, or re-run with SKIP_VALIDATE=1"
+    [[ "${SKIP_VALIDATE:-0}" == "1" ]] || return 1
+    echo "SKIP_VALIDATE=1 set; starting anyway"
+  fi
+  echo
   echo "preflight:"
   if ! preflight; then
     echo
@@ -286,7 +346,8 @@ cmd_resume() {
 case "${1:-status}" in
   status) cmd_status ;;
   preflight|check) cmd_preflight ;;
+  validate) cmd_validate ;;
   stop|pause) cmd_stop ;;
   resume|start) cmd_resume ;;
-  *) echo "usage: $0 {status|preflight|stop|resume}" >&2; exit 2 ;;
+  *) echo "usage: $0 {status|preflight|validate|stop|resume}" >&2; exit 2 ;;
 esac

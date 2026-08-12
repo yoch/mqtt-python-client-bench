@@ -26,6 +26,7 @@ from mqtt_client_bench.workloads import (
     HEADER_SIZE,
     callback_match_topics,
     decode_header,
+    decode_sequence_send_ns,
     deep_topic,
     fleet_topics,
     long_topic,
@@ -94,31 +95,33 @@ def main(argv=None) -> int:
         to ``CLOCK_MONOTONIC`` on Linux, whose epoch is system-wide; the numbers
         would be meaningless on a platform with a per-process epoch.
         """
+        # One read of each shared slot: this runs once per delivered message at
+        # ingress rates, where every repeated dict lookup and every discarded
+        # allocation is harness cost charged to the client under test.
         state["subscriber_delivered"] += 1
-        if state["phase"] == "resume":
+        phase = state["phase"]
+        payload = msg.payload or b""
+        if phase == "resume":
             state["delivered_after_resume"] += 1
-        if state["phase"] in ("measure", "resume"):
+        if phase == "measure" or phase == "resume":
             state["delivered_in_window"] += 1
-            state["bytes_in_window"] += len(msg.payload or b"")
-            payload = msg.payload or b""
+            state["bytes_in_window"] += len(payload)
             if len(payload) >= HEADER_SIZE:
                 try:
-                    hdr = decode_header(payload)
-                    if hdr["sequence"] < (1 << 40):
-                        state["sequences"].add(hdr["sequence"])
-                        send_ns = hdr["send_ns"]
+                    sequence, send_ns = decode_sequence_send_ns(payload)
+                    if sequence < (1 << 40):
+                        state["sequences"].add(sequence)
                         if send_ns:
                             state["latencies_ns"].add(now - send_ns)
                 except ValueError:
                     pass
-        elif state["phase"] == "drain":
+        elif phase == "drain":
             state["delivered_during_drain"] += 1
             # Integrity must still account for in-flight messages arriving
             # after T1, otherwise the window edge shows up as false "missing".
-            payload = msg.payload or b""
             if len(payload) >= HEADER_SIZE:
                 try:
-                    sequence = decode_header(payload)["sequence"]
+                    sequence, _send_ns = decode_sequence_send_ns(payload)
                     if sequence < (1 << 40):
                         state["sequences"].add(sequence)
                 except ValueError:
