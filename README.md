@@ -301,6 +301,18 @@ docstrings, scenario descriptions, commit messages and report output.
 - `awscrt` cannot set `TCP_NODELAY` (aws-c-io hides the fd) → RTT scenarios
   refused; its publish/ingress numbers are unaffected (pipelined writes).
 - Sync facade overhead for asyncio clients is intentional and documented.
+- **Latency at a *fraction* of each client's own capacity is not a cross-client
+  comparison.** `puback_latency_qos1` and `application_rtt_qos1` pace each client
+  at 50-100 % of its *own* calibrated ceiling, which answers "how does this
+  client behave near its limit" — a real question, and the reason those
+  scenarios exist. But a faster client is thereby offered a higher absolute
+  rate and sits further along its own latency-versus-load curve, so reading
+  those tables across clients penalises exactly the clients with the most
+  headroom. Doing so produced a published claim that one client had a 2.95x
+  latency floor; measured at a matched absolute rate the ratio was 1.24x, and
+  the entire difference was the offered rate. For cross-client latency use
+  `puback_latency_fixed_rate`, which offers every client the same absolute
+  rates and lets a client that cannot sustain one come back inconclusive.
 - The `sub_*` scenarios are **load-generator bound on the reference host**, not
   client bound: every client lands within a few tens of msgs/s of the same
   ~30 300 ceiling, which is the ingress offer rather than a property of the
