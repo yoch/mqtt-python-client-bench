@@ -113,7 +113,17 @@ SUT_ONLY_PUBLISH_TOPOLOGIES = (
 # is meant to catch an adapter reporting completions for messages that never
 # reached the broker (QoS0 counted at an in-process queue), not to audit
 # individual messages.
-BROKER_RECONCILE_MIN_RATIO = 0.80
+# Both bounds are set from the observed distribution, not from intuition: across
+# 714 reconciled runs spanning nine clients and thirteen scenarios the ratio of
+# broker-received to adapter-completed spans 0.96 to 1.07, p99 at 1.05. The old
+# single bound of 0.80 therefore passed a run that lost a fifth of its
+# publications on the way to the broker, and there was no upper bound at all — a
+# ratio of 3.0 was accepted in silence, although it means the broker saw traffic
+# this run did not produce. Foreign traffic on the broker inflates the counter
+# and so masks a genuine drop: the check failed open, in the direction that
+# hides a fault.
+BROKER_RECONCILE_MIN_RATIO = 0.90
+BROKER_RECONCILE_MAX_RATIO = 1.20
 
 # Broker headroom. Above this the run still produces a number, but that number
 # is partly the broker's limit, so it must not enter a client ranking. The
@@ -279,11 +289,17 @@ def reconcile_broker_publishes(
         return result
     ratio = float(received) / float(completed)
     result["ratio"] = ratio
-    # Only the lower side is a gate. A ratio slightly above 1 is expected: the
-    # $SYS window is bounded by 1 s counter ticks at each end and by the drain,
-    # so it is a little wider than the publisher's own accounting window.
+    # A ratio slightly above 1 is expected: the $SYS window is bounded by 1 s
+    # counter ticks at each end and by the drain, so it is a little wider than
+    # the publisher's own accounting window. Measured, that is worth up to 7%.
     if ratio < BROKER_RECONCILE_MIN_RATIO:
         result["reason"] = f"broker_received_below_completed:{ratio:.2f}"
+    elif ratio > BROKER_RECONCILE_MAX_RATIO:
+        # The broker received substantially more than this run published, so it
+        # was not alone on that broker. Nothing else in the run is trustworthy
+        # either: broker CPU, headroom and drop counts all now include work the
+        # measurement did not cause.
+        result["reason"] = f"broker_received_above_completed:{ratio:.2f}"
     return result
 
 

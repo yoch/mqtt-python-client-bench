@@ -1222,6 +1222,31 @@ class FairnessGateTests(unittest.TestCase):
         self.assertIsNone(out["reason"])
         self.assertAlmostEqual(out["ratio"], 0.99, places=2)
 
+    def test_reconciliation_rejects_a_broker_it_did_not_have_to_itself(self):
+        # The check used to bound only the low side, so a broker that received
+        # far more than this run published was accepted in silence. That is the
+        # dangerous direction: foreign traffic inflates the counter and masks a
+        # genuine drop, and it also invalidates the broker CPU, headroom and
+        # drop figures the same run reports. Measured over 714 reconciled runs
+        # the honest ratio never left 0.96-1.07.
+        from mqtt_client_bench.harness import reconcile_broker_publishes
+
+        out = reconcile_broker_publishes(
+            {"topology": "publisher_only"},
+            [self._pub_worker(100_000)],
+            {"publish_received_delta": 300_000},
+        )
+        self.assertTrue(out["reason"].startswith("broker_received_above_completed:"), out)
+
+        # And the band still accepts what the $SYS window's extra width produces.
+        for received in (96_000, 100_000, 107_000):
+            ok = reconcile_broker_publishes(
+                {"topology": "publisher_only"},
+                [self._pub_worker(100_000)],
+                {"publish_received_delta": received},
+            )
+            self.assertIsNone(ok["reason"], f"received={received}")
+
     def test_reconciliation_rejects_completions_the_broker_never_saw(self):
         # The QoS0 failure mode: an adapter counts a publish at an in-process
         # queue, so the broker never receives most of them.
