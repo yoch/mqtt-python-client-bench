@@ -61,9 +61,13 @@ def main(argv=None) -> int:
         if ok:
             state["subscribed"].set()
 
+    # Bound once: the responder sits inside the measured round trip, so its
+    # per-message dictionary lookups are charged to the client under test.
+    lock = state["lock"]
+
     def on_message(client, userdata, msg):
         adapter.publish(response_topic, payload=msg.payload, qos=qos, retain=False)
-        with state["lock"]:
+        with lock:
             state["responses"] += 1
 
     adapter.on_connect = on_connect

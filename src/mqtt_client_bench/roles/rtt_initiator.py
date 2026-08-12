@@ -11,7 +11,7 @@ import time
 from mqtt_client_bench.adapters.registry import adapter_identity, create_adapter
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
 from mqtt_client_bench.sampling import DEFAULT_METRIC_SAMPLE_LIMIT, ReservoirSampler
-from mqtt_client_bench.workloads import HEADER_SIZE, decode_header, encode_header
+from mqtt_client_bench.workloads import HEADER_SIZE, decode_header_fields, encode_header
 
 
 def main(argv=None) -> int:
@@ -84,18 +84,24 @@ def main(argv=None) -> int:
         if all(int(getattr(x, "value", x)) < 128 for x in reason_code_list):
             state["subscribed"].set()
 
+    # Bound once: this callback runs on every response, and the RTT number is
+    # the harness's own cost plus the client's. Only `correlation` is read here,
+    # so decoding into a five-key dict and a 40-byte slice was allocation the
+    # measurement then charged to the client under test.
+    lock = state["lock"]
+    inflight = state["inflight"]
+
     def on_message(client, userdata, msg):
         now = time.perf_counter_ns()
         payload = msg.payload or b""
         if len(payload) < HEADER_SIZE:
             return
         try:
-            hdr = decode_header(payload)
+            _pub, _seq, corr, _send = decode_header_fields(payload)
         except ValueError:
             return
-        corr = hdr["correlation"]
-        with state["lock"]:
-            sent = state["inflight"].pop(corr, None)
+        with lock:
+            sent = inflight.pop(corr, None)
             if sent is None:
                 return
             if state["phase"] == "measure":

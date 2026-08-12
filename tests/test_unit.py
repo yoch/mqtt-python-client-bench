@@ -2169,6 +2169,35 @@ class DualProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             capacity_from_load_profile(legacy, protocol="MQTTv5", kind="publish")
 
+    def test_lean_header_decode_agrees_with_the_dict_one(self):
+        # Two roles decode a header on every message and read one or two of its
+        # fields. The lean decoder exists to skip the dict and the slice; if it
+        # ever disagreed with decode_header, integrity and latency would both be
+        # measuring something other than what was sent.
+        from mqtt_client_bench.workloads import (
+            HEADER_SIZE,
+            decode_header,
+            decode_header_fields,
+            encode_header,
+        )
+
+        for pub_id, seq, corr, send_ns in (
+            (1, 0, 0, 0),
+            (7, 42, 4242, 123456789),
+            (0xFFFFFFFF, (1 << 64) - 1, (1 << 64) - 1, (1 << 64) - 1),
+        ):
+            payload = encode_header(b"abcdefgh", pub_id, seq, corr, send_ns) + b"tail"
+            want = decode_header(payload)
+            self.assertEqual(
+                decode_header_fields(payload),
+                (want["publisher_id"], want["sequence"], want["correlation"], want["send_ns"]),
+            )
+        # Same refusals, so the callers' except clauses keep working.
+        with self.assertRaises(ValueError):
+            decode_header_fields(b"short")
+        with self.assertRaises(ValueError):
+            decode_header_fields(b"XXXX" + bytes(HEADER_SIZE))
+
     def test_precomputed_tail_stamps_the_same_bytes(self):
         # The publisher stopped calling wrap_with_header per message and now
         # concatenates a tail cut once per run. The wire payload must be
