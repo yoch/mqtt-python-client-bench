@@ -54,22 +54,24 @@ def payload_tail(body: bytes) -> bytes:
     return body[HEADER_SIZE:] if len(body) > HEADER_SIZE else b""
 
 
-def decode_sequence_send_ns(payload: bytes):
-    """Read just the two fields a subscriber needs, without building a dict.
+def decode_header_fields(payload: bytes):
+    """Read the header into a tuple, without building a dict or a slice.
 
     ``decode_header`` allocates a five-key dict and a 40-byte slice for every
-    delivered message. The subscriber only ever reads ``sequence`` and
-    ``send_ns``, and it reads them once per message at ingress rates, so both
-    allocations are pure per-message harness cost. ``unpack_from`` reads in
-    place; the magic is still checked, and a bad header raises ValueError
-    exactly as before so the callers' except clauses are unchanged.
+    message it is handed. Both the subscriber and the RTT initiator call it once
+    per delivered message at rates where that is pure per-message harness cost,
+    and each reads one or two fields of it. ``unpack_from`` reads in place; the
+    magic is still checked and a bad header still raises ValueError, so the
+    callers' except clauses are unchanged.
+
+    Returns ``(publisher_id, sequence, correlation, send_ns)``.
     """
     if len(payload) < HEADER_SIZE:
         raise ValueError("payload too short for header")
-    magic, _run_id, _pub, sequence, _corr, send_ns = HEADER_STRUCT.unpack_from(payload, 0)
+    magic, _run_id, publisher_id, sequence, correlation, send_ns = HEADER_STRUCT.unpack_from(payload, 0)
     if magic != HEADER_MAGIC:
         raise ValueError("invalid payload magic")
-    return sequence, send_ns
+    return publisher_id, sequence, correlation, send_ns
 
 
 def decode_header(payload: bytes) -> dict:

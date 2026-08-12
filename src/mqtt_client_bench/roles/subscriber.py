@@ -26,7 +26,7 @@ from mqtt_client_bench.workloads import (
     HEADER_SIZE,
     callback_match_topics,
     decode_header,
-    decode_sequence_send_ns,
+    decode_header_fields,
     deep_topic,
     fleet_topics,
     long_topic,
@@ -108,7 +108,7 @@ def main(argv=None) -> int:
             state["bytes_in_window"] += len(payload)
             if len(payload) >= HEADER_SIZE:
                 try:
-                    sequence, send_ns = decode_sequence_send_ns(payload)
+                    _pub, sequence, _corr, send_ns = decode_header_fields(payload)
                     if sequence < (1 << 40):
                         state["sequences"].add(sequence)
                         if send_ns:
@@ -121,7 +121,7 @@ def main(argv=None) -> int:
             # after T1, otherwise the window edge shows up as false "missing".
             if len(payload) >= HEADER_SIZE:
                 try:
-                    sequence, _send_ns = decode_sequence_send_ns(payload)
+                    _pub, sequence, _corr, _send = decode_header_fields(payload)
                     if sequence < (1 << 40):
                         state["sequences"].add(sequence)
                 except ValueError:
