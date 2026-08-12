@@ -73,6 +73,23 @@ class AdapterCapabilities:
     # Rule: every adapter uses the cheapest mechanism its library exposes, and
     # records which one, so a reader can see who was forced onto the slow path.
     completion_mechanism: str = "sync"  # sync | callback | awaited
+    # Whether the role worker can drive this client on its own asyncio loop,
+    # with no thread between the measurement and the library.
+    #
+    # The bench used to drive every client through a sync facade so that all of
+    # them met the same outstanding-window gate. That equalised the *mechanism*
+    # and not the *cost*: the cross-thread handoff is a fixed 18.5 us per
+    # message, so it taxes a fast client far harder than a slow one — measured
+    # at 46% of the period of a 25,000 msgs/s client against 11% at 6,000, which
+    # is enough to reorder the field. Comparability comes from an identical
+    # contract, not an identical driving mechanism; each client is now driven by
+    # the fastest path its own API offers.
+    native_async: bool = False
+    # Within the async path: True when the library admits a publish
+    # synchronously on the loop, so the role never allocates a coroutine per
+    # message. False for libraries whose only API is `await publish(...)`, which
+    # is then their fastest path and so the honest one to measure.
+    publish_sync_on_loop: bool = False
     synthetic_mids: bool = False
     # Whether the transport runs with TCP_NODELAY (set by the adapter or by the
     # runtime, e.g. asyncio). Without it, request/response scenarios measure a
@@ -179,3 +196,64 @@ class MqttClientAdapter(Protocol):
     on_publish: Optional[MessageCallback]
     on_message: Optional[MessageCallback]
     on_subscribe: Optional[MessageCallback]
+
+
+@runtime_checkable
+class AsyncMqttClientAdapter(Protocol):
+    """Adapter driven directly on the role worker's own asyncio loop.
+
+    Same completion contract as the sync facade — QoS 0 at the transport, QoS 1
+    at PUBACK, QoS 2 at PUBCOMP — and the same outstanding-window semantics. The
+    difference is only that nothing crosses a thread: the role's loop *is* the
+    client's loop, so a publish is a call and a completion is a callback on that
+    same loop.
+
+    Two publish shapes, chosen once by `publish_sync_on_loop` and never branched
+    on per message:
+
+    - ``publish_nowait`` for libraries that admit synchronously on the loop
+      (mqttium, gmqtt). Returns the synthetic mid; completion arrives later
+      through ``on_publish``.
+    - ``publish`` for libraries whose only API is awaitable (aiomqtt, amqtt,
+      zmqtt). Awaiting is their fastest path, so awaiting is what is measured.
+
+    Implementations must fire ``on_publish(mid, reason_code)`` on the loop.
+    """
+
+    @classmethod
+    def capabilities(cls) -> AdapterCapabilities: ...
+
+    @classmethod
+    def identity(cls) -> dict: ...
+
+    async def connect(self, host: str, port: int, keepalive: int = 60) -> None: ...
+
+    async def disconnect(self) -> None: ...
+
+    def publish_nowait(
+        self,
+        topic: str,
+        payload: Any = None,
+        qos: int = 0,
+        retain: bool = False,
+        properties: Any = None,
+    ) -> Optional[int]:
+        """Admit one publish on the loop; return its synthetic mid."""
+
+    async def publish(
+        self,
+        topic: str,
+        payload: Any = None,
+        qos: int = 0,
+        retain: bool = False,
+        properties: Any = None,
+    ) -> Optional[int]:
+        """Await one publish to completion; return its synthetic mid."""
+
+    async def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult: ...
+
+    def build_publish_properties(self, profile: str) -> Any: ...
+
+    on_connect: Optional[MessageCallback]
+    on_publish: Optional[MessageCallback]
+    on_message: Optional[MessageCallback]

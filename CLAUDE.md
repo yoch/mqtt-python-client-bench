@@ -156,12 +156,28 @@ results.
   offer, or delivery below half the offer make a run `inconclusive` and set a
   `bottleneck` (`sut_limited` / `broker_limited` / `broker_unconfirmed` /
   `loadgen_limited` / `offer_limited`). Only `valid` runs enter medians.
-- **No unequal harness tax**: per-message work in the role workers and in
-  `AsyncioBridge` must cost the same for every adapter. The bridge hands publish
-  coroutines to *reused* workers rather than spawning one `asyncio.Task` per
-  message, because only await-only APIs would have paid that. Telemetry reads
-  cgroup counters instead of spawning `docker stats` inside the measure window,
-  and the orchestrator is pinned to the `orch` cpuset.
+- **No unequal harness tax**: fairness is *not* holding every client to the
+  slowest common shape — each library must be driven the fastest way its own API
+  allows. What must be equal is the harness's own cost, because that cost is
+  fixed per message and therefore compresses the field: at 18.5 µs (what the
+  bridge cost) it inflated a 25,000 msgs/s client's period by 46% and a 6,000
+  msgs/s client's by 11%, which is enough to reorder a ranking. Budget: ≤5% of
+  the fastest measured client's period, ~2 µs; `NativeAsyncPathTests` asserts it
+  against a null client. Telemetry reads cgroup counters instead of spawning
+  `docker stats` inside the measure window, and the orchestrator is pinned to
+  the `orch` cpuset.
+- **Native drive path**: an async client is driven on the role worker's *own*
+  asyncio loop (`_AsyncDriver`), not across a bridge thread. Two publish shapes,
+  resolved once per phase from `publish_sync_on_loop`: libraries that admit a
+  publish on the loop (mqttium, gmqtt) run one coroutine with a completion
+  callback; await-only libraries (aiomqtt, aiomqtt3, amqtt, zmqtt) run
+  `outstanding` reused worker coroutines, because awaiting serially would pin
+  the in-flight window at 1 and report round-trip time as capacity. paho,
+  awscrt and mqttium-compat never crossed a bridge and are unchanged. Each
+  bridged adapter exposes `aconnect`/`apublish`/`asubscribe`/`adisconnect`, used
+  by both the sync facade and the native driver, so there is exactly one call
+  site per library. Results record `publish_path`; native and facade runs are
+  **not** comparable with each other.
 - **Interleaving**: published rankings come from `run matrix`, which rotates
   clients within each point. Sequential per-client campaigns let hours of drift
   enter the ranking as if it were a library difference.

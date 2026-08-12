@@ -61,6 +61,8 @@ class GmqttAdapter(BridgedAdapterBase):
             # publish() returns synthetic mids; PUBACKs are translated back
             # from real packet ids via an on-loop mapping.
             completion_mechanism="callback",
+            native_async=True,
+            publish_sync_on_loop=True,
             synthetic_mids=True,
             notes=cls._NOTES,
             unimplemented=[],

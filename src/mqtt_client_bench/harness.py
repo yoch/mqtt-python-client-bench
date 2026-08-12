@@ -19,6 +19,7 @@ from mqtt_client_bench.adapters.registry import (
     adapter_identity,
     create_adapter,
     get_adapter_class,
+    has_async_adapter,
     unsupported_for_client,
 )
 from mqtt_client_bench.broker import (
@@ -760,6 +761,9 @@ def run_point(
             ("metric_sample_limit", DEFAULT_METRIC_SAMPLE_LIMIT),
             ("integrity_sequence_limit", DEFAULT_SEQUENCE_EXACT_LIMIT),
             ("max_harness_payload_bytes", DEFAULT_PAYLOAD_BACKLOG_BYTES),
+            # Clients with a native async adapter are driven on their own loop.
+            # A point can force the sync facade to A/B the harness's own cost.
+            ("native_async", True),
         ):
             cfg.setdefault(key, point.get(key, default))
         if "force_header" in point:
@@ -1268,9 +1272,20 @@ def run_point(
             if loadgen_stats and loadgen_stats.get("observed_pub_rate") is not None:
                 secondary["observed_pub"] = sanitize_number(loadgen_stats["observed_pub_rate"])
 
+        # Which drive path the publisher actually took. Native and facade runs
+        # measure different amounts of harness, so they may never be averaged or
+        # ranked against each other; for a client that *has* a native path, a
+        # facade run is diagnostic by definition and is marked non_comparable.
+        publish_path = None
+        for wr in worker_results:
+            if wr.get("publish_path"):
+                publish_path = wr["publish_path"]
+                break
+        forced_facade = publish_path == "sync_facade" and has_async_adapter(client)
+
         return {
             "schema_version": 1,
-        "harness_fingerprint": HARNESS_FINGERPRINT,
+            "harness_fingerprint": HARNESS_FINGERPRINT,
             "run_id": run_id,
             "started_at": started_at,
             "finished_at": _utc_now(),
@@ -1288,6 +1303,10 @@ def run_point(
             "broker_cpu_max_pct": validity.get("broker_cpu_max_pct"),
             "broker_reconciliation": validity.get("broker_reconciliation"),
             "cost_per_message": cost_per_message(worker_results, telemetry_samples),
+            # Which drive path the publisher actually took. A run through the
+            # sync facade and a native run measure different amounts of harness,
+            # so they may never be averaged or ranked against each other; a
+            # facade run for a client that has a native path is diagnostic only.
             "workers": worker_results,
             "loadgen": loadgen_stats,
             "loadgen_ref_sub": loadgen_ref_sub_stats,
@@ -1299,8 +1318,9 @@ def run_point(
             "managed_broker": managed_broker,
             "environment": environment_metadata(),
             "cpusets": cpusets,
-            "non_comparable": bool(point.get("non_comparable")),
+            "non_comparable": bool(point.get("non_comparable")) or forced_facade,
             "protocol_effective": point.get("protocol", "MQTTv311"),
+            "publish_path": publish_path,
         }
     finally:
         barrier.close()
@@ -1630,6 +1650,7 @@ def run_scenario(
     load_profile_path: Optional[str] = None,
     seed: int = 42,
     point_filter: Optional[Callable[[dict], bool]] = None,
+    publish_path: str = "native",
 ) -> dict:
     scenario = SCENARIO_BY_NAME[name]
     if runs is None:
@@ -1640,6 +1661,11 @@ def run_scenario(
     if network:
         for p in points:
             p["network"] = network
+    if publish_path == "sync":
+        # Diagnostic A/B: drive a native-capable client through the sync facade
+        # so the harness's own per-message cost can be read off the difference.
+        for p in points:
+            p["native_async"] = False
 
     try:
         cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile=profile)

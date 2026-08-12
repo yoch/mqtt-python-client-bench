@@ -71,6 +71,8 @@ class MqttiumAdapter(BridgedAdapterBase):
             io_model="asyncio_bridged",
             implementation_language="python",
             completion_mechanism="callback",
+            native_async=True,
+            publish_sync_on_loop=True,
             synthetic_mids=True,
             tcp_nodelay=True,
             notes=cls._NOTES,
