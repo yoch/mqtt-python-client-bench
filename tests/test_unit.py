@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import re
 import sys
 import unittest
@@ -2238,6 +2239,45 @@ class DualProtocolTests(unittest.TestCase):
         # Same keys as the real one: the worker reads them by name, and a
         # shorter dict crashed every publisher_only run with KeyError('first').
         self.assertEqual(set(off.summary()), set(live.summary()))
+
+    def test_harness_fingerprint_tracks_code_not_prose(self):
+        """A result is comparable only with one from the same measurement path.
+
+        The client-version gate cannot see the harness moving under a client
+        that sat still, which is how a campaign came to publish a matrix mixing
+        two harness generations whose per-message cost differed by 40%. The
+        fingerprint closes that, but only if it reacts to code and ignores
+        prose — otherwise a docstring fix silently invalidates twelve hours.
+        """
+        import hashlib
+        import tempfile
+        from pathlib import Path
+
+        from mqtt_client_bench.provenance import MEASUREMENT_PATH, harness_fingerprint
+
+        base = harness_fingerprint()
+        self.assertEqual(base, harness_fingerprint(), "must be deterministic")
+        self.assertRegex(base, r"^[0-9a-f]{16}$")
+
+        # Every module the fingerprint covers must exist, or it silently
+        # degrades to hashing the word "missing".
+        root = Path(harness_fingerprint.__module__ and __import__(
+            "mqtt_client_bench.provenance", fromlist=["x"]).__file__).parent
+        for rel in MEASUREMENT_PATH:
+            self.assertTrue((root / rel).exists(), f"{rel} is not in the tree")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mod = Path(tmp) / "m.py"
+            mod.write_text('"""Doc."""\n\n\ndef f():\n    return 1\n')
+            first = harness_fingerprint.__wrapped__ if hasattr(harness_fingerprint, "__wrapped__") else None
+            del first
+            from mqtt_client_bench.provenance import _structural_digest
+
+            a = _structural_digest(mod)
+            mod.write_text('"""Different prose entirely."""\n# and a comment\n\n\ndef f():\n    return 1\n')
+            self.assertEqual(a, _structural_digest(mod), "prose must not invalidate a campaign")
+            mod.write_text('"""Doc."""\n\n\ndef f():\n    return 2\n')
+            self.assertNotEqual(a, _structural_digest(mod), "changed code must invalidate")
 
     def test_write_json_never_leaves_a_partial_document(self):
         # A campaign is paused with SIGINT, which can land in the middle of a
