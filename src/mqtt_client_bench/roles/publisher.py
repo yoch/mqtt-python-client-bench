@@ -1096,15 +1096,21 @@ async def _publish_loop_awaited(
                 if now < slot:
                     await asyncio.sleep(min(0.001, slot - now))
                     continue
-                # Every worker busy means slots went by unserved. They are
-                # offers the client could not take, which is exactly what the
-                # sync loop counts when the gate is full.
-                if interval and now > slot + interval:
-                    skipped = int((now - slot) / interval)
-                    counters["offered"] += skipped
-                    counters["calls"] += skipped
-                    counters["missed"] += skipped
-                    slot += skipped * interval
+                # Behind schedule: take this slot and advance the cursor by
+                # exactly one interval, so the next worker fires immediately and
+                # the schedule catches up. The sync loop does the same.
+                #
+                # Jumping the cursor forward instead - and charging the skipped
+                # slots as missed - looked like honest accounting and was not:
+                # asyncio.sleep resolves to about a millisecond, against
+                # intervals of tens of microseconds here, so every worker lands
+                # late on every iteration, the cursor kept running away, and the
+                # achieved rate sat permanently under target. Every open-loop run
+                # on an await-only client came back
+                # open_loop_rate_out_of_tolerance (aiomqtt 24/24 valid before,
+                # 0/21 after). Backpressure is already counted where it actually
+                # happens: a worker that is still awaiting a publish is not in
+                # this block to take a slot.
                 lag_add(int((now - slot) * 1e9))
                 cursor["next_send"] = slot + interval
 
