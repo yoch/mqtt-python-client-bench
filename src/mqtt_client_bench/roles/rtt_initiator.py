@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import threading
@@ -59,10 +60,18 @@ def main(argv=None) -> int:
         "subscribed": threading.Event(),
         "phase": "init",
         "inflight": {},
+        # Responses that land while publish() is still on the stack are stashed
+        # here and only committed after publish returns rc==0. Committing inside
+        # on_message left a false RTT sample when publish then failed.
+        "early_rtt": {},
+        "publishing_seq": None,
         "latencies_ns": ReservoirSampler(metric_sample_limit, seed=71),
         "timeouts": 0,
         "sent_in_window": 0,
         "completed_in_window": 0,
+        "offered": 0,
+        "missed_due_to_backpressure": 0,
+        "retracted_completions": 0,
         "lock": threading.Lock(),
     }
 
@@ -90,6 +99,7 @@ def main(argv=None) -> int:
     # measurement then charged to the client under test.
     lock = state["lock"]
     inflight = state["inflight"]
+    early_rtt = state["early_rtt"]
 
     def on_message(client, userdata, msg):
         now = time.perf_counter_ns()
@@ -104,8 +114,14 @@ def main(argv=None) -> int:
             sent = inflight.pop(corr, None)
             if sent is None:
                 return
+            latency = now - sent
+            # Response arrived while publish() is still returning: stash and let
+            # the send loop commit only on rc==0.
+            if state["publishing_seq"] == corr:
+                early_rtt[corr] = latency
+                return
             if state["phase"] == "measure":
-                state["latencies_ns"].add(now - sent)
+                state["latencies_ns"].add(latency)
                 state["completed_in_window"] += 1
 
     adapter.on_connect = on_connect
@@ -128,8 +144,6 @@ def main(argv=None) -> int:
     touch(cfg["ready_path"], {"role": "rtt_initiator", "pid": os.getpid(), **identity})
     barrier = barrier_client_session(cfg["barrier_path"], timeout_s=float(cfg.get("barrier_timeout_s", 120)))
     barrier.wait("T0")
-
-    import gc
 
     gc.collect()
     state["phase"] = "warmup"
@@ -154,9 +168,13 @@ def main(argv=None) -> int:
         time.sleep(0.01)
     with state["lock"]:
         state["inflight"].clear()
+        state["early_rtt"].clear()
         state["latencies_ns"].clear()
         state["sent_in_window"] = 0
         state["completed_in_window"] = 0
+        state["offered"] = 0
+        state["missed_due_to_backpressure"] = 0
+        state["retracted_completions"] = 0
         state["timeouts"] = 0
 
     barrier.ack("WARMUP_DRAINED")
@@ -180,6 +198,8 @@ def main(argv=None) -> int:
         latency_sampling = state["latencies_ns"].metadata()
         completed = state["completed_in_window"]
         sent = state["sent_in_window"]
+        offered = int(state.get("offered") or 0)
+        missed = int(state.get("missed_due_to_backpressure") or 0)
 
     adapter.disconnect()
     adapter.loop_stop()
@@ -191,6 +211,10 @@ def main(argv=None) -> int:
             "role": "rtt_initiator",
             "duration_s": window,
             "sent_in_window": sent,
+            # Same shape as the publisher: offered = submitted + missed slots so
+            # validate_run's open-loop gate can check the paceur, not completions.
+            "offered": offered if offered else sent,
+            "missed_due_to_backpressure": missed,
             "completed_in_window": completed,
             "timeouts": timeouts,
             "failure_rate": (timeouts / sent) if sent else None,
@@ -205,20 +229,32 @@ def main(argv=None) -> int:
 
 def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, until, sequence_start=0):
     interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0
+    open_loop = interval > 0
     next_send = time.perf_counter()
     seq = sequence_start
+    n_offered = 0
+    n_missed = 0
+    measure = state["phase"] == "measure"
     while time.perf_counter() < until:
-        # dict len() is atomic under the GIL; taking the lock per sample adds
-        # scheduling jitter on the very path whose latency we publish.
-        if len(state["inflight"]) >= outstanding:
+        if open_loop:
+            now = time.perf_counter()
+            if now < next_send:
+                time.sleep(min(0.001, next_send - now))
+                continue
+            # Advance the offer clock for this slot before checking capacity —
+            # same discipline as the publisher: a full window is a miss, not a
+            # stalled paceur that would under-shoot target_rate.
+            next_send += interval
+            if len(state["inflight"]) >= outstanding:
+                if measure:
+                    n_offered += 1
+                    n_missed += 1
+                continue
+        elif len(state["inflight"]) >= outstanding:
+            # Closed-loop capacity: wait for a response to free a slot.
             time.sleep(0.0005)
             continue
-        now = time.perf_counter()
-        if interval and now < next_send:
-            time.sleep(min(0.001, next_send - now))
-            continue
-        if interval:
-            next_send += interval
+
         seq += 1
         send_ns = time.perf_counter_ns()
         payload = encode_header(run_id, 1, seq, seq, send_ns)
@@ -228,14 +264,36 @@ def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, unt
         # to receive the response before publish() returns; registering after the
         # call turns that valid response into an unmatchable orphan.
         with state["lock"]:
+            state["publishing_seq"] = seq
             state["inflight"][seq] = send_ns
         info = adapter.publish(topic, payload=payload, qos=qos, retain=False)
         with state["lock"]:
+            state["publishing_seq"] = None
+            early = state["early_rtt"].pop(seq, None)
+            # Every due slot that reached publish() is part of the offer, whether
+            # the client accepted it or not — same as the publisher's offered
+            # counter (which includes sync_rejected). Skipping refused publishes
+            # under-counted offered and tripped the ±2% open-loop gate.
+            if measure:
+                n_offered += 1
             if info.rc == 0:
-                if state["phase"] == "measure":
+                if measure:
                     state["sent_in_window"] += 1
+                    if early is not None:
+                        state["latencies_ns"].add(early)
+                        state["completed_in_window"] += 1
             else:
+                # Publish refused. Drop any response that landed inside publish()
+                # without ever committing it to the latency sample.
                 state["inflight"].pop(seq, None)
+                if early is not None and measure:
+                    state["retracted_completions"] = int(state.get("retracted_completions") or 0) + 1
+
+    if measure:
+        state["offered"] = int(state.get("offered") or 0) + n_offered
+        state["missed_due_to_backpressure"] = (
+            int(state.get("missed_due_to_backpressure") or 0) + n_missed
+        )
 
 
 if __name__ == "__main__":

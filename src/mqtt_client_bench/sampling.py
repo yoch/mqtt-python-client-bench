@@ -274,9 +274,20 @@ class CompletionLog:
         return self._n >= self._limit
 
     def close_window(self) -> None:
-        """Mark where the measure window ended; later entries are drain."""
+        """Mark where the measure window ended; later entries are drain.
+
+        Idempotent: the awaited path closes at the deadline (before grace) and
+        the publisher main also closes after run_loop returns; a second call
+        must not move the mark into the drain.
+        """
+        if self._closed:
+            return
         self._window_end = self._n
         self._closed = True
+
+    @property
+    def window_closed(self) -> bool:
+        return self._closed
 
     def fold(self) -> None:
         """Tally the current batch into the running totals and reset the index.

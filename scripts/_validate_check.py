@@ -12,7 +12,9 @@ import sys
 from pathlib import Path
 
 ALLOWED_PREFIXES = ("not_implemented", "load_profile", "broker_", "host_", "sys_",
-                    "delivery_", "loadgen_", "offer_", "container_", "cpu_")
+                    "delivery_", "loadgen_", "offer_", "container_", "cpu_",
+                    "open_loop_rate_out_of_tolerance", "open_loop_backpressure_misses",
+                    "integrity_mismatch", "memory_guard")
 
 
 def main() -> int:

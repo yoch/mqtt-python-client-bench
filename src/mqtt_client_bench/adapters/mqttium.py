@@ -102,6 +102,16 @@ class MqttiumAdapter(BridgedAdapterBase):
             "completion_mechanism": caps.completion_mechanism,
             "synthetic_mids": caps.synthetic_mids,
             "display_note": caps.notes,
+            # QoS0 fires after publish_nowait admits to the write pump, not after
+            # the socket write completes (Paho's boundary). Declared so rankings
+            # are not read as if the contracts matched.
+            "qos0_boundary": "queue",
+            "private_api": {
+                "AsyncClient.on_publish is None / _direct_qos0_ready": (
+                    "direct QoS0 transport write is only taken while the library "
+                    "on_publish is unset; the adapter fires the bench callback itself"
+                ),
+            },
         }
 
     @classmethod

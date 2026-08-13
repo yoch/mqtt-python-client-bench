@@ -16,6 +16,16 @@ class AmqttAdapter(BridgedAdapterBase):
         "amqtt — asyncio MQTT client (and optional broker). "
         "Only the client side is in scope for this bench."
     )
+    # Reading the session delivery queue directly is required for ingress
+    # throughput (deliver_message() collapses under load). Surfaced so a
+    # reader can judge how faithful the measurement is.
+    _PRIVATE_API = {
+        "MQTTClient.session.delivered_message_queue": (
+            "deliver_message() spawns a Task per wait and collapses to tens of "
+            "msg/s under emqtt-bench ingress; the queue is the only path that "
+            "sustains thousands of msg/s"
+        ),
+    }
 
     def __init__(self) -> None:
         super().__init__()
@@ -67,6 +77,7 @@ class AmqttAdapter(BridgedAdapterBase):
             "implementation_language": caps.implementation_language,
             "completion_mechanism": caps.completion_mechanism,
             "synthetic_mids": caps.synthetic_mids,
+            "private_api": dict(cls._PRIVATE_API),
         }
 
     @classmethod
