@@ -143,55 +143,19 @@ SCENARIOS=("${REPR[@]}" "${DIAGNOSTIC[@]}")
 # *from the current harness*. Results predating the fairness fixes carry no run
 # provenance, so they are correctly treated as missing and re-run.
 scenario_complete() {  # <scenario> <clients-csv> <python>
-  "$3" - "$1" "$2" 2>>logs/campaign.log <<'PY'
-import json, sys
-from pathlib import Path
-from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario
-from mqtt_client_bench.adapters.registry import adapter_identity
-from mqtt_client_bench.harness import HARNESS_FINGERPRINT
-
-scenario, clients = sys.argv[1], sys.argv[2].split(",")
-expected = len(expand_scenario(SCENARIO_BY_NAME[scenario], "standard"))
-for client in clients:
-    path = Path("results") / f"{client}-{scenario}.json"
-    if not path.exists():
-        raise SystemExit(1)
-    try:
-        data = json.loads(path.read_text())
-    except Exception:
-        raise SystemExit(1)
-    blocks = data.get("results") or []
-    runs = [r for block in blocks for r in (block.get("runs") or [])]
-    if not runs:
-        raise SystemExit(1)
-    # `started_at` only exists on runs produced after the fairness fixes, so
-    # older results count as missing rather than as finished work.
-    if not all("started_at" in r for r in runs):
-        raise SystemExit(1)
-    # Points are checkpointed as they finish, so a file can exist while the
-    # scenario is only half measured.
-    if len(blocks) < expected:
-        raise SystemExit(1)
-    # A library upgrade invalidates that client's numbers just as surely as a
-    # missing file, and the campaign would otherwise skip a complete-looking
-    # scenario and publish a matrix mixing two versions of the same client. The
-    # calibration gate already refuses a stale profile this way; this is the
-    # same rule for measurements.
-    recorded = (data.get("client_identity") or {}).get("client_version")
-    installed = adapter_identity(client).get("client_version")
-    if recorded and installed and recorded != installed:
-        print(f"    {client} {scenario}: measured on {recorded}, installed {installed}", file=sys.stderr)
-        raise SystemExit(1)
-    # The client can sit still while the harness moves under it. A measurement
-    # path that changed makes the old numbers incomparable with the new ones,
-    # and the client-version check above cannot see that.
-    stamps = {r.get("harness_fingerprint") for b in blocks for r in (b.get("runs") or [])}
-    if stamps != {HARNESS_FINGERPRINT}:
-        seen = ", ".join(sorted(str(x) for x in stamps))
-        print(f"    {client} {scenario}: harness {seen or 'unstamped'}, now {HARNESS_FINGERPRINT}", file=sys.stderr)
-        raise SystemExit(1)
-raise SystemExit(0)
-PY
+  # One rule, in mqtt_client_bench.campaign, shared with `campaign_ctl status`.
+  # It used to be written out here and again in the control script, and the two
+  # drifted: status reported everything complete while this gate was about to
+  # re-measure all of it.
+  "$3" -c '
+import sys
+from mqtt_client_bench.campaign import scenario_state
+st = scenario_state(sys.argv[1], sys.argv[2].split(","))
+for client, (state, why, _pts) in st["clients"].items():
+    if state != "done":
+        print(f"    {client} {sys.argv[1]}: {state}" + (f" ({why})" if why else ""), file=sys.stderr)
+raise SystemExit(0 if st["state"] == "done" else 1)
+' "$1" "$2" 2>>logs/campaign.log
 }
 
 for s in "${SCENARIOS[@]}"; do

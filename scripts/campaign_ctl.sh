@@ -51,42 +51,29 @@ cmd_status() {
       | head -4
   fi
   echo
-  echo "scenario progress (current harness only):"
-  python - <<'PY'
-import json
-from pathlib import Path
-from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario
+  echo "scenario progress (against the harness and library versions installed now):"
+  CLIENTS="${CLIENTS:-paho,gmqtt,aiomqtt,amqtt,awscrt,zmqtt,mqttium,mqttium-compat}" python - <<'PY'
+import os
+from mqtt_client_bench.campaign import scenario_state
 
 REPR = ["pub_payload_sweep_qos0","pub_qos_sweep_telemetry","pub_qos1_inflight",
         "sub_exact_telemetry","sub_hierarchy_telemetry","sub_callback_matching",
         "duplex_gateway","burst_recovery","e2e_integrity","puback_latency_qos1",
         "application_rtt_qos1"]
+clients = os.environ["CLIENTS"].split(",")
 done_n = 0
 for scenario in REPR:
-    expected = len(expand_scenario(SCENARIO_BY_NAME[scenario], "standard"))
-    fresh, partial = 0, 0
-    for path in sorted(Path("results").glob(f"*-{scenario}.json")):
-        try:
-            data = json.loads(path.read_text())
-        except Exception:
-            continue
-        blocks = data.get("results") or []
-        runs = [r for b in blocks for r in (b.get("runs") or [])]
-        if not runs or not all("started_at" in r for r in runs):
-            continue
-        if len(blocks) >= expected:
-            fresh += 1
-        else:
-            partial = max(partial, len(blocks))
-    if fresh:
+    st = scenario_state(scenario, clients)
+    if st["state"] == "done":
         done_n += 1
-        state = "done"
-    elif partial:
-        state = f"partial {partial}/{expected} pts"
-    else:
-        state = "pending"
-    print(f"  {scenario:<28} {state:>18}  ({fresh} complete client files)")
-print(f"\n  {done_n}/{len(REPR)} scenarios complete")
+    # Show why, not just what: "stale" without a reason sends you looking in
+    # the wrong place.
+    reasons = {why for state, why, _ in st["clients"].values() if state != "done" and why}
+    detail = f"  ({st['done']}/{st['total']} clients current)"
+    if reasons:
+        detail += "  " + sorted(reasons)[0]
+    print(f"  {scenario:<28} {st['state']:>8}{detail}")
+print(f"\n  {done_n}/{len(REPR)} scenarios complete for clients={','.join(clients)}")
 PY
   # The outcome line is what tells a finished campaign apart from one that ended
   # with failed scenarios, which is the first thing to look at afterwards.
