@@ -8,6 +8,12 @@ from array import array
 DEFAULT_METRIC_SAMPLE_LIMIT = 50_000
 DEFAULT_SEQUENCE_EXACT_LIMIT = 20_000
 DEFAULT_PAYLOAD_BACKLOG_BYTES = 64 * 1024 * 1024
+# Completions a run may log before the sampler falls back to counting live.
+# Preallocated as int64, so this is a hard 16 MB and never a byte more: the
+# buffer is allocated once at its full size, so there is no doubling and no
+# realloc peak. 2 million covers a 20 s window at 100,000 msgs/s, twice the
+# fastest rate the bench has measured.
+DEFAULT_COMPLETION_LOG_LIMIT = 2_000_000
 _MASK64 = (1 << 64) - 1
 
 
@@ -201,6 +207,139 @@ def bound_payload_backlog(
         "limit_bytes": limit_bytes,
         "maximum_bytes": effective * payload_bytes,
     }
+
+
+# Sentinels for entries that carry no latency. Both are negative, and a real
+# latency never is, so the sign alone separates them from a measurement.
+FAILED = -1
+NO_LATENCY = -2
+
+
+class CompletionLog:
+    """Every completion of a run, as one int64, counted outside the hot path.
+
+    The counters this replaces - success, failure, in-window, during-drain, the
+    QoS partition, the latency sample - were all incremented inside the measure
+    window, once per message, at about 1.45 us a message of pure harness cost.
+    None of them has to be live: only the in-flight gate does. So the hot path
+    appends one value and everything else is derived from the buffer and the
+    index where the window closed.
+
+    Memory is bounded by construction and does not grow: the buffer is
+    preallocated at its full size, so there is no doubling and no realloc spike.
+    When it fills, the log is *folded* - the batch is tallied into running
+    totals, the latencies handed to the sampler, the index reset - and logging
+    resumes. Folding rather than falling back to live counting is what keeps the
+    per-message cost flat: a permanent fallback would make the harness cheap for
+    the first half of a run and expensive for the second, so its cost would
+    depend on how long the run was and how fast the client is.
+
+    The fold itself is not run from the completion callback. The callback only
+    reports that the buffer is full; the publish loop folds at its next batch
+    boundary, and the few completions in between are counted live.
+    """
+
+    __slots__ = ("_buf", "_n", "_limit", "_window_end", "_closed", "_sampler",
+                 "_success", "_failed", "_in_window", "_during_drain",
+                 "folds", "logged")
+
+    def __init__(self, limit: int = DEFAULT_COMPLETION_LOG_LIMIT, *, sampler=None) -> None:
+        if limit < 1:
+            raise ValueError("completion log limit must be positive")
+        self._limit = limit
+        self._buf = array("q", bytes(8 * limit))
+        self._sampler = sampler
+        self.clear()
+
+    def clear(self) -> None:
+        """Drop everything recorded so far, keeping the allocation."""
+        self._n = 0
+        self._window_end = None
+        self._closed = False
+        self._success = self._failed = self._in_window = self._during_drain = 0
+        self.folds = 0
+        self.logged = 0
+
+    def add(self, value: int) -> bool:
+        """Record one completion. False means the buffer is full right now."""
+        n = self._n
+        if n >= self._limit:
+            return False
+        self._buf[n] = value
+        self._n = n + 1
+        return True
+
+    @property
+    def full(self) -> bool:
+        return self._n >= self._limit
+
+    def close_window(self) -> None:
+        """Mark where the measure window ended; later entries are drain."""
+        self._window_end = self._n
+        self._closed = True
+
+    def fold(self) -> None:
+        """Tally the current batch into the running totals and reset the index.
+
+        Called from the publish loop at a batch boundary, never from the
+        completion callback, and once more at the end of the run.
+        """
+        n = self._n
+        if not n:
+            self._window_end = None
+            return
+        buf = self._buf
+        # Three cases, and getting the third wrong is how a fold after the
+        # window closed would credit drain traffic to the measurement: the
+        # window is still open (all in-window), it closed inside this batch
+        # (split at the mark), or it closed in an earlier batch (all drain).
+        if not self._closed:
+            end = n
+        elif self._window_end is not None:
+            end = self._window_end
+        else:
+            end = 0
+        add = self._sampler.add if self._sampler is not None else None
+        success = failed = in_window = during_drain = 0
+        for i in range(n):
+            v = buf[i]
+            if v == FAILED:
+                failed += 1
+                continue
+            success += 1
+            if v >= 0 and add is not None:
+                add(v)
+            if i < end:
+                in_window += 1
+            else:
+                during_drain += 1
+        self._success += success
+        self._failed += failed
+        self._in_window += in_window
+        self._during_drain += during_drain
+        self.logged += n
+        self.folds += 1
+        self._n = 0
+        self._window_end = None
+
+    def summary(self, qos: int) -> dict:
+        """Fold whatever is left, then report. Safe to call more than once."""
+        self.fold()
+        success = self._success
+        return {
+            "completed_success": success,
+            "completed_failed": self._failed,
+            "completed_in_window": self._in_window,
+            "completed_during_drain": self._during_drain,
+            # qos is fixed for a point, so the partition is a constant, not a
+            # branch to evaluate once per message.
+            "socket_completed_qos0": success if qos == 0 else 0,
+            "protocol_completed": 0 if qos == 0 else success,
+            "protocol_failed": self._failed,
+            "logged": self.logged,
+            "capacity": self._limit,
+            "folds": self.folds,
+        }
 
 
 class _NullSequenceTracker:

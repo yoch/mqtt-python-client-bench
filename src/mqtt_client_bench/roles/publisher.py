@@ -31,9 +31,13 @@ from mqtt_client_bench.adapters.registry import (
 )
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
 from mqtt_client_bench.sampling import (
+    DEFAULT_COMPLETION_LOG_LIMIT,
     DEFAULT_METRIC_SAMPLE_LIMIT,
     DEFAULT_PAYLOAD_BACKLOG_BYTES,
     DEFAULT_SEQUENCE_EXACT_LIMIT,
+    FAILED,
+    NO_LATENCY,
+    CompletionLog,
     ReservoirSampler,
     SequenceTracker,
     sequence_tracker,
@@ -94,6 +98,7 @@ def main(argv=None) -> int:
     # publisher_only points have no subscriber to reconcile against, so the
     # harness tells the worker not to fingerprint what nobody will read.
     track_sequences = bool(cfg.get("track_sequences", True))
+    completion_log_limit = int(cfg.get("completion_log_limit", DEFAULT_COMPLETION_LOG_LIMIT))
     if payload_backlog_limit is not None:
         payload_backlog_limit = int(payload_backlog_limit)
 
@@ -153,7 +158,18 @@ def main(argv=None) -> int:
         "loop_expired": False,
         "pending_send_ns": None,
         "completed_inline": None,
+        # Completions are logged, not counted, inside the measure window.
+        # The overflow_* counters only move if the log fills up.
+        "completions": None,  # needs the latency sampler; set just below
+        "overflow_success": 0,
+        "overflow_failed": 0,
+        "overflow_in_window": 0,
+        "overflow_during_drain": 0,
+        "fold_pending": False,
     }
+    # The log hands folded latencies straight to the sampler, so a fold loses
+    # nothing: the sampler keeps its own bounded copy and the buffer is reused.
+    state["completions"] = CompletionLog(completion_log_limit, sampler=state["latencies_ns"])
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
         rc = int(getattr(reason_code, "value", reason_code))
@@ -267,6 +283,13 @@ def main(argv=None) -> int:
             state["protocol_completed"] = 0
             state["protocol_failed"] = 0
             state["socket_completed_qos0"] = 0
+            # Warmup completions are discarded exactly like the counters above.
+            state["completions"].clear()
+            state["overflow_success"] = 0
+            state["overflow_failed"] = 0
+            state["overflow_in_window"] = 0
+            state["overflow_during_drain"] = 0
+            state["fold_pending"] = False
             state["mid_send_ns"].clear()
             state["early_acks"].clear()
             state["inflight_local"] = 0
@@ -318,6 +341,11 @@ def main(argv=None) -> int:
     )
     t1 = time.perf_counter()
     cpu_ns_in_window = time.process_time_ns() - cpu_ns_start
+    # One index is all the phase partition needs: everything logged after this
+    # arrived during the drain. More accurate than the old test, too, which read
+    # state["phase"] at callback time and so misfiled whatever was in flight
+    # across the boundary.
+    state["completions"].close_window()
 
     state["phase"] = "drain"
     drain_deadline = time.perf_counter() + drain_s
@@ -332,8 +360,20 @@ def main(argv=None) -> int:
     with state["lock"]:
         backlog = state["inflight_local"]
         timed_out = backlog if qos == 0 else len(state["mid_send_ns"])
-        completed_in_window = state["completed_in_window"]
-        completed_during_drain = state["completed_during_drain"]
+        # Every completion counter is derived here, outside the window, from the
+        # log. The overflow_* terms are zero unless the log filled up and the
+        # callback had to count live again.
+        tally = state["completions"].summary(qos)
+        completion_logging = {
+            "logged": tally["logged"],
+            "capacity": tally["capacity"],
+            "folds": tally["folds"],
+            "counted_live": state["overflow_success"] + state["overflow_failed"],
+        }
+        success = tally["completed_success"] + state["overflow_success"]
+        failed = tally["completed_failed"] + state["overflow_failed"]
+        completed_in_window = tally["completed_in_window"] + state["overflow_in_window"]
+        completed_during_drain = tally["completed_during_drain"] + state["overflow_during_drain"]
         latencies = state["latencies_ns"].snapshot()
         lags = state["scheduler_lags_ns"].snapshot()
         latency_sampling = state["latencies_ns"].metadata()
@@ -342,15 +382,15 @@ def main(argv=None) -> int:
             "offered": state["offered"],
             "submitted": state["submitted"],
             "sync_rejected": state["sync_rejected"],
-            "completed_success": state["completed_success"],
-            "completed_failed": state["completed_failed"],
+            "completed_success": success,
+            "completed_failed": failed,
             "missed_due_to_backpressure": state["missed_due_to_backpressure"],
             "publish_calls": state["offered"],
             "publish_accepted": state["submitted"],
             "publish_rejected": state["sync_rejected"],
-            "socket_completed_qos0": state["socket_completed_qos0"],
-            "protocol_completed": state["protocol_completed"],
-            "protocol_failed": state["completed_failed"],
+            "socket_completed_qos0": tally["socket_completed_qos0"],
+            "protocol_completed": tally["protocol_completed"],
+            "protocol_failed": failed,
             "mid_map_remaining": len(state["mid_send_ns"]),
             "warmup_drain_ok": state["warmup_drain_ok"],
         }
@@ -394,6 +434,7 @@ def main(argv=None) -> int:
         "latency_sampling": latency_sampling,
         "scheduler_lag_sampling": scheduler_lag_sampling,
         "harness_payload_backlog": payload_backlog,
+        "completion_logging": completion_logging,
         "gc_count_start": list(gc_start),
         "gc_count_end": list(gc.get_count()),
         **identity,
@@ -434,9 +475,18 @@ def _make_on_publish(state, qos, *, lock):
     all run on the same thread, so there is nothing to serialise against and an
     uncontended acquire per message would be pure harness tax on exactly the
     clients this path exists to stop taxing.
+
+    Everything the hot path touches is bound here as a closure local. A dict
+    lookup per message is only tens of nanoseconds, but this runs once per
+    message on the fastest client in the field, and the whole point of the
+    exercise is that the harness must not cost more where it is reached more
+    often. Both branches are written out rather than sharing a helper for the
+    same reason: whatever this costs, it must cost the same on both.
     """
     mid_send_ns = state["mid_send_ns"]
     early_acks = state["early_acks"]
+    seen_inflight = state["seen_mids_inflight"]
+    log_add = state["completions"].add
 
     def on_publish(client, userdata, mid, reason_code=None, properties=None):
         now = time.perf_counter_ns()
@@ -449,18 +499,27 @@ def _make_on_publish(state, qos, *, lock):
             send_ns = mid_send_ns.pop(mid, None)
             if send_ns is None:
                 pending = state["pending_send_ns"]
-                if pending is not None:
-                    # Acknowledged inside the publish call itself, which is what
-                    # a QoS 0 transport hand-off looks like. The mid the loop is
-                    # about to see is this one, so complete it here and tell the
-                    # loop to skip registering it: the dict insert, the dict pop
-                    # and the in-flight set churn were all pure harness cost.
-                    state["completed_inline"] = mid
-                    _consume_completion_locked(state, qos, pending, now, failed, mid=mid)
+                if pending is None:
+                    early_acks[mid] = (now, failed)
                     return
-                early_acks[mid] = (now, failed)
-                return
-            _consume_completion_locked(state, qos, send_ns, now, failed, mid=mid)
+                # Acknowledged inside the publish call itself, which is what a
+                # QoS 0 transport hand-off looks like. The mid the loop is about
+                # to see is this one, so complete it here and tell the loop to
+                # skip registering it: the dict insert, the dict pop and the
+                # in-flight set churn were all pure harness cost.
+                state["completed_inline"] = mid
+                send_ns = pending
+            else:
+                seen_inflight.discard(mid)
+            if not log_add(FAILED if failed else now - send_ns):
+                _count_completion_live(state, qos, FAILED if failed else now - send_ns)
+            inflight = state["inflight_local"] - 1
+            state["inflight_local"] = inflight if inflight > 0 else 0
+            # A freed slot has to wake the loop parked on the gate. Dropping this
+            # left the loop asleep after the first full window: QoS 1 offered
+            # exactly `outstanding` messages and then nothing until the deadline
+            # timer fired. QoS 0 hid it, because a completion that lands inside
+            # the publish call never parks in the first place.
             if state["gate_waiter"] is not None:
                 _wake_gate(state)
             return
@@ -470,7 +529,11 @@ def _make_on_publish(state, qos, *, lock):
                 # Callback raced ahead of publish() return - stash until registered.
                 early_acks[mid] = (now, failed)
                 return
-            _consume_completion_locked(state, qos, send_ns, now, failed, mid=mid)
+            seen_inflight.discard(mid)
+            if not log_add(FAILED if failed else now - send_ns):
+                _count_completion_live(state, qos, FAILED if failed else now - send_ns)
+            inflight = state["inflight_local"] - 1
+            state["inflight_local"] = inflight if inflight > 0 else 0
 
     return on_publish
 
@@ -542,25 +605,46 @@ class _AsyncDriver:
 
 
 def _consume_completion_locked(state, qos, send_ns, now, failed: bool, *, mid) -> None:
+    """Record one completion. Everything derivable is derived after the window.
+
+    Only the in-flight gate and the duplicate-mid guard have to be live. The
+    counters used to be maintained here, once per message, inside the measure
+    window - about 1.45 us of harness cost per message, charged to whichever
+    client was fast enough to reach it often. They are now read off the log
+    when the run is over, from the buffer and the index where the window closed.
+    """
     state["seen_mids_inflight"].discard(mid)
     if failed:
-        state["completed_failed"] += 1
-        state["protocol_failed"] += 1
+        value = FAILED
+    elif send_ns is None:
+        value = NO_LATENCY
     else:
-        state["completed_success"] += 1
-        if qos == 0:
-            state["socket_completed_qos0"] += 1
-        else:
-            state["protocol_completed"] += 1
-        if send_ns is not None:
-            state["latencies_ns"].add(now - send_ns)
-        phase = state["phase"]
-        if phase == "measure":
-            state["completed_in_window"] += 1
-        elif phase == "drain":
-            state["completed_during_drain"] += 1
+        value = now - send_ns
+    if not state["completions"].add(value):
+        _count_completion_live(state, qos, value)
     inflight = state["inflight_local"] - 1
     state["inflight_local"] = inflight if inflight > 0 else 0
+
+
+def _count_completion_live(state, qos, value) -> None:
+    """Count the handful of completions between a full buffer and its fold.
+
+    The callback must not fold: that is a scan of the whole buffer, and doing it
+    here would put a millisecond-scale pause inside one message's completion.
+    It raises the flag instead, the publish loop folds at its next batch
+    boundary, and these few land in the running totals directly.
+    """
+    state["fold_pending"] = True
+    if value == FAILED:
+        state["overflow_failed"] += 1
+        return
+    state["overflow_success"] += 1
+    if value >= 0:
+        state["latencies_ns"].add(value)
+    if state["phase"] == "drain":
+        state["overflow_during_drain"] += 1
+    else:
+        state["overflow_in_window"] += 1
 
 
 def _properties_builder(cfg, adapter):
@@ -645,6 +729,11 @@ def _run_publish_loop(
             with lock:
                 state["scheduler_lags_ns"].add(lag_ns)
             next_send += interval
+
+        if state["fold_pending"]:
+            with lock:
+                state["fold_pending"] = False
+                state["completions"].fold()
 
         for _ in range(batch_n):
             if perf() >= until:
@@ -820,24 +909,12 @@ def _account_awaited(state, qos, send_ns, now, failed) -> None:
     """Completion accounting for the awaited shape.
 
     An awaited publish *is* its own completion, so there is no mid to correlate
-    and no early-ack window: the counters move here directly instead of through
-    the callback path. Same fields, same meaning.
+    and no early-ack window. Same log, same derivation as every other path -
+    the harness must not cost one shape more than another.
     """
-    if failed:
-        state["completed_failed"] += 1
-        state["protocol_failed"] += 1
-        return
-    state["completed_success"] += 1
-    if qos == 0:
-        state["socket_completed_qos0"] += 1
-    else:
-        state["protocol_completed"] += 1
-    state["latencies_ns"].add(now - send_ns)
-    phase = state["phase"]
-    if phase == "measure":
-        state["completed_in_window"] += 1
-    elif phase == "drain":
-        state["completed_during_drain"] += 1
+    value = FAILED if failed else (now - send_ns)
+    if not state["completions"].add(value):
+        _count_completion_live(state, qos, value)
 
 
 async def _run_publish_loop_async(adapter, state, **kwargs):
@@ -1010,6 +1087,9 @@ async def _publish_loop_sync_on_loop(
                 since_yield += 1
                 if since_yield >= yield_every:
                     since_yield = 0
+                    if state["fold_pending"]:
+                        state["fold_pending"] = False
+                        state["completions"].fold()
                     await asyncio.sleep(0)
     except _MemoryGuardTripped:
         pass
@@ -1147,6 +1227,9 @@ async def _publish_loop_awaited(
             cursor["since_yield"] += 1
             if cursor["since_yield"] >= yield_every:
                 cursor["since_yield"] = 0
+                if state["fold_pending"]:
+                    state["fold_pending"] = False
+                    state["completions"].fold()
                 await asyncio.sleep(0)
 
     loop = asyncio.get_running_loop()
