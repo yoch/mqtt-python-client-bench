@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import json
 import re
 import threading
 import time
@@ -2740,6 +2741,70 @@ class _FakeAwaitedAdapter:
             self.concurrent -= 1
         self._mid = 1 if self._mid >= 65535 else self._mid + 1
         return self._mid
+
+
+class CampaignCompletenessTests(unittest.TestCase):
+    """One rule decides what a campaign re-measures, and what status reports.
+
+    They were two rules once, in two shell heredocs, and they disagreed: status
+    said "11/11 scenarios complete" about a set of results the gate was about to
+    re-measure in full, because status never looked at the harness fingerprint it
+    claimed to filter on.
+    """
+
+    def _write(self, tmp, client, scenario, *, points, fingerprint, version="1.0", started=True):
+        blocks = []
+        for i in range(points):
+            run = {"status": "valid", "harness_fingerprint": fingerprint}
+            if started:
+                run["started_at"] = "2026-01-01T00:00:00+00:00"
+            blocks.append({"point": {"i": i}, "runs": [run]})
+        doc = {"results": blocks, "client_identity": {"client_version": version}}
+        (tmp / f"{client}-{scenario}.json").write_text(json.dumps(doc))
+
+    def test_the_gate_and_the_display_read_the_same_rule(self):
+        import tempfile
+
+        from mqtt_client_bench import campaign
+        from mqtt_client_bench.adapters.registry import adapter_identity
+        from mqtt_client_bench.harness import HARNESS_FINGERPRINT
+
+        scenario = "pub_qos_sweep_telemetry"
+        points = len(expand_scenario(SCENARIO_BY_NAME[scenario], "standard"))
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            installed = adapter_identity("paho").get("client_version")
+
+            # Complete, current: both agree it is done.
+            self._write(tmp, "paho", scenario, points=points,
+                        fingerprint=HARNESS_FINGERPRINT, version=installed)
+            self.assertTrue(campaign.scenario_complete(scenario, ["paho"], tmp))
+            self.assertEqual(campaign.scenario_state(scenario, ["paho"], tmp)["state"], "done")
+
+            # Same file, measured by a different harness: stale, not done. This
+            # is the case the old display got wrong.
+            self._write(tmp, "paho", scenario, points=points,
+                        fingerprint="0" * 16, version=installed)
+            self.assertFalse(campaign.scenario_complete(scenario, ["paho"], tmp))
+            state, why, _ = campaign.scenario_state(scenario, ["paho"], tmp)["clients"]["paho"]
+            self.assertEqual(state, "stale")
+            self.assertIn("harness", why)
+
+            # Unstamped results predate the fingerprint entirely.
+            self._write(tmp, "paho", scenario, points=points,
+                        fingerprint=None, version=installed)
+            self.assertFalse(campaign.scenario_complete(scenario, ["paho"], tmp))
+
+            # Half the points measured: partial, and it says how far.
+            self._write(tmp, "paho", scenario, points=max(1, points // 2),
+                        fingerprint=HARNESS_FINGERPRINT, version=installed)
+            st = campaign.scenario_state(scenario, ["paho"], tmp)
+            self.assertEqual(st["clients"]["paho"][0], "partial")
+
+            # A client the campaign runs but never measured is not "done".
+            self._write(tmp, "paho", scenario, points=points,
+                        fingerprint=HARNESS_FINGERPRINT, version=installed)
+            self.assertFalse(campaign.scenario_complete(scenario, ["paho", "gmqtt"], tmp))
 
 
 class NativeAsyncPathTests(unittest.TestCase):
