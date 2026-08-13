@@ -61,6 +61,11 @@ _CHART_EXCLUDED_SCENARIOS = frozenset(
         "remaining_length_boundaries",
         "broker_ceiling_ingress",
         "client_ceiling_ingress",
+        # Fraction-of-own-capacity latency is an intra-client question, not a
+        # cross-client ranking. The public latency comparison is
+        # puback_latency_fixed_rate (equal absolute offered rates).
+        "puback_latency_qos1",
+        "application_rtt_qos1",
     }
 )
 _CHART_EXCLUDED_ORDER = (
@@ -72,6 +77,17 @@ _CHART_EXCLUDED_ORDER = (
     "remaining_length_boundaries",
     "broker_ceiling_ingress",
     "client_ceiling_ingress",
+    "puback_latency_qos1",
+    "application_rtt_qos1",
+)
+
+# Latency scenarios whose primary question is intra-client (near own ceiling).
+# Shown in the matrix with an explicit note; never crowned as a cross-client win.
+_FRACTION_LATENCY_SCENARIOS = frozenset(
+    {
+        "puback_latency_qos1",
+        "application_rtt_qos1",
+    }
 )
 
 # Failures that reflect how the SUT behaved under the offered load (or its
@@ -79,11 +95,13 @@ _CHART_EXCLUDED_ORDER = (
 # from the throughput chart is fine; burying them is not.
 _CLIENT_LOAD_REASON_PREFIXES = (
     "open_loop_rate_out_of_tolerance",
+    "open_loop_backpressure_misses",
     "protocol_failed",
     "timed_out_mids",
     "rtt_timeouts",
     "warmup_drain_timeout",
     "no_delivery_despite_load",
+    "integrity_mismatch",
     "worker_error:",
 )
 _CLIENT_CAPABILITY_PREFIX = "not_implemented:"
@@ -212,6 +230,38 @@ def _registry_meta(name: str) -> tuple:
         return caps.io_model, caps.stability
     except Exception:  # noqa: BLE001 - unknown client, or adapter deps missing
         return None, None
+
+
+def _client_has_native_async_path(client: Optional[str]) -> bool:
+    if not client:
+        return False
+    try:
+        from mqtt_client_bench.adapters.registry import has_async_adapter
+
+        return bool(has_async_adapter(client))
+    except Exception:  # noqa: BLE001
+        return client in {
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "zmqtt",
+            "aiomqtt3",
+            "mqttium",
+        }
+
+
+def _run_rankable(run: Dict[str, Any], *, client: Optional[str] = None) -> bool:
+    """True when a run may enter a cross-client median or latency aggregate.
+
+    Native and facade publish paths measure different harness tax; a
+    sync_facade result for a client that has a native path is diagnostic even
+    when an older JSON omitted non_comparable.
+    """
+    if run.get("status") != "valid" or run.get("non_comparable"):
+        return False
+    if run.get("publish_path") == "sync_facade" and _client_has_native_async_path(client):
+        return False
+    return True
 
 
 def _client_meta(docs: Sequence["ResultDoc"]) -> Dict[str, ClientMeta]:
@@ -576,6 +626,7 @@ def _performance_matrix_html(
         <div class="panel-head">
           <h2>Performance matrix</h2>
           <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols, and the best value is highlighted <strong>within each peer group</strong> — the vertical rules mark those groups, formed by I/O model and stability. So the highest number in a row is often <em>not</em> highlighted: it belongs to another group. A client alone in its group is shown in outline and never crowned, because there is nothing to rank it against. A dotted underline marks a number the harness did not attribute to the client itself; hover any cell for its bottleneck, run count and spread.</p>
+          <p class="hint"><strong>Latency rows paced at a fraction of each client's own capacity</strong> (<code>puback_latency_qos1</code>, <code>application_rtt_qos1</code>) answer an intra-client question and are not a cross-client ranking — a faster client is offered a higher absolute rate. For equal-offer latency compare <code>puback_latency_fixed_rate</code>.</p>
           <p class="legend">{legend}</p>
         </div>
         <div class="table-wrap table-wrap-sticky-col">
@@ -883,13 +934,13 @@ def _empty_cell_reason(
     return "missing", detail
 
 
-def _collect_latency(runs: Sequence[Dict[str, Any]]) -> Dict[str, Optional[float]]:
+def _collect_latency(runs: Sequence[Dict[str, Any]], *, client: Optional[str] = None) -> Dict[str, Optional[float]]:
     p50: List[float] = []
     p95: List[float] = []
     p99: List[float] = []
     p99_gated = False
     for run in runs:
-        if run.get("status") != "valid" or run.get("non_comparable"):
+        if not _run_rankable(run, client=client):
             continue
         for worker in run.get("workers") or []:
             summary = worker.get("latency_summary") or {}
@@ -914,7 +965,7 @@ def _collect_latency(runs: Sequence[Dict[str, Any]]) -> Dict[str, Optional[float
     }
 
 
-def _collect_integrity(runs: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _collect_integrity(runs: Sequence[Dict[str, Any]], *, client: Optional[str] = None) -> Optional[Dict[str, Any]]:
     totals = {
         "expected": 0,
         "received": 0,
@@ -927,6 +978,11 @@ def _collect_integrity(runs: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any
     worst_missing = 0
     found = False
     for run in runs:
+        # Only valid, comparable runs enter integrity medians — the same rule
+        # as throughput. Including inconclusive runs used to paper over
+        # mismatches that validate_run now refuses.
+        if not _run_rankable(run, client=client):
+            continue
         for worker in run.get("workers") or []:
             integ = worker.get("integrity")
             if not integ:
@@ -1122,6 +1178,7 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
     environment_reasons: Dict[str, int] = {}
     inconclusive_runs = 0
     identity = data.get("client_identity") or {}
+    client_name = data.get("client") or identity.get("client")
     blocks = data.get("results") or []
     varying = _varying_axes([b.get("point") or {} for b in blocks])
     for block in blocks:
@@ -1144,12 +1201,30 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
                     capability_reasons[short] = capability_reasons.get(short, 0) + 1
                 elif kind == "environment":
                     environment_reasons[short] = environment_reasons.get(short, 0) + 1
-        non_comparable = any(bool(r.get("non_comparable")) for r in runs) or bool(point.get("non_comparable"))
+        stale_facade = any(
+            r.get("publish_path") == "sync_facade" for r in runs
+        ) and _client_has_native_async_path(client_name)
+        non_comparable = (
+            any(bool(r.get("non_comparable")) for r in runs)
+            or bool(point.get("non_comparable"))
+            or stale_facade
+        )
         any_non_comparable = any_non_comparable or non_comparable
-        # Prefer summary computed from valid runs only.
-        median_rate = summary.get("median")
-        point_min = summary.get("min")
-        point_max = summary.get("max")
+        # Prefer summary computed from valid runs only; drop stale facade rates.
+        rankable_rates = [
+            float(r["primary_msgs_per_s"])
+            for r in runs
+            if _run_rankable(r, client=client_name) and r.get("primary_msgs_per_s") is not None
+        ]
+        if rankable_rates:
+            ordered_rates = sorted(rankable_rates)
+            median_rate = ordered_rates[len(ordered_rates) // 2]
+            point_min = ordered_rates[0]
+            point_max = ordered_rates[-1]
+        else:
+            median_rate = None if non_comparable else summary.get("median")
+            point_min = summary.get("min")
+            point_max = summary.get("max")
         if median_rate is not None and not non_comparable:
             median_min_max.append(
                 (
@@ -1166,18 +1241,20 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
         if median_rate and point_min is not None and point_max is not None and float(median_rate) > 0:
             relative_spread = 100.0 * (float(point_max) - float(point_min)) / float(median_rate)
         empty_reason, reason_detail = _empty_cell_reason(runs, median_rate)
+        if stale_facade and empty_reason == "missing":
+            empty_reason, reason_detail = "failed", "sync_facade publish path (not comparable)"
         points.append(
             PointRow(
                 label=_point_label(point, varying),
-                median_msgs_per_s=median_rate,
+                median_msgs_per_s=median_rate if not non_comparable else None,
                 status=status,
                 valid_runs=counts["valid"],
                 total_runs=counts["total"],
                 non_comparable=non_comparable,
-                latency=_collect_latency(runs),
-                integrity=_collect_integrity(runs),
-                spread_low=float(point_min) if point_min is not None else None,
-                spread_high=float(point_max) if point_max is not None else None,
+                latency=_collect_latency(runs, client=client_name),
+                integrity=_collect_integrity(runs, client=client_name),
+                spread_low=float(point_min) if point_min is not None and not non_comparable else None,
+                spread_high=float(point_max) if point_max is not None and not non_comparable else None,
                 protocol=str(point.get("protocol") or "MQTTv311"),
                 bottleneck=_dominant(runs, "bottleneck"),
                 mad=float(mad) if mad is not None else None,
@@ -1880,14 +1957,14 @@ def render_methodology(docs: Sequence[ResultDoc], generated_at: str) -> str:
         <h2>Three measurement protocols, never mixed</h2>
         <ul class="prose">
           <li><strong>Capacity</strong> — closed loop with a bounded outstanding window. The primary metric is <code>completed_success</code> inside the measure window.</li>
-          <li><strong>Latency</strong> — open loop at calibrated fractions of <em>that client's own</em> capacity in the same regime: publish capacity for PUBACK latency, RTT capacity for application RTT.</li>
+          <li><strong>Latency</strong> — open loop. Fractions of <em>that client's own</em> capacity (<code>puback_latency_qos1</code>, <code>application_rtt_qos1</code>) answer how the client behaves near its ceiling; they are not a cross-client comparison. Equal absolute offered rates (<code>puback_latency_fixed_rate</code>) are the public cross-client latency ranking.</li>
           <li><strong>Integrity</strong> — bounded rate with a sequence header; counts missing, duplicate and out-of-order messages. Not a throughput race.</li>
         </ul>
       </section>
 
       <section class="panel">
         <h2>What "completed" means</h2>
-        <p class="hint">The publish completion boundary is part of the contract; an adapter that cannot honour one declares the capability as missing instead of approximating it.</p>
+        <p class="hint">The publish completion boundary is part of the contract; an adapter that cannot honour one declares the capability as missing instead of approximating it. QoS0 in particular is not identical across libraries: Paho fires after the socket send completes (<code>qos0_boundary: socket</code>), while MQTTium admits to its write pump (<code>qos0_boundary: queue</code>) — both are declared in <code>client_identity</code>.</p>
         <table class="table">
           <thead><tr><th>QoS</th><th><code>on_publish</code> fires when</th></tr></thead>
           <tbody>

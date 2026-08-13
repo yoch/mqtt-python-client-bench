@@ -97,6 +97,10 @@ class MqttiumCompatAdapter:
             "synthetic_mids": caps.synthetic_mids,
             "display_note": caps.notes,
             "private_api": dict(cls._PRIVATE_API),
+            # Façade publish_nowait admits to the write pump; Paho fires after
+            # the socket send completes. Same peer group (sync) but different
+            # QoS0 completion boundary.
+            "qos0_boundary": "queue",
         }
 
     @classmethod
@@ -252,9 +256,10 @@ class MqttiumCompatAdapter:
                 self._fire_user_publish(synth, reason_code, props)
             return PublishResult(rc=0, mid=synth)
 
-        # Properties path: façade publish() has no properties kwarg.
-        # Use AsyncClient.publish_nowait on the owning loop. Avoid private
-        # engine/receipt access.
+        # Properties path: façade publish() has no properties kwarg. Schedule
+        # publish_nowait on the owning loop without a per-message blocking
+        # cross-thread wait — that wait violated the harness tax budget and
+        # silently penalised mqttium-compat on mqttv5_properties vs Paho.
         import asyncio
 
         if self._client._loop is None:
@@ -264,44 +269,30 @@ class MqttiumCompatAdapter:
             with self._lock:
                 self._qos0_fifo.append(synth)
 
-        handoff: dict[str, Any] = {}
-        done = threading.Event()
-
         async def _queue() -> None:
             try:
-                handoff["receipt"] = self._client._async.publish_nowait(
+                receipt = self._client._async.publish_nowait(
                     topic, data, qos=qos, retain=retain, properties=properties
                 )
-            except BaseException as exc:  # noqa: BLE001
-                handoff["error"] = exc
-            finally:
-                done.set()
+            except BaseException:  # noqa: BLE001
+                if int(qos) == 0:
+                    with self._lock:
+                        try:
+                            self._qos0_fifo.remove(synth)
+                        except ValueError:
+                            pass
+                self._fire_user_publish(synth, 128, None)
+                return
+            if int(qos) == 0 or receipt.mid is None:
+                if int(qos) != 0:
+                    self._fire_user_publish(synth, 128, None)
+                return
+            early = self._bind_real_mid(int(receipt.mid), synth)
+            if early is not None:
+                reason_code, props = early
+                self._fire_user_publish(synth, reason_code, props)
 
-        fut = asyncio.run_coroutine_threadsafe(_queue(), self._client._loop)
-        if not done.wait(timeout=5.0):
-            fut.cancel()
-            if int(qos) == 0:
-                with self._lock:
-                    try:
-                        self._qos0_fifo.remove(synth)
-                    except ValueError:
-                        pass
-            raise RuntimeError("mqttium-compat publish handoff timed out")
-        if "error" in handoff:
-            if int(qos) == 0:
-                with self._lock:
-                    try:
-                        self._qos0_fifo.remove(synth)
-                    except ValueError:
-                        pass
-            raise handoff["error"]
-        receipt = handoff["receipt"]
-        if int(qos) == 0 or receipt.mid is None:
-            return PublishResult(rc=0, mid=synth)
-        early = self._bind_real_mid(int(receipt.mid), synth)
-        if early is not None:
-            reason_code, props = early
-            self._fire_user_publish(synth, reason_code, props)
+        asyncio.run_coroutine_threadsafe(_queue(), self._client._loop)
         return PublishResult(rc=0, mid=synth)
 
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:

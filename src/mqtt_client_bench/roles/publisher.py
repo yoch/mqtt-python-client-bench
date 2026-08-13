@@ -221,8 +221,11 @@ def main(argv=None) -> int:
             open_loop_rate = float(target_rate)
         else:
             open_loop_rate = 1000.0 * load_fraction
-        if cadence == "steady50":
-            open_loop_rate = (target_rate or 2000.0) * 0.50
+        # steady50's ×0.50 is the scenario's own default offer, not a modifier
+        # on a calibrated target_rate. Applying it after calibration silently
+        # halved every integrity/latency point that carried both.
+        if cadence == "steady50" and not target_rate:
+            open_loop_rate = 2000.0 * 0.50
         elif cadence == "periodic10":
             open_loop_rate = 10.0
 
@@ -339,12 +342,13 @@ def main(argv=None) -> int:
         sequence_exact_limit=sequence_exact_limit,
         track_sequences=track_sequences,
     )
-    t1 = time.perf_counter()
+    t1 = min(time.perf_counter(), measure_end)
     cpu_ns_in_window = time.process_time_ns() - cpu_ns_start
     # One index is all the phase partition needs: everything logged after this
     # arrived during the drain. More accurate than the old test, too, which read
     # state["phase"] at callback time and so misfiled whatever was in flight
-    # across the boundary.
+    # across the boundary. Idempotent with the awaited path, which closes at
+    # the deadline before its grace period so grace completions are drain.
     state["completions"].close_window()
 
     state["phase"] = "drain"
@@ -371,7 +375,14 @@ def main(argv=None) -> int:
             "counted_live": state["overflow_success"] + state["overflow_failed"],
         }
         success = tally["completed_success"] + state["overflow_success"]
-        failed = tally["completed_failed"] + state["overflow_failed"]
+        # completed_failed on state is the live MID-collision counter: those
+        # never go through CompletionLog, so they must be folded in here or
+        # protocol_failed stays silent.
+        failed = (
+            tally["completed_failed"]
+            + state["overflow_failed"]
+            + int(state.get("completed_failed") or 0)
+        )
         completed_in_window = tally["completed_in_window"] + state["overflow_in_window"]
         completed_during_drain = tally["completed_during_drain"] + state["overflow_during_drain"]
         latencies = state["latencies_ns"].snapshot()
@@ -641,7 +652,9 @@ def _count_completion_live(state, qos, value) -> None:
     state["overflow_success"] += 1
     if value >= 0:
         state["latencies_ns"].add(value)
-    if state["phase"] == "drain":
+    # Follow the log's window cut, not state["phase"]: the awaited grace still
+    # leaves phase=measure while close_window has already fired at the deadline.
+    if state["completions"].window_closed or state["phase"] == "drain":
         state["overflow_during_drain"] += 1
     else:
         state["overflow_in_window"] += 1
@@ -985,6 +998,12 @@ async def _publish_loop_sync_on_loop(
 
     def _expire():
         state["loop_expired"] = True
+        # Close here, not when main() returns: any completion callback already
+        # queued on this loop turn after the deadline must land in drain, same
+        # contract as the awaited path's _stop_at_deadline. Leaving the window
+        # open until run_loop returns credited those acks to sync-on-loop
+        # clients only.
+        state["completions"].close_window()
         _wake_gate(state)
 
     expiry = loop.call_later(max(0.0, until - perf()), _expire)
@@ -1176,21 +1195,11 @@ async def _publish_loop_awaited(
                 if now < slot:
                     await asyncio.sleep(min(0.001, slot - now))
                     continue
-                # Behind schedule: take this slot and advance the cursor by
-                # exactly one interval, so the next worker fires immediately and
-                # the schedule catches up. The sync loop does the same.
-                #
-                # Jumping the cursor forward instead - and charging the skipped
-                # slots as missed - looked like honest accounting and was not:
-                # asyncio.sleep resolves to about a millisecond, against
-                # intervals of tens of microseconds here, so every worker lands
-                # late on every iteration, the cursor kept running away, and the
-                # achieved rate sat permanently under target. Every open-loop run
-                # on an await-only client came back
-                # open_loop_rate_out_of_tolerance (aiomqtt 24/24 valid before,
-                # 0/21 after). Backpressure is already counted where it actually
-                # happens: a worker that is still awaiting a publish is not in
-                # this block to take a slot.
+                # Claim exactly one interval. No await between the read and the
+                # write, so cooperative multitasking cannot double-claim a slot.
+                # Catch-up from sleep resolution advances one interval per loop
+                # (same as sync-on-loop): jumping the cursor was 9e1eab5 and
+                # permanently under-shot the target.
                 lag_add(int((now - slot) * 1e9))
                 cursor["next_send"] = slot + interval
 
@@ -1224,6 +1233,26 @@ async def _publish_loop_awaited(
             _account_awaited(state, qos, send_ns, time.perf_counter_ns(), failed)
             sent_sequences.add(sequence)
 
+            # After a publish that held this worker, the shared paceur may have
+            # fallen behind. Sync-on-loop charges those intervals as misses
+            # while the outstanding window is full; do the same here so the two
+            # shapes cannot disagree on offered/missed under backpressure. Do
+            # not burst-publish the backlog — that biased latency samples.
+            #
+            # Cap the catch-up at `until` (measure deadline), not wall-clock
+            # after stop: workers still awaiting at T1 finish during grace, and
+            # skipping the block when cursor["stop"] is set under-counted
+            # measure-window misses. Slots after `until` are drain, not offer.
+            if open_loop and interval > 0:
+                now = min(perf(), until)
+                behind = now - cursor["next_send"]
+                if behind > interval:
+                    missed_slots = int(behind / interval)
+                    counters["missed"] += missed_slots
+                    counters["offered"] += missed_slots
+                    counters["calls"] += missed_slots
+                    cursor["next_send"] += missed_slots * interval
+
             cursor["since_yield"] += 1
             if cursor["since_yield"] >= yield_every:
                 cursor["since_yield"] = 0
@@ -1234,10 +1263,18 @@ async def _publish_loop_awaited(
 
     loop = asyncio.get_running_loop()
     workers = [asyncio.ensure_future(worker()) for _ in range(max(1, outstanding))]
-    # Close the window with a flag, then give the publishes already awaiting an
-    # acknowledgement a bounded grace to land. Cancelling at the deadline instead
-    # would abort one publish per worker mid-flight and charge the client for it.
-    stopper = loop.call_later(max(0.0, until - perf()), lambda: cursor.__setitem__("stop", True))
+
+    def _stop_at_deadline() -> None:
+        cursor["stop"] = True
+        # Grace completions below must land in drain, not in the measure window.
+        state["completions"].close_window()
+
+    # Close the window at the deadline, then give publishes already awaiting an
+    # acknowledgement a bounded grace to land. Cancelling at the deadline
+    # instead would abort one publish per worker mid-flight and charge the
+    # client for it; leaving the window open through grace would inflate
+    # completed_in_window for awaited clients only.
+    stopper = loop.call_later(max(0.0, until - perf()), _stop_at_deadline)
     try:
         await asyncio.wait(workers, timeout=max(0.0, until - perf()) + _AWAITED_GRACE_S)
     finally:

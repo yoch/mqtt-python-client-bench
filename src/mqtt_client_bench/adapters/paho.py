@@ -100,6 +100,7 @@ class PahoAdapter:
             "implementation_language": caps.implementation_language,
             "completion_mechanism": caps.completion_mechanism,
             "synthetic_mids": caps.synthetic_mids,
+            "qos0_boundary": "socket",
         }
 
     @classmethod

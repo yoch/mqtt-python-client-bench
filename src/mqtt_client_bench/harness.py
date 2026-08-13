@@ -399,6 +399,50 @@ def unsupported_features(point: dict, client: str = "paho") -> List[str]:
     return missing
 
 
+def enrich_worker_integrity(worker_results: List[dict]) -> None:
+    """Attach per-subscriber integrity digests before validate_run sees them.
+
+    Must run before validation: a digest mismatch used to be recorded on the
+    worker and then ignored, leaving status=valid and poisoning medians.
+    """
+    pub = next((w for w in worker_results if w.get("role") == "publisher"), None)
+    for wr in worker_results:
+        if wr.get("role") != "subscriber":
+            continue
+        expected_summary = (pub or {}).get("sent_sequence_summary")
+        received_summary = wr.get("sequence_summary")
+        if expected_summary and received_summary:
+            online = integrity_from_summaries(expected_summary, received_summary)
+            expected_values = (pub or {}).get("sent_sequences")
+            received_values = wr.get("sequences")
+            if expected_values is not None and received_values is not None:
+                exact = integrity_counts(expected_values, received_values)
+                exact.update(
+                    {
+                        "digest_match": online["digest_match"],
+                        "count_delta": online["count_delta"],
+                        "probabilistic": False,
+                    }
+                )
+                wr["integrity"] = exact
+            else:
+                wr["integrity"] = online
+            continue
+        # Compatibility with results from workers predating online summaries.
+        if wr.get("sequences"):
+            seqs = [s for s in wr["sequences"] if s < (1 << 40)]
+            expected = (pub or {}).get("sent_sequences")
+            if expected is not None:
+                wr["integrity"] = integrity_counts(expected, seqs)
+
+
+def _integrity_failed(integ: dict) -> bool:
+    """True when a subscriber integrity block reports a mismatch."""
+    if "digest_match" in integ:
+        return integ["digest_match"] is False
+    return int(integ.get("missing") or 0) > 0 or int(integ.get("unexpected") or 0) > 0
+
+
 def validate_run(
     point: dict,
     worker_results: List[dict],
@@ -434,14 +478,43 @@ def validate_run(
             if timeouts > 0 and (sent == 0 or timeouts / max(sent, 1) > 0.01):
                 reasons.append("rtt_timeouts")
 
-    # Open-loop charge adherence.
+    # Sequence integrity is the substance of publisher_with_oracle / integrity
+    # points. Enrichment must have run first; a mismatch must not stay valid.
+    require_integrity = bool(point.get("integrity")) or point.get("topology") == "publisher_with_oracle"
+    if require_integrity:
+        for result in worker_results:
+            if result.get("role") != "subscriber":
+                continue
+            integ = result.get("integrity")
+            if integ and _integrity_failed(integ):
+                reasons.append("integrity_mismatch")
+
+    # Open-loop charge adherence: validate the *offer* rate, not completions.
+    # Completions still in flight at T1 drain after the window and would falsely
+    # trip a completion-rate gate even when the paceur held the target.
     if point.get("cadence") in ("steady50", "loaded75", "loaded90", "periodic10") and point.get("target_rate"):
         for result in worker_results:
-            if result.get("role") in ("publisher", "rtt_initiator") and result.get("msgs_per_s") is not None:
-                target = float(point["target_rate"])
-                actual = float(result["msgs_per_s"])
-                if target > 0 and abs(actual - target) / target > 0.02:
-                    reasons.append("open_loop_rate_out_of_tolerance")
+            if result.get("role") not in ("publisher", "rtt_initiator"):
+                continue
+            target = float(point["target_rate"])
+            if target <= 0:
+                continue
+            duration = float(result.get("duration_s") or point.get("duration_s") or 0.0)
+            if duration <= 0:
+                continue
+            offered = result.get("offered")
+            if offered is None:
+                offered = result.get("sent_in_window")
+            if offered is None:
+                continue
+            actual_offer = float(offered) / duration
+            if abs(actual_offer - target) / target > 0.02:
+                reasons.append("open_loop_rate_out_of_tolerance")
+            missed = int(result.get("missed_due_to_backpressure") or 0)
+            # Material missed slots mean the latency sample is from a different
+            # offered shape than the point claimed; fail closed.
+            if float(offered) > 0 and missed / float(offered) > 0.02:
+                reasons.append("open_loop_backpressure_misses")
 
     topology = point.get("topology")
     duration_s = float(point.get("duration_s") or 1.0)
@@ -1195,6 +1268,10 @@ def run_point(
             result["memory_peak"] = worker_memory.get(f"w{index}")
             worker_results.append(result)
 
+        # Integrity enrichment must precede validate_run so a digest mismatch
+        # can fail the run closed instead of remaining a silent annotation.
+        enrich_worker_integrity(worker_results)
+
         validity = validate_run(
             point,
             worker_results,
@@ -1213,38 +1290,6 @@ def run_point(
         if barrier_failed:
             validity["status"] = "inconclusive"
             validity["reasons"].append(f"barrier_failed:{barrier_error or 'broadcast'}")
-
-        # Integrity enrichment. New workers emit bounded online fingerprints;
-        # exact lists remain an optional small-run compatibility detail.
-        pub = next((w for w in worker_results if w.get("role") == "publisher"), None)
-        for wr in worker_results:
-            if wr.get("role") != "subscriber":
-                continue
-            expected_summary = (pub or {}).get("sent_sequence_summary")
-            received_summary = wr.get("sequence_summary")
-            if expected_summary and received_summary:
-                online = integrity_from_summaries(expected_summary, received_summary)
-                expected_values = (pub or {}).get("sent_sequences")
-                received_values = wr.get("sequences")
-                if expected_values is not None and received_values is not None:
-                    exact = integrity_counts(expected_values, received_values)
-                    exact.update(
-                        {
-                            "digest_match": online["digest_match"],
-                            "count_delta": online["count_delta"],
-                            "probabilistic": False,
-                        }
-                    )
-                    wr["integrity"] = exact
-                else:
-                    wr["integrity"] = online
-                continue
-            # Compatibility with results from workers predating online summaries.
-            if wr.get("sequences"):
-                seqs = [s for s in wr["sequences"] if s < (1 << 40)]
-                expected = (pub or {}).get("sent_sequences")
-                if expected is not None:
-                    wr["integrity"] = integrity_counts(expected, seqs)
 
         # Latency summaries.
         for wr in worker_results:

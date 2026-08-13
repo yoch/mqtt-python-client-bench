@@ -335,9 +335,22 @@ class AdapterRegistryTests(unittest.TestCase):
 
     def test_callback_matching_paho_only(self):
         point = {"callback_filters": 64, "qos_subscribe": 0}
+        from mqtt_client_bench.adapters.registry import _ADAPTERS
+
         self.assertEqual(unsupported_for_client("paho", point), [])
-        for name in ("gmqtt", "aiomqtt", "amqtt", "awscrt", "zmqtt"):
-            self.assertIn("native_message_callback_add", unsupported_for_client(name, point), name)
+        # mqttium-compat claims native_message_callback_add; everyone else must refuse.
+        for name in _ADAPTERS:
+            if name in ("paho", "mqttium-compat"):
+                continue
+            try:
+                missing = unsupported_for_client(name, point)
+            except Exception:
+                continue  # optional dep not installed (aiomqtt3)
+            self.assertIn(
+                "native_message_callback_add",
+                missing,
+                f"{name} must refuse callback_filters without native matching",
+            )
 
     def test_amqtt_refuses_mqtt_v5(self):
         point = {"protocol": "MQTTv5", "qos_publish": 0}
@@ -388,12 +401,18 @@ class AdapterRegistryTests(unittest.TestCase):
         # every such dependency must be declared and visible in the result JSON.
         from mqtt_client_bench.adapters.registry import adapter_identity
 
-        for name in ("gmqtt", "aiomqtt", "mqttium-compat"):
+        for name in ("gmqtt", "aiomqtt", "mqttium-compat", "amqtt", "mqttium"):
             info = adapter_identity(name)
             declared = info.get("private_api")
             self.assertTrue(declared, f"{name} must declare its private API use")
             for attr, reason in declared.items():
                 self.assertTrue(reason.strip(), f"{name}:{attr} needs a reason")
+        # aiomqtt3 lives in a separate venv; skip when not installed.
+        info = adapter_identity("aiomqtt3")
+        if info.get("error") or not info.get("client_module"):
+            return
+        declared = info.get("private_api")
+        self.assertTrue(declared, "aiomqtt3 must declare its private API use")
 
     def test_gmqtt_private_api_shape(self):
         # gmqtt's public publish() drops the packet id, so QoS>=1 mirrors it via
@@ -1557,6 +1576,9 @@ class FairnessGateTests(unittest.TestCase):
 
         self.assertIn("session_resume_qos1", _CHART_EXCLUDED_SCENARIOS)
         self.assertIn("reconnect_ordering", _CHART_EXCLUDED_SCENARIOS)
+        # Fraction-of-own-capacity latency is an intra-client question.
+        self.assertIn("puback_latency_qos1", _CHART_EXCLUDED_SCENARIOS)
+        self.assertIn("application_rtt_qos1", _CHART_EXCLUDED_SCENARIOS)
 
     def test_cost_per_message_uses_worker_window_cpu(self):
         # CPU must come from the workers' own measure window. Telemetry samples
@@ -2153,13 +2175,25 @@ class ReportTests(unittest.TestCase):
 
         runs = [
             {
+                "status": "valid",
+                "non_comparable": False,
                 "workers": [
                     {"integrity": {"expected": 10, "received": 9, "unique": 9, "missing": 1, "duplicates": 0, "out_of_order": 0, "unexpected": 0}}
                 ]
             },
             {
+                "status": "valid",
+                "non_comparable": False,
                 "workers": [
                     {"integrity": {"expected": 10, "received": 8, "unique": 8, "missing": 2, "duplicates": 1, "out_of_order": 0, "unexpected": 0}}
+                ]
+            },
+            {
+                # Inconclusive must not poison the aggregate (fc61949-era fail-open).
+                "status": "inconclusive",
+                "non_comparable": False,
+                "workers": [
+                    {"integrity": {"expected": 10, "received": 0, "unique": 0, "missing": 10, "duplicates": 0, "out_of_order": 0, "unexpected": 0}}
                 ]
             },
         ]
@@ -3000,7 +3034,8 @@ class NativeAsyncPathTests(unittest.TestCase):
             return time.perf_counter() - started
 
         elapsed = asyncio.new_event_loop().run_until_complete(drive())
-        return self._completed(state, qos) / elapsed
+        # Offer rate, not completion rate: completions may drain after T1.
+        return state["offered"] / elapsed
 
     def test_awaited_shape_holds_the_open_loop_target_rate(self):
         """An open-loop run must actually offer the rate it was asked for.
@@ -3012,23 +3047,25 @@ class NativeAsyncPathTests(unittest.TestCase):
         and the achieved rate sat permanently under target. Every open-loop run
         on an await-only client came back open_loop_rate_out_of_tolerance -
         aiomqtt went from 24/24 valid runs to 0/21 - and the harness was right
-        to refuse them. The unit suite passed throughout.
+        to refuse them. The unit suite passed throughout (9e1eab5).
         """
         target = 2000.0
-        rate = self._achieved_open_loop_rate(_FakeAwaitedAdapter(delay_s=0.0002), target)
+        rate = self._achieved_open_loop_rate(_FakeAwaitedAdapter(delay_s=0.00005), target)
         self.assertGreater(
-            rate, target * 0.85,
-            f"awaited open loop achieved {rate:.0f} msgs/s against a {target:.0f} target",
+            rate, target * 0.98,
+            f"awaited open loop offered {rate:.0f} msgs/s against a {target:.0f} target",
         )
+        self.assertLess(rate, target * 1.05)
 
     def test_sync_on_loop_shape_holds_the_open_loop_target_rate(self):
         """The same guarantee for the other publish shape, as a control."""
         target = 2000.0
         rate = self._achieved_open_loop_rate(_FakeSyncOnLoopAdapter(complete_after=1), target)
         self.assertGreater(
-            rate, target * 0.85,
-            f"sync-on-loop open loop achieved {rate:.0f} msgs/s against a {target:.0f} target",
+            rate, target * 0.98,
+            f"sync-on-loop open loop offered {rate:.0f} msgs/s against a {target:.0f} target",
         )
+        self.assertLess(rate, target * 1.05)
 
     def test_harness_cost_per_message_stays_under_budget(self):
         """The harness's own per-message cost, measured against a null client.

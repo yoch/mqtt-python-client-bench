@@ -44,6 +44,12 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
         "aiomqtt v3 alpha — pure asyncio on mqtt5 (Rust sans-io). MQTT 5 only. "
         "Experimental; must not share an env with aiomqtt v2."
     )
+    _PRIVATE_API = {
+        "Client._socket": (
+            "aiomqtt v3 exposes no public TCP_NODELAY knob; the fd is set via "
+            "the private socket so RTT runs match peers that disable Nagle"
+        ),
+    }
 
     def __init__(self) -> None:
         super().__init__()
@@ -92,6 +98,7 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
             "implementation_language": caps.implementation_language,
             "completion_mechanism": caps.completion_mechanism,
             "synthetic_mids": caps.synthetic_mids,
+            "private_api": dict(cls._PRIVATE_API),
         }
 
     @classmethod
@@ -148,14 +155,23 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
         self._client = aiomqtt.Client(**kwargs)
         await self._client.__aenter__()
         # Align with other asyncio adapters / Mosquitto set_tcp_nodelay.
-        try:
-            import socket
+        # Fail closed: silently leaving Nagle on while declaring tcp_nodelay
+        # would bias RTT against peers that actually disable it.
+        import socket
 
-            sock = getattr(self._client, "_socket", None)
-            if sock is not None:
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        except OSError:
-            pass
+        sock = getattr(self._client, "_socket", None)
+        if sock is None:
+            raise RuntimeError(
+                "aiomqtt3 tcp_nodelay: Client._socket is missing; refusing to "
+                "run with Nagle while capabilities claim tcp_nodelay"
+            )
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError as exc:
+            raise RuntimeError(
+                f"aiomqtt3 tcp_nodelay: setsockopt failed ({exc}); refusing to "
+                "run with Nagle while capabilities claim tcp_nodelay"
+            ) from exc
         self._connected = True
         self._fire_on_connect(flags={}, reason_code=0, properties=None)
         self._start_pump()
