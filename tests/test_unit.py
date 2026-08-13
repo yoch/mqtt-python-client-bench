@@ -49,6 +49,11 @@ from mqtt_client_bench.metrics import (  # noqa: E402
 )
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, estimate_suite, expand_scenario, list_scenarios  # noqa: E402
 from mqtt_client_bench.sampling import (  # noqa: E402
+    DEFAULT_COMPLETION_LOG_LIMIT,
+    DEFAULT_METRIC_SAMPLE_LIMIT,
+    CompletionLog,
+)
+from mqtt_client_bench.sampling import (  # noqa: E402
     ReservoirSampler,
     SequenceTracker,
     bound_payload_backlog,
@@ -752,7 +757,11 @@ class PublisherContractTests(unittest.TestCase):
             "latencies_ns": ReservoirSampler(10),
             "phase": "measure",
             "lock": __import__("threading").Lock(),
+            "overflow_success": 0, "overflow_failed": 0,
+            "overflow_in_window": 0, "overflow_during_drain": 0,
+            "fold_pending": False,
         }
+        state["completions"] = CompletionLog(64, sampler=state["latencies_ns"])
         # Simulate callback before registration.
         now = 1000
         with state["lock"]:
@@ -760,8 +769,11 @@ class PublisherContractTests(unittest.TestCase):
             early = state["early_acks"].pop(7, None)
             self.assertIsNotNone(early)
             pub_mod._consume_completion_locked(state, 1, 500, early[0], early[1], mid=7)
-        self.assertEqual(state["completed_success"], 1)
-        self.assertEqual(state["completed_in_window"], 1)
+        # The counters are derived from the log, not maintained live.
+        tally = state["completions"].summary(1)
+        self.assertEqual(tally["completed_success"], 1)
+        self.assertEqual(tally["completed_in_window"], 1)
+        self.assertEqual(state["latencies_ns"].seen, 1, "the latency must survive the fold")
         self.assertNotIn(7, state["seen_mids_inflight"])
 
     def test_mid_freed_on_completion_allows_reuse(self):
@@ -782,7 +794,11 @@ class PublisherContractTests(unittest.TestCase):
             "latencies_ns": ReservoirSampler(10),
             "phase": "measure",
             "lock": __import__("threading").Lock(),
+            "overflow_success": 0, "overflow_failed": 0,
+            "overflow_in_window": 0, "overflow_during_drain": 0,
+            "fold_pending": False,
         }
+        state["completions"] = CompletionLog(64, sampler=state["latencies_ns"])
         with state["lock"]:
             send_ns = state["mid_send_ns"].pop(3)
             pub_mod._consume_completion_locked(state, 1, send_ns, 200, False, mid=3)
@@ -837,7 +853,15 @@ class PublisherContractTests(unittest.TestCase):
             "mid_send_ns": {},
             "early_acks": {},
             "seen_mids_inflight": set(),
+            "overflow_success": 0,
+            "overflow_failed": 0,
+            "overflow_in_window": 0,
+            "overflow_during_drain": 0,
+            "fold_pending": False,
         }
+        # Completions are logged and tallied after the window, so a state built
+        # by hand needs the log the same way the role worker builds it.
+        state["completions"] = CompletionLog(4096, sampler=state["latencies_ns"])
 
         def on_publish(client, userdata, mid, reason_code=None, properties=None):
             now = _time.perf_counter_ns()
@@ -919,9 +943,14 @@ class PublisherContractTests(unittest.TestCase):
                     state["seen_mids_inflight"],
                     set(state["mid_send_ns"]) | set(state["early_acks"]),
                 )
-                self.assertEqual(state["completed_success"], state["submitted"])
+                tally = state["completions"].summary(1)
+                # The log is deliberately small here so the fold path runs: the
+                # few completions between a full buffer and the fold are counted
+                # live, so the total is the sum of the two.
+                completed = tally["completed_success"] + state["overflow_success"]
+                self.assertEqual(completed, state["submitted"])
                 # A wrapping mid that was already freed must not count as a collision.
-                self.assertEqual(state["completed_failed"], 0)
+                self.assertEqual(tally["completed_failed"] + state["overflow_failed"], 0)
                 self.assertEqual(state["inflight_local"], 0)
 
     def test_publish_loop_gate_blocks_at_outstanding_without_acks(self):
@@ -2652,6 +2681,40 @@ class _FakeSyncOnLoopAdapter:
         return mid
 
 
+class _FakeDeferredAdapter:
+    """Admits on the loop and acknowledges *later*, from the loop itself.
+
+    The other sync-on-loop fake acknowledges inside the publish call, so the
+    publish loop never parks on the outstanding gate. Only this one exercises
+    the park-and-wake path - which is how a QoS 1 client actually behaves, and
+    where a missing wake-up leaves the loop asleep after one full window.
+    """
+
+    def __init__(self):
+        self._mid = 0
+        self.on_publish = None
+        self.on_connect = None
+        self.on_message = None
+
+    @classmethod
+    def capabilities(cls):
+        return AdapterCapabilities(name="fake-deferred", native_async=True, publish_sync_on_loop=True)
+
+    def publish_nowait(self, topic, payload=None, qos=0, retain=False, properties=None):
+        self._mid = 1 if self._mid >= 65535 else self._mid + 1
+        mid = self._mid
+        # call_later, not call_soon: with call_soon the acknowledgements land at
+        # the loop's very next yield, which happens before the window is full,
+        # so the loop never parks and the test proves nothing. A delay longer
+        # than the fill time is what forces the park.
+        asyncio.get_running_loop().call_later(0.002, self._ack, mid)
+        return mid
+
+    def _ack(self, mid):
+        if self.on_publish is not None:
+            self.on_publish(self, None, mid, 0, None)
+
+
 class _FakeAwaitedAdapter:
     """A client whose only publish API is awaitable, with a fixed service time."""
 
@@ -2688,8 +2751,14 @@ class NativeAsyncPathTests(unittest.TestCase):
     """
 
     @staticmethod
-    def _state():
-        return {
+    def _state(log_limit=4096, sample_limit=1000):
+        """A publisher state.
+
+        The small defaults deliberately force the log to fold, so the tests
+        exercise that path. The budget test passes production limits instead,
+        because that is the configuration whose cost the budget is about.
+        """
+        st = {
             "offered": 0, "submitted": 0, "sync_rejected": 0,
             "completed_success": 0, "completed_failed": 0,
             "missed_due_to_backpressure": 0,
@@ -2697,15 +2766,26 @@ class NativeAsyncPathTests(unittest.TestCase):
             "protocol_completed": 0, "protocol_failed": 0,
             "socket_completed_qos0": 0,
             "completed_in_window": 0, "completed_during_drain": 0,
-            "latencies_ns": ReservoirSampler(1000, seed=11),
-            "scheduler_lags_ns": ReservoirSampler(1000, seed=29),
+            "latencies_ns": ReservoirSampler(sample_limit, seed=11),
+            "scheduler_lags_ns": ReservoirSampler(sample_limit, seed=29),
             "inflight_local": 0,
             "phase": "measure",
             "mid_send_ns": {}, "early_acks": {},
             "warmup_drain_ok": True, "seen_mids_inflight": set(),
             "gate_waiter": None, "loop_expired": False,
             "pending_send_ns": None, "completed_inline": None,
+            "overflow_success": 0, "overflow_failed": 0,
+            "overflow_in_window": 0, "overflow_during_drain": 0,
+            "fold_pending": False,
         }
+        st["completions"] = CompletionLog(log_limit, sampler=st["latencies_ns"])
+        return st
+
+    @staticmethod
+    def _completed(state, qos=1):
+        """Counters are derived from the log now, not maintained live."""
+        tally = state["completions"].summary(qos)
+        return tally["completed_success"] + state["overflow_success"]
 
     @staticmethod
     def _loop_kwargs(**over):
@@ -2772,8 +2852,34 @@ class NativeAsyncPathTests(unittest.TestCase):
 
         asyncio.new_event_loop().run_until_complete(drive())
         self.assertLessEqual(max(peak, default=0), outstanding)
-        self.assertGreater(state["completed_success"], 0)
+        self.assertGreater(self._completed(state), 0)
         self.assertEqual(state["offered"], state["submitted"])
+
+    def test_deferred_completion_wakes_the_parked_loop(self):
+        """A completion that frees a slot must wake the loop waiting on it.
+
+        With the wake-up missing, the loop filled the window once and then slept
+        until the deadline: mqttium QoS 1 offered exactly 64 messages in a 3 s
+        window, 21 msgs/s instead of ~15,000. QoS 0 looked perfect throughout,
+        because a completion delivered inside the publish call never parks.
+        """
+        outstanding = 8
+        adapter = _FakeDeferredAdapter()
+        state = self._state()
+        adapter.on_publish = publisher._make_on_publish(state, 1, lock=None)
+
+        async def drive():
+            return await publisher._run_publish_loop_async(
+                adapter, state, **self._loop_kwargs(outstanding=outstanding,
+                                                    until=time.perf_counter() + 0.3)
+            )
+
+        asyncio.new_event_loop().run_until_complete(drive())
+        completed = self._completed(state)
+        self.assertGreater(
+            completed, outstanding * 10,
+            f"only {completed} completions: the loop parked on the gate and was never woken",
+        )
 
     def test_awaited_shape_keeps_the_window_full(self):
         """An await-only API still gets `outstanding` publishes in flight.
@@ -2793,7 +2899,7 @@ class NativeAsyncPathTests(unittest.TestCase):
 
         asyncio.new_event_loop().run_until_complete(drive())
         self.assertEqual(adapter.max_concurrent, outstanding)
-        self.assertGreater(state["completed_success"], 0)
+        self.assertGreater(self._completed(state), 0)
 
     def test_awaited_shape_releases_every_slot(self):
         """A cancelled publish must not leave its slot held.
@@ -2829,7 +2935,7 @@ class NativeAsyncPathTests(unittest.TestCase):
             return time.perf_counter() - started
 
         elapsed = asyncio.new_event_loop().run_until_complete(drive())
-        return state["completed_success"] / elapsed
+        return self._completed(state, qos) / elapsed
 
     def test_awaited_shape_holds_the_open_loop_target_rate(self):
         """An open-loop run must actually offer the rate it was asked for.
@@ -2867,19 +2973,25 @@ class NativeAsyncPathTests(unittest.TestCase):
         than a slow one's, which compresses - and can reorder - a ranking.
 
         Where it stands, measured on this loop with no library in the way:
-        about 4.8 us, against 18.5 us through the bridge this path replaced.
-        Component costs: completion accounting ~1.45 us, reservoir sample
-        ~0.49 us, header stamp ~0.44 us, publish call ~0.22 us, three clock
-        reads ~0.22 us. The target is 5% of the fastest measured client's
-        period (~2 us at 25,000 msgs/s) and it is *not* met yet; at 4.8 us the
-        distortion between a 46,000 msgs/s client and a 6,000 msgs/s one is
-        about 19%, down from 66%.
+        about 3.2 us, against 18.5 us through the bridge this path replaced.
+        The completion counters left the window (CompletionLog), the reservoir
+        left the hot path with them, and the header stamper resolves the payload
+        shape once per run instead of once per message. What is left is the loop
+        itself: the stamp (~0.51 us), the publish call (~0.24), three clock
+        reads (~0.22) and the interpreter.
 
-        The bound below is set to catch a regression toward bridged cost, not
-        to certify the target. Tighten it as the remaining cost comes out.
+        The target is 5% of the fastest measured client's period - 2 us at
+        46,000 msgs/s - and it is not met. At 3.2 us the distortion between a
+        46,000 msgs/s client and a 6,000 msgs/s one is about 13%, down from 66%
+        through the bridge.
+
+        The bound below is set to catch a regression, not to certify the target.
+        Tighten it as the remaining cost comes out.
         """
         adapter = _FakeSyncOnLoopAdapter(complete_after=1)
-        state = self._state()
+        state = self._state(
+            log_limit=DEFAULT_COMPLETION_LOG_LIMIT, sample_limit=DEFAULT_METRIC_SAMPLE_LIMIT
+        )
         adapter.on_publish = publisher._make_on_publish(state, 0, lock=None)
 
         async def drive():
@@ -2895,7 +3007,7 @@ class NativeAsyncPathTests(unittest.TestCase):
         self.assertGreater(sent, 1000, "null-client loop did not run enough messages")
         ns_per_message = (elapsed * 1e9) / sent
         self.assertLess(
-            ns_per_message, 7000.0,
+            ns_per_message, 4500.0,
             f"harness costs {ns_per_message:.0f} ns/message; the bridged path it "
             "replaced cost 18500 ns, so this is a regression toward it",
         )
