@@ -2813,6 +2813,52 @@ class NativeAsyncPathTests(unittest.TestCase):
         asyncio.new_event_loop().run_until_complete(drive())
         self.assertEqual(state["inflight_local"], 0)
 
+    def _achieved_open_loop_rate(self, adapter, target, qos=1):
+        state = self._state()
+        # The sync-on-loop shape completes through this callback; the awaited
+        # shape accounts its own completions and simply never fires it.
+        adapter.on_publish = publisher._make_on_publish(state, qos, lock=None)
+
+        async def drive():
+            started = time.perf_counter()
+            await publisher._run_publish_loop_async(
+                adapter, state,
+                **self._loop_kwargs(qos=qos, outstanding=32, cadence="steady50",
+                                    target_rate=target, until=started + 0.5)
+            )
+            return time.perf_counter() - started
+
+        elapsed = asyncio.new_event_loop().run_until_complete(drive())
+        return state["completed_success"] / elapsed
+
+    def test_awaited_shape_holds_the_open_loop_target_rate(self):
+        """An open-loop run must actually offer the rate it was asked for.
+
+        It did not: the awaited path used to jump its pacing cursor forward when
+        it found itself late and charge the skipped slots as backpressure. Since
+        asyncio.sleep resolves to about a millisecond against intervals of tens
+        of microseconds, it was late on every iteration, so the cursor ran away
+        and the achieved rate sat permanently under target. Every open-loop run
+        on an await-only client came back open_loop_rate_out_of_tolerance -
+        aiomqtt went from 24/24 valid runs to 0/21 - and the harness was right
+        to refuse them. The unit suite passed throughout.
+        """
+        target = 2000.0
+        rate = self._achieved_open_loop_rate(_FakeAwaitedAdapter(delay_s=0.0002), target)
+        self.assertGreater(
+            rate, target * 0.85,
+            f"awaited open loop achieved {rate:.0f} msgs/s against a {target:.0f} target",
+        )
+
+    def test_sync_on_loop_shape_holds_the_open_loop_target_rate(self):
+        """The same guarantee for the other publish shape, as a control."""
+        target = 2000.0
+        rate = self._achieved_open_loop_rate(_FakeSyncOnLoopAdapter(complete_after=1), target)
+        self.assertGreater(
+            rate, target * 0.85,
+            f"sync-on-loop open loop achieved {rate:.0f} msgs/s against a {target:.0f} target",
+        )
+
     def test_harness_cost_per_message_stays_under_budget(self):
         """The harness's own per-message cost, measured against a null client.
 
