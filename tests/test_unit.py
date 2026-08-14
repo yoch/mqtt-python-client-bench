@@ -376,6 +376,15 @@ class AdapterRegistryTests(unittest.TestCase):
         self.assertIn("mqtt_v311", unsupported_for_client("aiomqtt3", {"protocol": "MQTTv311"}))
         self.assertEqual(unsupported_for_client("aiomqtt3", {"protocol": "MQTTv5", "qos_publish": 0}), [])
 
+    def test_aiomqtt3_extra_pulls_paho_for_sys_probe(self):
+        # SysCountersProbe imports paho-mqtt. The isolated aiomqtt3 extra must
+        # install it or every publisher_only point is fail-closed as
+        # publisher_completions_unconfirmed (sys_probe_start_failed).
+        text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        extra = re.search(r"^aiomqtt3\s*=\s*\[([^\]]*)\]", text, re.M)
+        self.assertIsNotNone(extra, "aiomqtt3 extra missing from pyproject.toml")
+        self.assertIn("paho-mqtt", extra.group(1))
+
     def test_awscrt_identity_native(self):
         from mqtt_client_bench.adapters.registry import adapter_identity, get_adapter_class
 
