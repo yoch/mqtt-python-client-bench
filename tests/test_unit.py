@@ -20,6 +20,7 @@ if str(SRC) not in sys.path:
 from mqtt_client_bench.adapters import registry  # noqa: E402
 from mqtt_client_bench.adapters.base import AdapterCapabilities  # noqa: E402
 from mqtt_client_bench.adapters.native import NativeAsyncAdapter  # noqa: E402
+from mqtt_client_bench.adapters.mqttium_async import FlowControlError, MqttiumAsyncAdapter  # noqa: E402
 from mqtt_client_bench.roles import publisher  # noqa: E402
 from mqtt_client_bench.adapters.registry import (  # noqa: E402
     EXPERIMENTAL_CLIENTS,
@@ -2794,6 +2795,39 @@ class _FakeAwaitedAdapter:
         return self._mid
 
 
+class _FakeRefusingAdapter:
+    """publish_nowait returns None until ``refuse`` admits are skipped.
+
+    Stands in for mqttium FlowControlError mapped to mid is None.
+    """
+
+    def __init__(self, refuse: int = 0, always: bool = False):
+        self.refuse_left = refuse
+        self.always = always
+        self.calls = 0
+        self._mid = 0
+        self.on_publish = None
+        self.on_connect = None
+        self.on_message = None
+
+    @classmethod
+    def capabilities(cls):
+        return AdapterCapabilities(
+            name="fake-refuse", native_async=True, publish_sync_on_loop=True
+        )
+
+    def publish_nowait(self, topic, payload=None, qos=0, retain=False, properties=None):
+        self.calls += 1
+        if self.always or self.refuse_left > 0:
+            if self.refuse_left > 0:
+                self.refuse_left -= 1
+            return None
+        self._mid = 1 if self._mid >= 65535 else self._mid + 1
+        if self.on_publish is not None:
+            self.on_publish(self, None, self._mid, 0, None)
+        return self._mid
+
+
 class CampaignCompletenessTests(unittest.TestCase):
     """One rule decides what a campaign re-measures, and what status reports.
 
@@ -3130,6 +3164,152 @@ class NativeAsyncPathTests(unittest.TestCase):
             f"harness costs {ns_per_message:.0f} ns/message; the bridged path it "
             "replaced cost 18500 ns, so this is a regression toward it",
         )
+
+    def test_closed_loop_nowait_refusal_is_backpressure_not_protocol_failed(self):
+        """A full write pump must not be recorded as a failed MQTT completion.
+
+        mqttium native used to fire on_publish rc=128 on FlowControlError, so
+        one refused nowait invalidated the whole payload-sweep run.
+        """
+        adapter = _FakeRefusingAdapter(refuse=20)
+        state = self._state()
+        adapter.on_publish = publisher._make_on_publish(state, 0, lock=None)
+
+        async def drive():
+            return await publisher._run_publish_loop_async(
+                adapter, state,
+                **self._loop_kwargs(qos=0, outstanding=8, until=time.perf_counter() + 0.15),
+            )
+
+        asyncio.new_event_loop().run_until_complete(drive())
+        self.assertGreaterEqual(state["sync_rejected"], 20)
+        self.assertEqual(state["protocol_failed"], 0)
+        tally = state["completions"].summary(0)
+        self.assertEqual(tally["completed_failed"] + state["overflow_failed"], 0)
+        self.assertGreater(self._completed(state, qos=0), 0)
+        self.assertEqual(
+            state["offered"],
+            state["submitted"] + state["sync_rejected"] + state["missed_due_to_backpressure"],
+        )
+
+    def test_open_loop_nowait_refusal_misses_the_slot_instead_of_retrying(self):
+        """Retrying a refused nowait in the same tick would exceed target_rate."""
+        adapter = _FakeRefusingAdapter(always=True)
+        state = self._state()
+        adapter.on_publish = publisher._make_on_publish(state, 0, lock=None)
+        target = 200.0
+        window = 0.25
+
+        async def drive():
+            started = time.perf_counter()
+            await publisher._run_publish_loop_async(
+                adapter, state,
+                **self._loop_kwargs(
+                    qos=0, outstanding=8, cadence="steady50",
+                    target_rate=target, until=started + window,
+                ),
+            )
+
+        asyncio.new_event_loop().run_until_complete(drive())
+        self.assertEqual(state["submitted"], 0)
+        self.assertEqual(state["sync_rejected"], 0)
+        self.assertEqual(state["missed_due_to_backpressure"], state["offered"])
+        self.assertLess(
+            state["offered"], target * window * 2,
+            "refused nowait retried inside the tick and inflated the offer",
+        )
+        self.assertGreater(state["offered"], target * window * 0.5)
+
+    def test_closed_loop_nowait_refusal_yields_so_the_writer_can_run(self):
+        """Without an await, a QoS0 refuse loop starves the write pump."""
+        adapter = _FakeRefusingAdapter(always=True)
+        state = self._state()
+        adapter.on_publish = publisher._make_on_publish(state, 0, lock=None)
+        writer_ticks = []
+
+        async def drive():
+            async def writer():
+                while True:
+                    writer_ticks.append(time.perf_counter())
+                    await asyncio.sleep(0)
+
+            task = asyncio.create_task(writer())
+            started = time.perf_counter()
+            try:
+                await publisher._run_publish_loop_async(
+                    adapter, state,
+                    **self._loop_kwargs(qos=0, outstanding=8, until=started + 0.05),
+                )
+            finally:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            return started
+
+        started = asyncio.new_event_loop().run_until_complete(drive())
+        self.assertTrue(
+            any(tick < started + 0.05 for tick in writer_ticks),
+            "nowait refuse loop never yielded; a real write pump would stall",
+        )
+
+
+class MqttiumNativeNowaitTests(unittest.TestCase):
+    """FlowControlError is queue-full, not a completed failure."""
+
+    def test_qos0_flow_control_returns_none_without_on_publish(self):
+        adapter = MqttiumAsyncAdapter()
+        fired = []
+        adapter.on_publish = lambda *args: fired.append(args)
+
+        class _Client:
+            def publish_nowait(self, *args, **kwargs):
+                raise FlowControlError("write pump full")
+
+        adapter._client = _Client()
+        self.assertIsNone(adapter.publish_nowait("t", b"x", qos=0))
+        self.assertEqual(fired, [])
+
+    def test_qos1_flow_control_returns_none_without_on_publish(self):
+        adapter = MqttiumAsyncAdapter()
+        fired = []
+        adapter.on_publish = lambda *args: fired.append(args)
+
+        class _Client:
+            on_publish = None
+
+            def publish_nowait(self, *args, **kwargs):
+                raise FlowControlError("pending outbound full")
+
+        adapter._client = _Client()
+        self.assertIsNone(adapter.publish_nowait("t", b"x", qos=1))
+        self.assertEqual(fired, [])
+
+    def test_qos0_success_still_completes_inline(self):
+        adapter = MqttiumAsyncAdapter()
+        fired = []
+        adapter.on_publish = lambda *args: fired.append(args[2])
+
+        class _Client:
+            def publish_nowait(self, *args, **kwargs):
+                return None
+
+        adapter._client = _Client()
+        mid = adapter.publish_nowait("t", b"x", qos=0)
+        self.assertIsNotNone(mid)
+        self.assertEqual(fired, [mid])
+
+    def test_other_errors_still_propagate(self):
+        adapter = MqttiumAsyncAdapter()
+
+        class _Client:
+            def publish_nowait(self, *args, **kwargs):
+                raise RuntimeError("not on the owning loop")
+
+        adapter._client = _Client()
+        with self.assertRaises(RuntimeError):
+            adapter.publish_nowait("t", b"x", qos=0)
 
 
 if __name__ == "__main__":

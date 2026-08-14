@@ -1075,9 +1075,23 @@ async def _publish_loop_sync_on_loop(
                 state["pending_send_ns"] = None
 
                 if mid is None:
+                    # Not admitted (queue / write-pump full). That is
+                    # backpressure, not a failed completion: firing on_publish
+                    # rc=128 here made mqttium native the only client whose
+                    # large-payload QoS0 runs came back protocol_failed.
                     state["inflight_local"] -= 1
+                    sequence -= 1
+                    if open_loop:
+                        # One attempt per tick. Retrying in this interval would
+                        # offer above target_rate.
+                        n_missed += 1
+                        break
                     n_sync_rejected += 1
                     n_rejected += 1
+                    # QoS0 completes inline on success, so this loop otherwise
+                    # never awaits and the write pump never drains.
+                    await asyncio.sleep(0)
+                    since_yield = 0
                     continue
                 n_submitted += 1
                 n_accepted += 1

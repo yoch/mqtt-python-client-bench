@@ -4,6 +4,10 @@ The sync facade in `mqttium.py` remains for the sync role path during migration.
 This one exists because the handoff between the two was measured at 18.5 us per
 message: a fixed cost, so it taxed this client (56 us per message natively) far
 harder than a slow one, which is enough to reorder a ranking.
+
+``FlowControlError`` from ``publish_nowait`` is mapped to ``mid is None`` (Paho
+queue-full), not to ``on_publish`` reason 128. The facade in ``mqttium.py`` still
+returns a mid before the bridge call and cannot do that.
 """
 
 from __future__ import annotations
@@ -15,6 +19,13 @@ from typing import Any, Deque, Dict, Optional
 
 from mqtt_client_bench.adapters.base import AdapterCapabilities, SubscribeResult
 from mqtt_client_bench.adapters.mqttium import MqttiumAdapter
+
+try:
+    from mqttium.errors import FlowControlError
+except ImportError:  # mqttium extra not installed; the adapter is still importable
+
+    class FlowControlError(Exception):
+        """Stand-in so the module imports without the mqttium extra."""
 
 
 class MqttiumAsyncAdapter:
@@ -143,36 +154,40 @@ class MqttiumAsyncAdapter:
         retain: bool = False,
         properties: Any = None,
     ) -> Optional[int]:
-        mid = self._alloc_mid()
+        """Admit one publish, or return None if the library refused.
+
+        ``FlowControlError`` means the write pump / pending window is full, not
+        that a packet failed. Returning None (no ``on_publish``) matches Paho's
+        queue-full ``mid is None`` contract so the role counts backpressure
+        instead of ``protocol_failed``. Other exceptions propagate.
+        """
         data = b"" if payload is None else payload
         if isinstance(data, str):
             data = data.encode("utf-8")
         if int(qos) == 0:
             try:
                 self._client.publish_nowait(topic, data, qos=0, retain=retain, properties=properties)
-                cb = self.on_publish
-                if cb is not None:
-                    cb(self, None, mid, 0, None)
-            except Exception:  # noqa: BLE001
-                cb = self.on_publish
-                if cb is not None:
-                    cb(self, None, mid, 128, None)
+            except FlowControlError:
+                return None
+            mid = self._alloc_mid()
+            cb = self.on_publish
+            if cb is not None:
+                cb(self, None, mid, 0, None)
             return mid
         self._arm_completions()
         try:
             receipt = self._client.publish_nowait(
                 topic, data, qos=qos, retain=retain, properties=properties
             )
-            if receipt.mid is None:
-                cb = self.on_publish
-                if cb is not None:
-                    cb(self, None, mid, 0, None)
-                return mid
-            self._real_to_synth.setdefault(int(receipt.mid), deque()).append(mid)
-        except Exception:  # noqa: BLE001
+        except FlowControlError:
+            return None
+        mid = self._alloc_mid()
+        if receipt.mid is None:
             cb = self.on_publish
             if cb is not None:
-                cb(self, None, mid, 128, None)
+                cb(self, None, mid, 0, None)
+            return mid
+        self._real_to_synth.setdefault(int(receipt.mid), deque()).append(mid)
         return mid
 
     async def publish(self, topic, payload=None, qos=0, retain=False, properties=None):
