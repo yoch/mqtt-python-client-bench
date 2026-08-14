@@ -95,7 +95,7 @@ python -m mqtt_client_bench.run broker down
 ```
 
 Optional extras: `.[gmqtt]`, `.[aiomqtt]`, `.[amqtt]`, `.[awscrt]`, or `.[all]`.
-Experimental: `.[zmqtt]`, `.[aiomqtt3]`, or `.[mqttium]` (aiomqtt3 needs a separate env).
+Experimental: `.[zmqtt]`, `.[aiomqtt3]`, or `.[mqttium]` (aiomqtt3 needs a separate env; the extra also installs `paho-mqtt` for the harness `$SYS` probe, not as the SUT).
 
 ## Commands
 
