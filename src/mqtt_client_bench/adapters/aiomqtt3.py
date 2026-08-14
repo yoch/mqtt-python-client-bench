@@ -42,6 +42,7 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
     _NAME = "aiomqtt3"
     _NOTES = (
         "aiomqtt v3 alpha — pure asyncio on mqtt5 (Rust sans-io). MQTT 5 only. "
+        "QoS2 refused: publish() completes at PUBREC and never sends PUBREL. "
         "Experimental; must not share an env with aiomqtt v2."
     )
     _PRIVATE_API = {
@@ -67,7 +68,10 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
             async_bridged=True,
             mqtt_v311=False,
             mqtt_v5=True,
-            qos2=True,
+            # aiomqtt 3.0.0a1 publish() returns at PUBREC and never sends PUBREL
+            # / waits for PUBCOMP; the send semaphore is released only on
+            # PUBCOMP, so a QoS2 outstanding window of 64 completes 0 messages.
+            qos2=False,
             tls=True,
             max_inflight=False,
             max_queued=False,

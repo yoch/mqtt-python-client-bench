@@ -361,6 +361,14 @@ class AdapterRegistryTests(unittest.TestCase):
         self.assertIn("qos2", unsupported_for_client("gmqtt", point))
         self.assertEqual(unsupported_for_client("paho", point), [])
 
+    def test_aiomqtt3_refuses_qos2(self):
+        point = {"protocol": "MQTTv5", "qos_publish": 2}
+        self.assertIn("qos2", unsupported_for_client("aiomqtt3", point))
+        self.assertEqual(
+            unsupported_for_client("aiomqtt3", {"protocol": "MQTTv5", "qos_publish": 1}),
+            [],
+        )
+
     def test_inflight_control_required(self):
         point = {"protocol": "MQTTv311", "qos_publish": 1, "require_max_inflight": True, "inflight": 20}
         self.assertEqual(unsupported_for_client("paho", point), [])
