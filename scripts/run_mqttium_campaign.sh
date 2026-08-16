@@ -9,7 +9,7 @@ cd "$ROOT"
 source .venv/bin/activate
 export PYTHONPATH=src
 
-MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc4}"
+MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc5}"
 echo "=== ensure mqttium==${MQTTIUM_VER} (site-packages, no editable) ==="
 pip install --force-reinstall --no-cache-dir "mqttium==${MQTTIUM_VER}"
 python - <<'PY'
