@@ -66,12 +66,16 @@ def topic_is_templated(topic: str) -> bool:
 
 
 def select_loadgen_engine(spec: LoadgenSpec) -> str:
-    """Hammer is MQTT 3.1.1 QoS0 and has no %i topic expansion."""
+    """Default is emqtt-bench. Hammer is MQTT 3.1.1 QoS0, no %i templates.
+
+    Set spec.engine='hammer' or MQTT_BENCH_LOADGEN=hammer for the C firehose.
+    """
     if spec.engine in ("emqtt", "hammer"):
         return spec.engine
-    if spec.mode != "pub" or int(spec.qos) != 0 or topic_is_templated(spec.topic):
-        return "emqtt"
-    return "hammer"
+    env = (os.environ.get("MQTT_BENCH_LOADGEN") or "emqtt").strip().lower()
+    if env == "hammer" and spec.mode == "pub" and int(spec.qos) == 0 and not topic_is_templated(spec.topic):
+        return "hammer"
+    return "emqtt"
 
 
 def nominal_rate(clients: int, interval_ms: int) -> float:
@@ -206,6 +210,9 @@ def build_pub_args(spec: LoadgenSpec) -> List[str]:
         args.append("--shortids")
     if spec.limit > 0:
         args.extend(["-L", str(spec.limit)])
+    # Start publishing only after every worker has connected, otherwise the
+    # first clients race ahead of the offer during the connect ramp.
+    args.append("-w")
     return args
 
 

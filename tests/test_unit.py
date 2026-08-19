@@ -1183,6 +1183,7 @@ class LoadgenTests(unittest.TestCase):
 
         args = build_pub_args(LoadgenSpec(mqtt_version=4))
         self.assertIn("--shortids", args)
+        self.assertIn("-w", args)
         self.assertNotIn("--shortids", build_pub_args(LoadgenSpec(mqtt_version=5)))
 
     def test_unpaced_firehose_uses_observed_offer(self):
@@ -1204,10 +1205,11 @@ class LoadgenTests(unittest.TestCase):
 
     def test_select_hammer_for_qos0_exact_topic(self):
         spec = LoadgenSpec(topic="bench/t", qos=0, mode="pub")
-        self.assertEqual(select_loadgen_engine(spec), "hammer")
+        self.assertEqual(select_loadgen_engine(spec), "emqtt")
+        self.assertEqual(select_loadgen_engine(LoadgenSpec(topic="bench/t", qos=0, mode="pub", engine="hammer")), "hammer")
         self.assertTrue(topic_is_templated("bench/%i/data"))
-        templated = LoadgenSpec(topic="bench/%i/data", qos=0, mode="pub")
-        self.assertEqual(select_loadgen_engine(templated), "emqtt")
+        templated = LoadgenSpec(topic="bench/%i/data", qos=0, mode="pub", engine="hammer")
+        self.assertEqual(select_loadgen_engine(templated), "hammer")
         qos1 = LoadgenSpec(topic="bench/t", qos=1, mode="pub")
         self.assertEqual(select_loadgen_engine(qos1), "emqtt")
         self.assertEqual(UNPACED_PUB_CLIENTS, 2)
@@ -1256,14 +1258,14 @@ class CeilingProbeTests(unittest.TestCase):
         self.assertEqual(resolve_ingress_offer({}, 32), DEFAULT_INGRESS_OFFER_MSGS_PER_S)
         self.assertEqual(resolve_ingress_offer({"ingress_target_msgs_per_s": 64000}, 64), 64000.0)
         self.assertEqual(resolve_ingress_offer({"fanin_mode": "per_publisher"}, 16), 16000.0)
-        self.assertEqual(interval_for_rate(100, DEFAULT_INGRESS_OFFER_MSGS_PER_S), 1)
-        self.assertEqual(nominal_rate(100, 1), 100000.0)
+        self.assertEqual(interval_for_rate(150, DEFAULT_INGRESS_OFFER_MSGS_PER_S), 1)
+        self.assertEqual(nominal_rate(150, 1), 150000.0)
 
-    def test_sub_exact_offer_is_100k(self):
+    def test_sub_exact_offer_is_150k(self):
         points = expand_scenario(SCENARIO_BY_NAME["sub_exact_telemetry"], "smoke")
         self.assertGreaterEqual(len(points), 1)
         for p in points:
-            self.assertEqual(p["loadgen_clients"], 100)
+            self.assertEqual(p["loadgen_clients"], 150)
             self.assertEqual(resolve_ingress_offer(p, p["loadgen_clients"]), DEFAULT_INGRESS_OFFER_MSGS_PER_S)
             self.assertEqual(interval_for_rate(p["loadgen_clients"], DEFAULT_INGRESS_OFFER_MSGS_PER_S), 1)
 

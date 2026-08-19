@@ -14,14 +14,14 @@ from typing import Optional, Tuple
 from mqtt_client_bench.paths import CERT_DIR, COMPOSE_FILE, MOSQUITTO_CONF
 
 # Pin by tag; digest is recorded at runtime after pull/inspect.
-# Default is the locally built 2.0.20-fast image (read-ahead patch, glibc,
-# jemalloc). Override with MQTT_BENCH_MOSQUITTO_IMAGE to A/B against upstream
-# eclipse-mosquitto; those numbers are not comparable with -fast campaigns.
+# Default is upstream Mosquitto 2.1 (packet_buffer_size already in tree).
+# Override with MQTT_BENCH_MOSQUITTO_IMAGE to A/B (e.g. the local 2.0.20-fast
+# rebuild); mixed images are not comparable.
 MOSQUITTO_IMAGE = os.environ.get(
     "MQTT_BENCH_MOSQUITTO_IMAGE",
     os.environ.get(
         "PAHO_BENCH_MOSQUITTO_IMAGE",
-        "mqtt-bench-mosquitto:2.0.20-fast",
+        "eclipse-mosquitto:2.1.2-alpine",
     ),
 )
 EMQTT_BENCH_IMAGE = os.environ.get(
@@ -234,7 +234,9 @@ def _container_state(name: str) -> Optional[str]:
 
 def broker_up(wait: bool = True, timeout_s: float = 30.0, cpuset: Optional[str] = None) -> dict:
     ensure_certs()
-    _run(compose_cmd("up", "-d", "mosquitto"))
+    env = os.environ.copy()
+    env["MQTT_BENCH_MOSQUITTO_IMAGE"] = MOSQUITTO_IMAGE
+    _run(compose_cmd("up", "-d", "mosquitto"), env=env)
     container = broker_container_name()
     # With network_mode=host, a stale mosquitto from another checkout can hold
     # the ports: our container then crash-loops on "Address in use" while the
