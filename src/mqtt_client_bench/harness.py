@@ -37,8 +37,10 @@ from mqtt_client_bench.broker import (
 )
 from mqtt_client_bench.control import BarrierServer, read_json, wait_for_file, write_json
 from mqtt_client_bench.loadgen import (
-    UNPACED_PUB_CLIENTS,
+    HAMMER_MAX_RATE_MSGS_PER_S,
+    HAMMER_PUB_CLIENTS,
     LoadgenSpec,
+    clamp_hammer_rate,
     interval_for_rate,
     spawn_loadgen,
     topic_is_templated,
@@ -102,10 +104,11 @@ SYS_SETTLE_S = 1.5
 # measurement path (see provenance.py).
 HARNESS_FINGERPRINT = harness_fingerprint()
 
-# Target offer for core sub_* capacity: clients × 1000 / I with I=1.
-# 150 clients → 150k msgs/s. emqtt-bench -I 1 still overruns on a single
-# loadgen core; observed_pub_rate is the real offer. MQTT_BENCH_LOADGEN=hammer
-# is a diagnostic firehose, not the ranking path.
+# Target offer for core sub_* capacity. emqtt-bench -I is milliseconds, so
+# 150 clients × I=1 is a 150k nominal that still overruns on one loadgen core.
+# QoS0 exact-topic points therefore use paced mqtt_hammer at this rate (capped
+# at HAMMER_MAX_RATE_MSGS_PER_S). MQTT_BENCH_LOADGEN=emqtt forces emqtt-bench;
+# MQTT_BENCH_LOADGEN=hammer is a 200k diagnostic, still capped.
 DEFAULT_INGRESS_OFFER_MSGS_PER_S = 150000.0
 
 # Topologies where a single SUT publisher is the *only* source of PUBLISHes, so
@@ -651,9 +654,11 @@ def validate_run(
     ):
         delivery_ratio = float(delivered_rate) / float(offer)
         # Paced points: delivered ≪ offer is not a trustworthy SUT score.
-        # Unpaced firehose (interval 0): the SUT score *is* delivered; a slow
+        # Unpaced firehose (no --rate, interval 0): the SUT score *is* delivered; a slow
         # client at 15k of a 200k hammer is sut_limited, not a broken run.
-        paced = int((loadgen_stats or {}).get("interval_ms") or 0) > 0
+        paced = bool((loadgen_stats or {}).get("paced"))
+        if not paced:
+            paced = int((loadgen_stats or {}).get("interval_ms") or 0) > 0
         if paced and delivery_ratio < 0.5 and (
             diagnostic or topology in ("subscriber_ingress", "broker_ceiling")
         ):
@@ -1065,18 +1070,23 @@ def run_point(
             requested_mqtt_v = mqtt_version_for_point(point)
             loadgen_mqtt_v = effective_loadgen_mqtt_version(requested_mqtt_v)
             engine = "emqtt"
-            env_engine = (os.environ.get("MQTT_BENCH_LOADGEN") or "emqtt").strip().lower()
-            if (
-                env_engine == "hammer"
-                and int(point.get("qos_publish", 0)) == 0
+            hammer_rate = None
+            env_engine = (os.environ.get("MQTT_BENCH_LOADGEN") or "auto").strip().lower()
+            can_hammer = (
+                int(point.get("qos_publish", 0)) == 0
                 and not topic_is_templated(lg_topic)
                 and not burst_ingress
-            ):
-                # Diagnostic firehose (MQTT_BENCH_LOADGEN=hammer): drop the 1 ms
-                # timer so injection is not offer-capped by Erlang scheduling.
+            )
+            if env_engine != "emqtt" and can_hammer:
+                # Paced C publishers: 150k ranking (scenario target) or 200k
+                # diagnostic. Never a firehose — --rate is always set here.
                 engine = "hammer"
+                clients = HAMMER_PUB_CLIENTS
                 interval = 0
-                clients = min(clients, UNPACED_PUB_CLIENTS)
+                if env_engine == "hammer":
+                    hammer_rate = float(HAMMER_MAX_RATE_MSGS_PER_S)
+                else:
+                    hammer_rate = float(clamp_hammer_rate(target))
             point["ingress_target_msgs_per_s"] = target
             point["loadgen_clients"] = clients
             spec = LoadgenSpec(
@@ -1092,6 +1102,7 @@ def run_point(
                 mqtt_version=loadgen_mqtt_v,
                 mode="pub",
                 target_requested=target,
+                rate_msgs_per_s=hammer_rate,
                 engine=engine,
             )
             loadgen = spawn_loadgen(spec, cpuset=cpusets.get("loadgen"))
@@ -1110,6 +1121,7 @@ def run_point(
                     mqtt_version=loadgen_mqtt_v,
                     mode="pub",
                     target_requested=target,
+                    rate_msgs_per_s=hammer_rate,
                     engine=engine,
                 )
                 warmup_loadgen = spawn_loadgen(warmup_spec, cpuset=cpusets.get("loadgen"))

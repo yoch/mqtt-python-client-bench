@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import collections
 import json
+import os
 import re
 import threading
 import time
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -36,8 +38,13 @@ from mqtt_client_bench.harness import (  # noqa: E402
     unsupported_features,
 )
 from mqtt_client_bench.loadgen import (  # noqa: E402
+    HAMMER_MAX_RATE_MSGS_PER_S,
+    HAMMER_PUB_CLIENTS,
     UNPACED_PUB_CLIENTS,
     LoadgenSpec,
+    build_hammer_cmd,
+    build_pub_args,
+    clamp_hammer_rate,
     enrich_loadgen_stats,
     interval_for_rate,
     nominal_rate,
@@ -1179,8 +1186,6 @@ class LoadgenTests(unittest.TestCase):
         self.assertEqual(effective_loadgen_mqtt_version(5), 5)
 
     def test_loadgen_shortids_for_v311(self):
-        from mqtt_client_bench.loadgen import build_pub_args
-
         args = build_pub_args(LoadgenSpec(mqtt_version=4))
         self.assertIn("--shortids", args)
         self.assertIn("-w", args)
@@ -1202,17 +1207,50 @@ class LoadgenTests(unittest.TestCase):
         self.assertEqual(stats["observed_pub_rate"], 220000.0)
         self.assertFalse(stats["qos0_pub_counter_double_count"])
         self.assertEqual(stats["engine"], "hammer")
+        self.assertFalse(stats["paced"])
+
+    def test_paced_hammer_offer_is_configured_rate(self):
+        spec = LoadgenSpec(
+            clients=2, interval_ms=0, qos=0, mode="pub", engine="hammer", rate_msgs_per_s=150000
+        )
+        parsed = {
+            "median_rate": 149500.0,
+            "last_rate": 149500.0,
+            "samples": 1,
+            "rates": [149500.0],
+            "totals": [149500],
+            "kinds": ["pub"],
+        }
+        stats = enrich_loadgen_stats(spec, parsed)
+        self.assertEqual(stats["nominal_rate"], 150000.0)
+        self.assertEqual(stats["effective_offer_msgs_per_s"], 150000.0)
+        self.assertTrue(stats["paced"])
+        self.assertEqual(clamp_hammer_rate(500000), HAMMER_MAX_RATE_MSGS_PER_S)
+        self.assertEqual(clamp_hammer_rate(150000), 150000)
+        cmd = build_hammer_cmd(spec)
+        self.assertIn("--rate", cmd)
+        self.assertEqual(cmd[cmd.index("--rate") + 1], "150000")
+        self.assertNotIn("--interval-us", cmd)
 
     def test_select_hammer_for_qos0_exact_topic(self):
         spec = LoadgenSpec(topic="bench/t", qos=0, mode="pub")
-        self.assertEqual(select_loadgen_engine(spec), "emqtt")
-        self.assertEqual(select_loadgen_engine(LoadgenSpec(topic="bench/t", qos=0, mode="pub", engine="hammer")), "hammer")
+        with patch.dict(os.environ, {"MQTT_BENCH_LOADGEN": "auto"}, clear=False):
+            self.assertEqual(select_loadgen_engine(spec), "hammer")
+        with patch.dict(os.environ, {"MQTT_BENCH_LOADGEN": "emqtt"}, clear=False):
+            self.assertEqual(select_loadgen_engine(spec), "emqtt")
+        self.assertEqual(
+            select_loadgen_engine(LoadgenSpec(topic="bench/t", qos=0, mode="pub", engine="emqtt")),
+            "emqtt",
+        )
         self.assertTrue(topic_is_templated("bench/%i/data"))
-        templated = LoadgenSpec(topic="bench/%i/data", qos=0, mode="pub", engine="hammer")
-        self.assertEqual(select_loadgen_engine(templated), "hammer")
+        templated = LoadgenSpec(topic="bench/%i/data", qos=0, mode="pub")
+        with patch.dict(os.environ, {"MQTT_BENCH_LOADGEN": "auto"}, clear=False):
+            self.assertEqual(select_loadgen_engine(templated), "emqtt")
         qos1 = LoadgenSpec(topic="bench/t", qos=1, mode="pub")
         self.assertEqual(select_loadgen_engine(qos1), "emqtt")
+        self.assertEqual(HAMMER_PUB_CLIENTS, 2)
         self.assertEqual(UNPACED_PUB_CLIENTS, 2)
+        self.assertEqual(HAMMER_MAX_RATE_MSGS_PER_S, 200000)
 
     def test_parse_hammer_json(self):
         text = 'noise\n{"role":"pub","clients":8,"msgs":1000,"seconds":1.0,"msgs_per_s":12345.6}\n'
@@ -1409,11 +1447,44 @@ class CeilingProbeTests(unittest.TestCase):
             "observed_pub_rate": 220000.0,
             "target_requested": 100000.0,
             "interval_ms": 0,
+            "paced": False,
             "parsed": {"last_rate": 220000.0, "last_total": 4400000, "median_rate": 220000.0},
         }
         validity = validate_run(point, workers, loadgen, [], sys_counters={"dropped_delta": 0})
         self.assertEqual(validity["status"], "valid")
         self.assertNotIn("delivery_below_half_offer", validity["reasons"])
+        self.assertEqual(validity["bottleneck"], "sut_limited")
+
+    def test_validate_run_paced_hammer_slow_client_is_below_half(self):
+        from mqtt_client_bench.harness import validate_run
+
+        point = {
+            "topology": "subscriber_ingress",
+            "cadence": "capacity",
+            "duration_s": 20.0,
+        }
+        workers = [
+            {
+                "ok": True,
+                "role": "subscriber",
+                "msgs_per_s": 15000.0,
+                "subscriber_delivered": 300000,
+            }
+        ]
+        loadgen = {
+            "engine": "hammer",
+            "nominal_rate": 150000.0,
+            "effective_offer_msgs_per_s": 150000.0,
+            "observed_pub_rate": 149000.0,
+            "target_requested": 150000.0,
+            "rate_msgs_per_s": 150000.0,
+            "interval_ms": 0,
+            "paced": True,
+            "parsed": {"last_rate": 149000.0, "last_total": 2980000, "median_rate": 149000.0},
+        }
+        validity = validate_run(point, workers, loadgen, [], sys_counters={"dropped_delta": 0})
+        self.assertEqual(validity["status"], "inconclusive")
+        self.assertIn("delivery_below_half_offer", validity["reasons"])
         self.assertEqual(validity["bottleneck"], "sut_limited")
 
     def test_sys_counters_delta(self):

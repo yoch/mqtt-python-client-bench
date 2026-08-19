@@ -78,8 +78,9 @@ tagged `non_comparable` and `report build` skips `*-smoke.json` and `_*.json`.
 - `run.py` — argparse CLI only; every subcommand delegates to `harness`, `broker`,
   or `report`.
 - `docker-compose.yml` — official `eclipse-mosquitto:2.1.2-alpine`. Core
-  `sub_*` capacity points offer 150k msgs/s (`loadgen_clients=150`, `I=1`).
-  `MQTT_BENCH_LOADGEN=hammer` is a diagnostic firehose.
+  `sub_*` QoS0 exact-topic capacity offers 150k msgs/s via paced mqtt_hammer
+  (`--rate 150000`). `MQTT_BENCH_LOADGEN=hammer` is a paced 200k diagnostic;
+  `MQTT_BENCH_LOADGEN=emqtt` forces emqtt-bench (cannot hold 150k on one core).
 - `scenarios.py` — the catalogue. `Scenario` dataclass + `variants`;
   `expand_scenario()` applies `PROFILE_SPECS` timings and expands
   `dual_protocol`-tagged scenarios into `MQTTv311` × `MQTTv5` **points**. A point

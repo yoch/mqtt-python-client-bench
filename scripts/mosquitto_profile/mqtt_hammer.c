@@ -3,8 +3,8 @@
  *
  * Usage:
  *   mqtt_hammer sub  --host 127.0.0.1 --port 11883 --topic t --duration 12
- *   mqtt_hammer pub  --host 127.0.0.1 --port 11883 --topic t --clients 64 \
- *                    --payload 256 --duration 12 [--interval-us 0]
+ *   mqtt_hammer pub  --host 127.0.0.1 --port 11883 --topic t --clients 2 \
+ *                    --payload 256 --duration 12 --rate 200000
  *
  * Prints one JSON object on stdout at the end; sub also prints per-second
  * recv rates on stderr.
@@ -35,6 +35,9 @@ static int g_clients = 32;
 static int g_payload = 256;
 static int g_duration_s = 12;
 static int g_interval_us = 0;
+/* Aggregate msgs/s cap across all pub threads. 0 = unlimited (firehose). */
+static int g_rate = 0;
+static atomic_uint_fast64_t g_next_ns;
 static volatile sig_atomic_t g_stop = 0;
 
 static void on_sig(int sig)
@@ -222,6 +225,49 @@ static int mqtt_subscribe(int fd, const char *topic)
 static atomic_uint_fast64_t g_pub_ok;
 static atomic_uint_fast64_t g_sub_ok;
 
+/* Cap aggregate send rate. Busy-wait: nanosleep cannot hold a 5 µs period.
+ * No catch-up burst: if a thread falls behind, the next slot is `now`, not
+ * a pile of skipped periods. */
+static void throttle(void)
+{
+	if (g_rate <= 0) {
+		return;
+	}
+	const uint64_t period = 1000000000ull / (uint64_t)g_rate;
+	for (;;) {
+		if (g_stop) {
+			return;
+		}
+		uint64_t slot = atomic_load_explicit(&g_next_ns, memory_order_relaxed);
+		uint64_t now = nsec_now();
+		if (now < slot) {
+			continue;
+		}
+		uint64_t next = slot + period;
+		if (next < now) {
+			next = now;
+		}
+		if (atomic_compare_exchange_weak_explicit(
+			    &g_next_ns, &slot, next, memory_order_relaxed, memory_order_relaxed)) {
+			return;
+		}
+	}
+}
+
+static void wait_interval(uint64_t *next_ns, uint64_t period_ns)
+{
+	if (period_ns == 0) {
+		return;
+	}
+	*next_ns += period_ns;
+	uint64_t now = nsec_now();
+	if (*next_ns < now) {
+		*next_ns = now;
+	}
+	while (!g_stop && nsec_now() < *next_ns) {
+	}
+}
+
 struct pub_arg {
 	int id;
 	const uint8_t *pkt;
@@ -240,19 +286,18 @@ static void *pub_thread(void *raw)
 	}
 	const uint8_t *pkt = arg->pkt;
 	size_t n = arg->pkt_len;
-	int interval = g_interval_us;
+	uint64_t period_ns = g_rate > 0 ? 0ull : (uint64_t)g_interval_us * 1000ull;
+	uint64_t next_ns = nsec_now();
 	while (!g_stop) {
+		throttle();
+		if (g_stop) {
+			break;
+		}
 		if (write_all(fd, pkt, n) < 0) {
 			break;
 		}
 		atomic_fetch_add_explicit(&g_pub_ok, 1, memory_order_relaxed);
-		if (interval > 0) {
-			struct timespec ts = {
-				.tv_sec = interval / 1000000,
-				.tv_nsec = (long)(interval % 1000000) * 1000L,
-			};
-			nanosleep(&ts, NULL);
-		}
+		wait_interval(&next_ns, period_ns);
 	}
 	close(fd);
 	return NULL;
@@ -361,6 +406,7 @@ static int run_pub(void)
 	if (!ths || !args) {
 		return 1;
 	}
+	atomic_store_explicit(&g_next_ns, nsec_now(), memory_order_relaxed);
 	for (int c = 0; c < g_clients; c++) {
 		args[c].id = c;
 		args[c].pkt = pkt;
@@ -383,8 +429,8 @@ static int run_pub(void)
 	uint64_t t1 = nsec_now();
 	double secs = (double)(t1 - t0) / 1e9;
 	uint64_t count = atomic_load(&g_pub_ok);
-	printf("{\"role\":\"pub\",\"clients\":%d,\"msgs\":%llu,\"seconds\":%.3f,\"msgs_per_s\":%.1f}\n",
-		g_clients, (unsigned long long)count, secs, count / secs);
+	printf("{\"role\":\"pub\",\"clients\":%d,\"rate_limit\":%d,\"msgs\":%llu,\"seconds\":%.3f,\"msgs_per_s\":%.1f}\n",
+		g_clients, g_rate, (unsigned long long)count, secs, count / secs);
 	free(pkt);
 	free(ths);
 	free(args);
@@ -395,7 +441,9 @@ static void usage(const char *argv0)
 {
 	fprintf(stderr,
 		"Usage: %s pub|sub [--host H] [--port P] [--topic T] [--clients N]\n"
-		"                 [--payload B] [--duration S] [--interval-us U]\n",
+		"                 [--payload B] [--duration S] [--rate R] [--interval-us U]\n"
+		"  --rate R         aggregate QoS0 pubs/s cap (busy-wait; 0 = unlimited)\n"
+		"  --interval-us U  per-thread period when --rate is unset (busy-wait)\n",
 		argv0);
 }
 
@@ -414,6 +462,7 @@ int main(int argc, char **argv)
 		{"payload", required_argument, NULL, 's'},
 		{"duration", required_argument, NULL, 'd'},
 		{"interval-us", required_argument, NULL, 'i'},
+		{"rate", required_argument, NULL, 'r'},
 		{0, 0, 0, 0},
 	};
 	optind = 2;
@@ -440,6 +489,12 @@ int main(int argc, char **argv)
 			break;
 		case 'i':
 			g_interval_us = atoi(optarg);
+			break;
+		case 'r':
+			g_rate = atoi(optarg);
+			if (g_rate < 0) {
+				g_rate = 0;
+			}
 			break;
 		default:
 			usage(argv[0]);

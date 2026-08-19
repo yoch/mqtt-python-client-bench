@@ -84,15 +84,18 @@ whole matrix, so the baseline does not move between fractions.
 | `microburst` | Like burst with `-L 1000` |
 | `periodic10` | Ingress at **10 msg/s** aggregate |
 
-## Ingress offer (emqtt-bench) — a caveat
+## Ingress offer — emqtt-bench vs paced hammer
 
-For `subscriber_ingress` capacity the harness targets
-`DEFAULT_INGRESS_OFFER_MSGS_PER_S` (**150,000** msg/s) with
-`loadgen_clients=150` (`I=1`). Compare against
-`effective_offer_msgs_per_s` / `observed_pub_rate` — emqtt-bench QoS0 `pub`
-rates are double-counted (see [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md)).
-`MQTT_BENCH_LOADGEN=hammer` is a diagnostic unpaced firehose, not the ranking
-path. Ceiling probes still pin 32k / 64k / 128k.
+For QoS0 exact-topic `subscriber_ingress` capacity the harness targets
+`DEFAULT_INGRESS_OFFER_MSGS_PER_S` (**150,000** msg/s) with **paced
+mqtt_hammer** (`--rate 150000`, two publisher threads). emqtt-bench `-I` is
+milliseconds: 150×`I=1` overruns on one loadgen core and unpaced `-I 0`
+tops out around 110–120k here. Templated topics (`%i`) and QoS>0 stay on
+emqtt-bench. Compare against `effective_offer_msgs_per_s` /
+`observed_pub_rate` — emqtt-bench QoS0 `pub` rates are double-counted (see
+[docs/CEILING_PROBES.md](docs/CEILING_PROBES.md)).
+`MQTT_BENCH_LOADGEN=hammer` is a **paced 200k** diagnostic, not a firehose.
+Ceiling probes still pin 32k / 64k / 128k.
 
 If delivered ≈ offer, the point is **offer_limited**. If broker CPU ≥ 70 %,
 it is **broker_limited** even when delivery matches the offer.
@@ -138,7 +141,7 @@ Mosquitto 2.1 is single-threaded: do not widen the broker cpuset.
 
 - **Goal**: **ingress** capacity: N external publishers → 1 exact topic → 1 SUT subscriber.
 - **Topology**: `subscriber_ingress` · **Cadence**: `capacity` · tag `dual_protocol`.
-- **Loadgen**: 150 emqtt-bench clients, QoS0, `telemetry256`, `I=1` → 150k nominal.
+- **Loadgen**: paced mqtt_hammer `--rate 150000` (two QoS0 publishers). emqtt-bench 150×`I=1` cannot hold 150k on one loadgen core.
 - **Primary**: messages delivered to the subscriber callback / s.
 - **Reading**: compare with **`loadgen.effective_offer_msgs_per_s`**. Do not use QoS0 `parsed.median_rate` as the offer. If delivered ≈ offer, the point is **offer_limited**. Campaign JSON measured at 32k / Mosquitto 2.0.20 is not comparable.
 - **`$SYS`**: `sys_counters` (drops/sent) recorded over the measure window.
