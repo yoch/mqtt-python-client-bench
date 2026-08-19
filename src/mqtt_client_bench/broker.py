@@ -14,11 +14,14 @@ from typing import Optional, Tuple
 from mqtt_client_bench.paths import CERT_DIR, COMPOSE_FILE, MOSQUITTO_CONF
 
 # Pin by tag; digest is recorded at runtime after pull/inspect.
+# Default is the locally built 2.0.20-fast image (read-ahead patch, glibc,
+# jemalloc). Override with MQTT_BENCH_MOSQUITTO_IMAGE to A/B against upstream
+# eclipse-mosquitto; those numbers are not comparable with -fast campaigns.
 MOSQUITTO_IMAGE = os.environ.get(
     "MQTT_BENCH_MOSQUITTO_IMAGE",
     os.environ.get(
         "PAHO_BENCH_MOSQUITTO_IMAGE",
-        "eclipse-mosquitto:2.0.20@sha256:21421af7b32bf9ce508e9090c8eb13bb81f410ca778dc205506180a6f862d0eb",
+        "mqtt-bench-mosquitto:2.0.20-fast",
     ),
 )
 EMQTT_BENCH_IMAGE = os.environ.get(
