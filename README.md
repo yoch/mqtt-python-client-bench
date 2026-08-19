@@ -316,9 +316,11 @@ docstrings, scenario descriptions, commit messages and report output.
   the entire difference was the offered rate. For cross-client latency use
   `puback_latency_fixed_rate`, which offers every client the same absolute
   rates and lets a client that cannot sustain one come back inconclusive.
-- Core `sub_*` capacity points offer **100k msgs/s** (`loadgen_clients=100`,
-  `I=1`). Older JSON under `results/` was measured at 32k and is not
-  comparable. See [docs/MOSQUITTO_PROFILING.md](docs/MOSQUITTO_PROFILING.md).
+- Core `sub_*` capacity points **firehose** QoS0 exact-topic pubs (`mqtt_hammer`,
+  2 unpaced connections). Catalogue `loadgen_clients=100` is the old paced
+  `-I 1` shape; ceiling probes still pin 32/64/128k. Older JSON under
+  `results/` was measured at 32k and is not comparable. See
+  [docs/MOSQUITTO_PROFILING.md](docs/MOSQUITTO_PROFILING.md).
 - The 64 KiB and 1 MiB points of `pub_payload_sweep_qos0` are **broker bound**:
   Mosquitto saturates before most clients do, so a valid median survives mainly
   for the clients too slow to saturate it. That inverts the ranking at those two

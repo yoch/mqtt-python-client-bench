@@ -79,7 +79,7 @@ tagged `non_comparable` and `report build` skips `*-smoke.json` and `_*.json`.
   or `report`.
 - `docker-compose.yml` / `mosquitto/Dockerfile` — Mosquitto 2.0.20 rebuilt with
   an 8 KiB socket read-ahead patch (see `docs/MOSQUITTO_PROFILING.md`). Core
-  `sub_*` capacity points offer 100k msgs/s (`loadgen_clients=100`).
+  `sub_*` capacity points firehose QoS0 via `mqtt_hammer` (emqtt-bench `-I 0` fallback).
 - `scenarios.py` — the catalogue. `Scenario` dataclass + `variants`;
   `expand_scenario()` applies `PROFILE_SPECS` timings and expands
   `dual_protocol`-tagged scenarios into `MQTTv311` × `MQTTv5` **points**. A point

@@ -36,7 +36,13 @@ from mqtt_client_bench.broker import (
     wait_for_broker,
 )
 from mqtt_client_bench.control import BarrierServer, read_json, wait_for_file, write_json
-from mqtt_client_bench.loadgen import EmqttBenchProcess, LoadgenSpec, interval_for_rate
+from mqtt_client_bench.loadgen import (
+    UNPACED_PUB_CLIENTS,
+    LoadgenSpec,
+    interval_for_rate,
+    spawn_loadgen,
+    topic_is_templated,
+)
 from mqtt_client_bench.metrics import (
     abba_order,
     abba_block_ratios,
@@ -96,9 +102,9 @@ SYS_SETTLE_S = 1.5
 # measurement path (see provenance.py).
 HARNESS_FINGERPRINT = harness_fingerprint()
 
-# emqtt-bench -I is integer milliseconds, so offer ≈ clients × 1000 / I.
-# Keep this ≥ loadgen_clients × 1000 so capacity points actually run at I=1
-# (100 clients → 100k msgs/s). A lower target silently snaps back to 32k.
+# Floor for unpaced ingress: the loadgen must emit at least this much or the
+# run is loadgen_limited. Paced ceiling probes still use I=1 quantization
+# (offer ≈ clients × 1000 / I); core sub_* capacity drops the 1 ms timer.
 DEFAULT_INGRESS_OFFER_MSGS_PER_S = 100000.0
 
 # Topologies where a single SUT publisher is the *only* source of PUBLISHes, so
@@ -597,8 +603,9 @@ def validate_run(
                 observed = float(raw) / 2.0
             else:
                 observed = raw
-        if offer and observed is not None and float(offer) < float("inf"):
-            if float(observed) < 0.5 * float(offer):
+        floor = loadgen_stats.get("target_requested") or offer
+        if observed is not None and floor and float(floor) < float("inf"):
+            if float(observed) < 0.5 * float(floor):
                 reasons.append("loadgen_below_half_nominal")
 
     # $SYS publish drops over the measure window. Fail closed: a run with
@@ -642,8 +649,11 @@ def validate_run(
         and point.get("cadence") not in ("burst", "microburst")
     ):
         delivery_ratio = float(delivered_rate) / float(offer)
-        # Half-offer delivery under ingress/ceiling is not a trustworthy SUT score.
-        if delivery_ratio < 0.5 and (
+        # Paced points: delivered ≪ offer is not a trustworthy SUT score.
+        # Unpaced firehose (interval 0): the SUT score *is* delivered; a slow
+        # client at 15k of a 200k hammer is sut_limited, not a broken run.
+        paced = int((loadgen_stats or {}).get("interval_ms") or 0) > 0
+        if paced and delivery_ratio < 0.5 and (
             diagnostic or topology in ("subscriber_ingress", "broker_ceiling")
         ):
             reasons.append("delivery_below_half_offer")
@@ -1044,17 +1054,31 @@ def run_point(
                 elif topo == "unicode":
                     lg_topic = unicode_topic(run_id)
             limit_total = 0
+            explicit_target = point.get("ingress_target_msgs_per_s")
             interval = interval_for_rate(clients, target)
+            unpaced = (
+                cadence == "capacity"
+                and explicit_target is None
+                and int(point.get("qos_publish", 0)) == 0
+            )
+            if unpaced:
+                # Drop the 1 ms emqtt-bench timer. Cap connections so one
+                # loadgen core can tight-loop instead of scheduling 100 ticks.
+                interval = 0
+                clients = min(clients, UNPACED_PUB_CLIENTS)
             if burst_ingress:
                 # Offer a bounded burst at max speed, then silence; the subscriber's
                 # window rate plus delivered_during_drain expose backlog recovery.
                 # emqtt-bench -L is a global cap across all clients.
                 limit_total = 1000 if cadence == "microburst" else max(1, int(target * float(point.get("duration_s", 3))))
                 interval = 1
+                unpaced = False
             requested_mqtt_v = mqtt_version_for_point(point)
             loadgen_mqtt_v = effective_loadgen_mqtt_version(requested_mqtt_v)
+            engine = "emqtt" if topic_is_templated(lg_topic) else "auto"
             point["ingress_target_msgs_per_s"] = target
             point["loadgen_clients"] = clients
+            point["loadgen_unpaced"] = bool(unpaced)
             spec = LoadgenSpec(
                 host=host,
                 port=endpoint_port,
@@ -1068,8 +1092,9 @@ def run_point(
                 mqtt_version=loadgen_mqtt_v,
                 mode="pub",
                 target_requested=target,
+                engine=engine,
             )
-            loadgen = EmqttBenchProcess(spec, cpuset=cpusets.get("loadgen"))
+            loadgen = spawn_loadgen(spec, cpuset=cpusets.get("loadgen"))
             # Warmup uses a separate short-lived loadgen so measure starts clean.
             if not burst_ingress:
                 warmup_spec = LoadgenSpec(
@@ -1085,8 +1110,9 @@ def run_point(
                     mqtt_version=loadgen_mqtt_v,
                     mode="pub",
                     target_requested=target,
+                    engine=engine,
                 )
-                warmup_loadgen = EmqttBenchProcess(warmup_spec, cpuset=cpusets.get("loadgen"))
+                warmup_loadgen = spawn_loadgen(warmup_spec, cpuset=cpusets.get("loadgen"))
             else:
                 warmup_loadgen = None
 
@@ -1103,10 +1129,11 @@ def run_point(
                     mqtt_version=loadgen_mqtt_v,
                     mode="sub",
                     target_requested=target,
+                    engine="emqtt",
                 )
                 # Keep the ref subscriber off the loadgen cpuset so pub and
                 # recv do not contend for the same pinned cores.
-                ref_sub_loadgen = EmqttBenchProcess(ref_spec, cpuset=cpusets.get("orch"))
+                ref_sub_loadgen = spawn_loadgen(ref_spec, cpuset=cpusets.get("orch"))
 
         elif topology == "duplex_gateway":
             # Modest command stream toward the SUT subscriber while the SUT publishes.
@@ -1125,8 +1152,9 @@ def run_point(
                 mqtt_version=loadgen_mqtt_v,
                 mode="pub",
                 target_requested=duplex_target,
+                engine="emqtt",
             )
-            loadgen = EmqttBenchProcess(spec, cpuset=cpusets.get("loadgen"))
+            loadgen = spawn_loadgen(spec, cpuset=cpusets.get("loadgen"))
             warmup_loadgen = None
             loadgen.start()
 

@@ -36,12 +36,16 @@ from mqtt_client_bench.harness import (  # noqa: E402
     unsupported_features,
 )
 from mqtt_client_bench.loadgen import (  # noqa: E402
+    UNPACED_PUB_CLIENTS,
     LoadgenSpec,
     enrich_loadgen_stats,
     interval_for_rate,
     nominal_rate,
     observed_pub_rate,
     parse_emqtt_output,
+    parse_hammer_output,
+    select_loadgen_engine,
+    topic_is_templated,
 )
 from mqtt_client_bench.metrics import (  # noqa: E402
     abba_block_ratios,
@@ -1154,7 +1158,7 @@ class LoadgenTests(unittest.TestCase):
 
     def test_qos0_effective_offer_not_parsed_rate(self):
         """QoS0 pub rates from emqtt-bench are ~2×; offer reference is nominal."""
-        spec = LoadgenSpec(clients=32, interval_ms=1, qos=0, mode="pub")
+        spec = LoadgenSpec(clients=32, interval_ms=1, qos=0, mode="pub", engine="emqtt")
         parsed = {"median_rate": 64000.0, "last_rate": 64000.0, "samples": 1, "rates": [64000.0], "totals": [64000], "kinds": ["pub"]}
         stats = enrich_loadgen_stats(spec, parsed)
         self.assertEqual(stats["effective_offer_msgs_per_s"], 32000.0)
@@ -1180,6 +1184,39 @@ class LoadgenTests(unittest.TestCase):
         args = build_pub_args(LoadgenSpec(mqtt_version=4))
         self.assertIn("--shortids", args)
         self.assertNotIn("--shortids", build_pub_args(LoadgenSpec(mqtt_version=5)))
+
+    def test_unpaced_firehose_uses_observed_offer(self):
+        spec = LoadgenSpec(clients=8, interval_ms=0, qos=0, mode="pub", engine="hammer")
+        parsed = {
+            "median_rate": 220000.0,
+            "last_rate": 220000.0,
+            "samples": 1,
+            "rates": [220000.0],
+            "totals": [220000],
+            "kinds": ["pub"],
+        }
+        stats = enrich_loadgen_stats(spec, parsed)
+        self.assertIsNone(stats["nominal_rate"])
+        self.assertEqual(stats["effective_offer_msgs_per_s"], 220000.0)
+        self.assertEqual(stats["observed_pub_rate"], 220000.0)
+        self.assertFalse(stats["qos0_pub_counter_double_count"])
+        self.assertEqual(stats["engine"], "hammer")
+
+    def test_select_hammer_for_qos0_exact_topic(self):
+        spec = LoadgenSpec(topic="bench/t", qos=0, mode="pub")
+        self.assertEqual(select_loadgen_engine(spec), "hammer")
+        self.assertTrue(topic_is_templated("bench/%i/data"))
+        templated = LoadgenSpec(topic="bench/%i/data", qos=0, mode="pub")
+        self.assertEqual(select_loadgen_engine(templated), "emqtt")
+        qos1 = LoadgenSpec(topic="bench/t", qos=1, mode="pub")
+        self.assertEqual(select_loadgen_engine(qos1), "emqtt")
+        self.assertEqual(UNPACED_PUB_CLIENTS, 2)
+
+    def test_parse_hammer_json(self):
+        text = 'noise\n{"role":"pub","clients":8,"msgs":1000,"seconds":1.0,"msgs_per_s":12345.6}\n'
+        parsed = parse_hammer_output(text)
+        self.assertEqual(parsed["last_total"], 1000)
+        self.assertAlmostEqual(parsed["median_rate"], 12345.6)
 
     def test_callback_match_helpers(self):
         run_id = "abcd1234"
@@ -1266,6 +1303,7 @@ class CeilingProbeTests(unittest.TestCase):
             "nominal_rate": 64000.0,
             "effective_offer_msgs_per_s": 64000.0,
             "observed_pub_rate": 60000.0,
+            "interval_ms": 1,
             "qos0_pub_counter_double_count": True,
             "parsed": {"last_rate": 120000.0, "last_total": 2400000, "median_rate": 120000.0},
         }
@@ -1337,11 +1375,43 @@ class CeilingProbeTests(unittest.TestCase):
             "nominal_rate": 32000.0,
             "effective_offer_msgs_per_s": 32000.0,
             "observed_pub_rate": 30000.0,
+            "interval_ms": 1,
             "parsed": {"last_rate": 30000.0, "last_total": 600000, "median_rate": 30000.0},
         }
         validity = validate_run(point, workers, loadgen, [], sys_counters={"dropped_delta": 0})
         self.assertEqual(validity["status"], "inconclusive")
         self.assertIn("delivery_below_half_offer", validity["reasons"])
+        self.assertEqual(validity["bottleneck"], "sut_limited")
+
+    def test_validate_run_unpaced_slow_client_is_valid_sut(self):
+        """Firehose offer is observed rate; a slow SUT is still a score."""
+        from mqtt_client_bench.harness import validate_run
+
+        point = {
+            "topology": "subscriber_ingress",
+            "cadence": "capacity",
+            "duration_s": 20.0,
+        }
+        workers = [
+            {
+                "ok": True,
+                "role": "subscriber",
+                "msgs_per_s": 15000.0,
+                "subscriber_delivered": 300000,
+            }
+        ]
+        loadgen = {
+            "engine": "hammer",
+            "nominal_rate": None,
+            "effective_offer_msgs_per_s": 220000.0,
+            "observed_pub_rate": 220000.0,
+            "target_requested": 100000.0,
+            "interval_ms": 0,
+            "parsed": {"last_rate": 220000.0, "last_total": 4400000, "median_rate": 220000.0},
+        }
+        validity = validate_run(point, workers, loadgen, [], sys_counters={"dropped_delta": 0})
+        self.assertEqual(validity["status"], "valid")
+        self.assertNotIn("delivery_below_half_offer", validity["reasons"])
         self.assertEqual(validity["bottleneck"], "sut_limited")
 
     def test_sys_counters_delta(self):
