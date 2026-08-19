@@ -24,7 +24,7 @@ does:
 
 So on this class of machine the 50–100k band is reachable. At 128 clients the
 **loadgen** cpuset saturates first. Do not widen the broker cpuset: Mosquitto
-2.0 is single-threaded.
+2.1 is still single-threaded.
 
 A closed-loop C hammer (no 1 ms pacing) pushed the same Docker broker to
 ~150–190k delivered. Pacing at 1 msg/ms/connection is a different shape:
@@ -124,3 +124,17 @@ on emqtt-bench either way.
 The optional `mqtt-bench-mosquitto:2.0.20-fast` image does not understand
 `packet_buffer_size`; drop that line from `mosquitto/mosquitto.conf` before
 an A/B against 2.0.
+
+Diagnostic subscribe smoke (not ranking — `non_comparable`, do not commit):
+
+```bash
+export PYTHONPATH=src MQTT_BENCH_LOADGEN=hammer
+python -m mqtt_client_bench.run run --scenario sub_exact_telemetry \
+  --client mqttium --profile smoke \
+  --output logs/smoke/mqttium-sub_exact_telemetry-hammer-smoke.json
+```
+
+Two unpaced hammer clients are a firehose (hundreds of thousands of pubs/s,
+often more when the subscriber is slow and Mosquitto accept-then-drops).
+They are not a paced 200k offer. Read `primary_msgs_per_s`; expect broker
+CPU at 100 % and `$SYS` publish drops.
