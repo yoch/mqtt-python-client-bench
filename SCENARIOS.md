@@ -86,30 +86,21 @@ whole matrix, so the baseline does not move between fractions.
 
 ## Ingress offer (emqtt-bench) — a caveat
 
-For `subscriber_ingress` capacity the harness targets
-`DEFAULT_INGRESS_OFFER_MSGS_PER_S` (**100,000** msg/s) with
-`loadgen_clients=100` on the core `sub_*` scenarios. The constant lives in
-`harness.py`; the client count lives in the catalogue.
+For `subscriber_ingress` capacity the harness requests at least
+`DEFAULT_INGRESS_OFFER_MSGS_PER_S` (**100,000** msg/s). Core QoS0 exact-topic
+points **do not use emqtt-bench `-I 1`**: one core cannot honour 100 × 1 ms
+timers (`pub_overrun`). They run **unpaced** (`interval_ms = 0`) with at most
+`UNPACED_PUB_CLIENTS` (2) connections, using the native `mqtt_hammer` when the
+topic has no `%i` template (emqtt-bench `-I 0` otherwise). `effective_offer_msgs_per_s`
+is then the **observed** injection rate. Ceiling probes still pin
+`ingress_target_msgs_per_s` and stay paced at `I=1`.
 
-The emqtt-bench interval is an integer number of milliseconds (`-I ≥ 1`), so:
+emqtt-bench QoS0 `pub` rates are double-counted — always compare against
+`effective_offer_msgs_per_s` / `observed_pub_rate` for that engine, never the
+raw emqtt `parsed.median_rate` (see [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md)).
+If delivered ≈ observed offer, the point is **offer_limited**. If broker CPU ≥ 70 %,
+it is **broker_limited** even when delivery matches the offer.
 
-```text
-nominal_rate ≈ clients × 1000 / I
-```
-
-With 100 clients and `I = 1`, the **recorded nominal is 100,000**. Older
-campaigns used 32 clients (`I=1` → 32k) and therefore could not distinguish
-fast subscribers. Results measured at 32k are **not comparable** with 100k
-campaigns.
-
-emqtt-bench (`-F` inflight) QoS0 `pub` rates are double-counted — always
-compare against `effective_offer_msgs_per_s` / `observed_pub_rate`, never the
-raw parsed rate (see [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md)). If
-delivered ≈ offer, the point is **offer-limited**. If broker CPU ≥ 70 %, it is
-**broker_limited** even when delivery matches the offer.
-
-To push past 100k, raise `loadgen_clients` (the `broker_ceiling_ingress` grid
-goes to 128) **and** check that the loadgen cpuset is not itself saturated.
 Mosquitto 2.0 is single-threaded: do not widen the broker cpuset.
 
 ---
@@ -151,9 +142,9 @@ Mosquitto 2.0 is single-threaded: do not widen the broker cpuset.
 
 - **Goal**: **ingress** capacity: N external publishers → 1 exact topic → 1 SUT subscriber.
 - **Topology**: `subscriber_ingress` · **Cadence**: `capacity` · tag `dual_protocol`.
-- **Loadgen**: 100 emqtt-bench clients, QoS0, `telemetry256`.
+- **Loadgen**: unpaced QoS0 (`mqtt_hammer`, 2 connections); firehose, not `-c 100 -I 1`.
 - **Primary**: messages delivered to the subscriber callback / s.
-- **Reading**: compare with **`effective_offer_msgs_per_s`** (= `nominal_rate`, 100k at `-c 100 -I 1`). Do not use QoS0 `parsed.median_rate` as the offer — emqtt-bench double-counts `pub` (see [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md)). If delivered ≈ offer, the point is **offer-limited**. Campaign JSON measured at the old 32-client / 32k offer is not comparable.
+- **Reading**: compare with **`loadgen.effective_offer_msgs_per_s`** (observed injection). emqtt-bench QoS0 `parsed.median_rate` is still ~2× if that engine is used. If delivered ≈ offer, the point is **offer_limited**. Campaign JSON measured at the old 32-client / 32k paced offer is not comparable.
 - **`$SYS`**: `sys_counters` (drops/sent) recorded over the measure window.
 
 ### `sub_hierarchy_telemetry`

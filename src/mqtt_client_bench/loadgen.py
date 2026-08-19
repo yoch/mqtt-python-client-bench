@@ -1,14 +1,19 @@
-"""emqtt-bench load generator wrapper and output parser."""
+"""Ingress load generator: emqtt-bench, plus a native C hammer for QoS0 pubs."""
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Union
 
 from mqtt_client_bench.broker import EMQTT_BENCH_IMAGE, image_digest
+from mqtt_client_bench.paths import PROJECT_ROOT
 
 # Modern emqtt-bench lines look like:
 # 1s pub total=40 rate=39.92/sec
@@ -25,6 +30,14 @@ RATE_RE = re.compile(
 # (publish/2 + loop/5 both call inc_counter(pub) when emqtt:publish returns ok).
 # ``recv`` is incremented once. Treat nominal_rate as the real offer for QoS0 pubs.
 QOS0_PUB_COUNTER_DOUBLE_COUNT = True
+
+# Tight-loop publishers on one loadgen core. 100 × 1 ms Erlang timers overrun.
+# One or two C threads at interval 0 coalesce; eight of them just flood the
+# broker (440k offer, 100 % CPU, $SYS drops) without raising delivered.
+UNPACED_PUB_CLIENTS = 2
+
+HAMMER_SRC = PROJECT_ROOT / "scripts" / "mosquitto_profile" / "mqtt_hammer.c"
+HAMMER_BIN = PROJECT_ROOT / "scripts" / "mosquitto_profile" / "mqtt_hammer"
 
 
 @dataclass
@@ -44,6 +57,21 @@ class LoadgenSpec:
     mode: str = "pub"  # pub | sub
     # Requested aggregate offer before I=1 quantization (informational).
     target_requested: Optional[float] = None
+    # auto | emqtt | hammer. auto picks hammer for QoS0 pubs without topic templates.
+    engine: str = "auto"
+
+
+def topic_is_templated(topic: str) -> bool:
+    return any(token in (topic or "") for token in ("%i", "%c", "%u", "%I"))
+
+
+def select_loadgen_engine(spec: LoadgenSpec) -> str:
+    """Hammer is MQTT 3.1.1 QoS0 and has no %i topic expansion."""
+    if spec.engine in ("emqtt", "hammer"):
+        return spec.engine
+    if spec.mode != "pub" or int(spec.qos) != 0 or topic_is_templated(spec.topic):
+        return "emqtt"
+    return "hammer"
 
 
 def nominal_rate(clients: int, interval_ms: int) -> float:
@@ -94,22 +122,56 @@ def parse_emqtt_output(text: str, *, kind_filter: Optional[str] = None) -> dict:
     }
 
 
+def parse_hammer_output(text: str) -> dict:
+    """Parse the single JSON object mqtt_hammer prints on stdout at exit."""
+    rate = None
+    total = None
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            doc = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if doc.get("msgs_per_s") is None:
+            continue
+        rate = float(doc["msgs_per_s"])
+        total = int(doc.get("msgs") or 0)
+        break
+    rates = [] if rate is None else [rate]
+    totals = [] if total is None else [total]
+    return {
+        "samples": len(rates),
+        "kinds": ["pub"] * len(rates),
+        "totals": totals,
+        "rates": rates,
+        "last_total": totals[-1] if totals else None,
+        "last_rate": rates[-1] if rates else None,
+        "max_rate": max(rates) if rates else None,
+        "median_rate": rates[0] if rates else None,
+    }
+
+
 def effective_offer_msgs_per_s(spec: LoadgenSpec) -> float:
     """Best estimate of real aggregate publish rate.
 
-    For QoS0 pub, prefer ``nominal_rate`` — raw ``pub`` rates from emqtt-bench
-    are ~2× due to double-counting (see QOS0_PUB_COUNTER_DOUBLE_COUNT).
+    For paced QoS0 pub, prefer ``nominal_rate`` — raw ``pub`` rates from
+    emqtt-bench are ~2× due to double-counting (see QOS0_PUB_COUNTER_DOUBLE_COUNT).
+    Unpaced (interval 0) has no nominal; callers should use observed_pub_rate.
     """
     return nominal_rate(spec.clients, spec.interval_ms)
 
 
-def observed_pub_rate(parsed: dict, *, qos: int) -> Optional[float]:
-    """Correct observed publish rate from parsed emqtt-bench ``pub`` lines."""
+def observed_pub_rate(parsed: dict, *, qos: int, engine: str = "emqtt") -> Optional[float]:
+    """Correct observed publish rate from parsed loadgen ``pub`` lines."""
     raw = parsed.get("median_rate")
     if raw is None:
         raw = parsed.get("last_rate")
     if raw is None:
         return None
+    if engine != "emqtt":
+        return float(raw)
     if int(qos) == 0 and QOS0_PUB_COUNTER_DOUBLE_COUNT:
         return float(raw) / 2.0
     return float(raw)
@@ -176,13 +238,74 @@ def build_args(spec: LoadgenSpec) -> List[str]:
     return build_pub_args(spec)
 
 
+def build_hammer_cmd(spec: LoadgenSpec, cpuset: Optional[str] = None) -> List[str]:
+    interval_us = 0 if spec.interval_ms <= 0 else int(spec.interval_ms) * 1000
+    duration = max(1, int(spec.duration_s) + 30)
+    cmd: List[str] = []
+    if cpuset and shutil.which("taskset"):
+        cmd.extend(["taskset", "-c", cpuset])
+    cmd.extend(
+        [
+            str(ensure_mqtt_hammer()),
+            spec.mode,
+            "--host",
+            spec.host,
+            "--port",
+            str(spec.port),
+            "--topic",
+            spec.topic,
+            "--clients",
+            str(spec.clients),
+            "--payload",
+            str(spec.payload_size),
+            "--duration",
+            str(duration),
+            "--interval-us",
+            str(interval_us),
+        ]
+    )
+    return cmd
+
+
+def ensure_mqtt_hammer() -> Path:
+    if not HAMMER_SRC.exists():
+        raise FileNotFoundError(f"mqtt_hammer source missing: {HAMMER_SRC}")
+    if HAMMER_BIN.exists() and HAMMER_BIN.stat().st_mtime >= HAMMER_SRC.stat().st_mtime:
+        return HAMMER_BIN
+    cc = os.environ.get("CC", "gcc")
+    HAMMER_BIN.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [cc, "-O2", "-pthread", "-Wall", "-o", str(HAMMER_BIN), str(HAMMER_SRC)],
+        check=True,
+    )
+    return HAMMER_BIN
+
+
 def enrich_loadgen_stats(spec: LoadgenSpec, parsed: dict) -> dict:
     """Attach offer-reference fields; keep raw parsed rates for diagnostics."""
+    engine = select_loadgen_engine(spec)
     nom = nominal_rate(spec.clients, spec.interval_ms)
-    qos0_double = bool(spec.mode == "pub" and int(spec.qos) == 0 and QOS0_PUB_COUNTER_DOUBLE_COUNT)
+    nom_out: Optional[float] = None if nom == float("inf") else nom
+    qos0_double = bool(
+        spec.mode == "pub"
+        and int(spec.qos) == 0
+        and engine == "emqtt"
+        and QOS0_PUB_COUNTER_DOUBLE_COUNT
+    )
+    observed = (
+        observed_pub_rate(parsed, qos=spec.qos, engine=engine) if spec.mode == "pub" else None
+    )
+    if spec.mode != "pub":
+        effective = None
+    elif spec.interval_ms <= 0:
+        # Firehose: the offer is whatever the generator actually emitted.
+        effective = observed
+    else:
+        effective = nom_out
     out = {
-        "nominal_rate": nom,
-        "effective_offer_msgs_per_s": nom if spec.mode == "pub" else None,
+        "engine": engine,
+        "nominal_rate": nom_out,
+        "effective_offer_msgs_per_s": effective,
         "target_requested": spec.target_requested,
         "interval_ms": spec.interval_ms,
         "clients": spec.clients,
@@ -191,9 +314,7 @@ def enrich_loadgen_stats(spec: LoadgenSpec, parsed: dict) -> dict:
         "qos0_pub_counter_double_count": qos0_double,
         "parsed": parsed,
         "parsed_pub_rate_raw": parsed.get("median_rate") if spec.mode == "pub" else None,
-        "observed_pub_rate": (
-            observed_pub_rate(parsed, qos=spec.qos) if spec.mode == "pub" else None
-        ),
+        "observed_pub_rate": observed,
         "observed_recv_rate": parsed.get("median_rate") if spec.mode == "sub" else None,
     }
     return out
@@ -226,6 +347,7 @@ class EmqttBenchProcess:
     def stop(self, timeout_s: float = 10.0) -> dict:
         if self.proc is None:
             return {
+                "engine": "emqtt",
                 "emitted": None,
                 "rates": [],
                 "image_digest": image_digest(self.image.split("@")[0]),
@@ -258,3 +380,87 @@ class EmqttBenchProcess:
             if self.proc.poll() is not None:
                 break
             time.sleep(0.2)
+
+
+class HammerProcess:
+    """Native QoS0 pub/sub hammer (scripts/mosquitto_profile/mqtt_hammer.c)."""
+
+    def __init__(self, spec: LoadgenSpec, cpuset: Optional[str] = None):
+        self.spec = spec
+        self.cpuset = cpuset
+        self.proc: Optional[subprocess.Popen] = None
+        self.stdout_text = ""
+        self.started_at = None
+        self.image = None
+
+    def start(self) -> None:
+        cmd = build_hammer_cmd(self.spec, self.cpuset)
+        self.started_at = time.time()
+        self.proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    def stop(self, timeout_s: float = 10.0) -> dict:
+        if self.proc is None:
+            return {"engine": "hammer", "emitted": None, "rates": []}
+        try:
+            self.proc.terminate()
+            out, err = self.proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            out, err = self.proc.communicate(timeout=5)
+        self.stdout_text = (out or "") + (err or "")
+        parsed = parse_hammer_output(out or "")
+        stats = enrich_loadgen_stats(self.spec, parsed)
+        stats.update(
+            {
+                "args": build_hammer_cmd(self.spec, self.cpuset),
+                "image": None,
+                "image_digest": None,
+                "stdout_tail": "\n".join(self.stdout_text.splitlines()[-20:]),
+            }
+        )
+        return stats
+
+    def wait_duration(self, duration_s: float) -> None:
+        if self.proc is None:
+            return
+        deadline = time.time() + duration_s
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                break
+            time.sleep(0.2)
+
+
+LoadgenProcess = Union[EmqttBenchProcess, HammerProcess]
+
+
+def spawn_loadgen(spec: LoadgenSpec, cpuset: Optional[str] = None) -> LoadgenProcess:
+    engine = select_loadgen_engine(spec)
+    if engine == "hammer":
+        try:
+            ensure_mqtt_hammer()
+            return HammerProcess(spec, cpuset)
+        except (OSError, FileNotFoundError, subprocess.CalledProcessError):
+            fallback = LoadgenSpec(
+                host=spec.host,
+                port=spec.port,
+                topic=spec.topic,
+                qos=spec.qos,
+                clients=spec.clients,
+                interval_ms=spec.interval_ms,
+                payload_size=spec.payload_size,
+                inflight=spec.inflight,
+                mqtt_version=spec.mqtt_version,
+                duration_s=spec.duration_s,
+                connect_interval_ms=spec.connect_interval_ms,
+                limit=spec.limit,
+                mode=spec.mode,
+                target_requested=spec.target_requested,
+                engine="emqtt",
+            )
+            return EmqttBenchProcess(fallback, cpuset)
+    return EmqttBenchProcess(spec, cpuset)
