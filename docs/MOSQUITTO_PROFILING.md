@@ -1,7 +1,7 @@
 # Mosquitto ingress profiling
 
 Why core `sub_*` campaigns used to plateau at ~30k msgs/s, what actually
-limits the broker, and how the `2.0.20-fast` image is built.
+limits the broker, and why the bench now defaults to upstream Mosquitto 2.1.
 
 ## The 30k number was the offer, not a Mosquitto cap
 
@@ -107,14 +107,20 @@ new ranking.
 
 ```bash
 make -C scripts/mosquitto_profile
-# Docker image (first `broker up` builds it)
+# Pulls eclipse-mosquitto:2.1.2-alpine (override MQTT_BENCH_MOSQUITTO_IMAGE to A/B)
 python -m mqtt_client_bench.run broker up
 
-# Native A/B (optional): clone v2.0.20, apply the patch, see
+# Optional 2.0.20-fast A/B: docker build -t mqtt-bench-mosquitto:2.0.20-fast mosquitto/
+# Native A/B: clone v2.0.20, apply the patch, see
 # scripts/mosquitto_profile/build_broker.sh
 ```
 
 The C hammer in `scripts/mosquitto_profile/mqtt_hammer.c` is MQTT 3.1.1 QoS0
-only. Core ingress capacity now **is** that hammer (templated topics and QoS>0
-stay on emqtt-bench). Use it standalone to separate "Mosquitto cannot go
-faster" from "the 1 ms emqtt-bench timer is the offer".
+only. It is **not** the ranking loadgen. Set `MQTT_BENCH_LOADGEN=hammer` (or
+run the binary standalone) to separate "Mosquitto cannot go faster" from
+"the 1 ms emqtt-bench timer is the offer". Templated topics and QoS>0 stay
+on emqtt-bench either way.
+
+The optional `mqtt-bench-mosquitto:2.0.20-fast` image does not understand
+`packet_buffer_size`; drop that line from `mosquitto/mosquitto.conf` before
+an A/B against 2.0.

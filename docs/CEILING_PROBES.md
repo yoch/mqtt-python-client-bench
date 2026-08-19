@@ -30,7 +30,7 @@ The parsed rate is ≈ **2 × the real rate**.
 
 With `-c 32 -I 1`: the real offer is **32k**, not 64k. A client at ~30.5k already
 tracks ~95 % of the offer — you must **raise the nominal** (more clients) to look
-for a higher ceiling. Do not widen the broker cpuset (Mosquitto 2.0 is
+for a higher ceiling. Do not widen the broker cpuset (Mosquitto 2.1 is
 single-threaded).
 
 ## Preconditions
