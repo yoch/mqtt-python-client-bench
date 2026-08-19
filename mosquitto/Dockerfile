@@ -1,13 +1,15 @@
-# Mosquitto 2.0.20 rebuilt for the ingress ceiling.
+# Optional A/B rebuild of Mosquitto 2.0.20 (not the default image).
+#
+# Default `broker up` pulls eclipse-mosquitto:2.1.2-alpine, which already
+# has packet_buffer_size. Build this only to compare 2.0.20+shim vs 2.1:
+#   docker build -f mosquitto/Dockerfile -t mqtt-bench-mosquitto:2.0.20-fast .
+#   MQTT_BENCH_MOSQUITTO_IMAGE=mqtt-bench-mosquitto:2.0.20-fast python -m mqtt_client_bench.run broker up
 #
 # Official eclipse-mosquitto:2.0.20 is Alpine/musl, -O2, stripped, with
 # libwebsockets linked in, and packet__read() issues a read(2) per MQTT
 # header byte (~4 syscalls per 256-byte PUBLISH). This image is glibc,
 # -O3 -flto, jemalloc, no websockets, no heap tracking, plus the
 # socket read-ahead patch (see mosquitto/patches).
-#
-# Ranking campaigns that used the upstream image are not comparable with
-# numbers produced against this binary.
 
 FROM debian:bookworm-slim AS build
 

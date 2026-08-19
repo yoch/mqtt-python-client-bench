@@ -1,7 +1,7 @@
 # Ceiling probes — broker vs client
 
 Diagnostic runbook to push ingress offer past the core `sub_*` default
-(100k msgs/s requested; core capacity firehoses with `mqtt_hammer`) and separate **Mosquitto ceiling**
+(150k msgs/s with `loadgen_clients=150`) and separate **Mosquitto ceiling**
 from **SUT client ceiling**. These points are `suite=full`, tagged
 `diagnostic`, and **non_comparable** (not ranking core).
 

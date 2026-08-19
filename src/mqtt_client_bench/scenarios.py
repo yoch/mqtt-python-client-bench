@@ -176,7 +176,7 @@ SCENARIOS: List[Scenario] = [
         cadence="capacity",
         topic_topology="single",
         subscription="exact",
-        loadgen_clients=100,
+        loadgen_clients=150,
         subscribers=1,
     ),
     Scenario(
@@ -189,7 +189,7 @@ SCENARIOS: List[Scenario] = [
         qos_subscribe=0,
         payload="telemetry256",
         topic_topology="fleet4k_uniform",
-        loadgen_clients=100,
+        loadgen_clients=150,
         subscribers=1,
         variants=(
             {"topic_topology": "fleet4k_uniform", "subscription": "plus"},
@@ -206,7 +206,7 @@ SCENARIOS: List[Scenario] = [
         payload="telemetry256",
         topic_topology="fleet4k_uniform",
         subscription="hash",
-        loadgen_clients=100,
+        loadgen_clients=150,
         subscribers=1,
         variants=tuple({"callback_filters": n} for n in (1, 16, 256)),
     ),
@@ -232,7 +232,7 @@ SCENARIOS: List[Scenario] = [
         cadence="burst",
         topic_topology="fleet4k_uniform",
         subscription="hash",
-        loadgen_clients=100,
+        loadgen_clients=150,
         subscribers=1,
     ),
     Scenario(

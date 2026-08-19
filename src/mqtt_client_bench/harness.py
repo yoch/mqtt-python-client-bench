@@ -102,10 +102,11 @@ SYS_SETTLE_S = 1.5
 # measurement path (see provenance.py).
 HARNESS_FINGERPRINT = harness_fingerprint()
 
-# Floor for unpaced ingress: the loadgen must emit at least this much or the
-# run is loadgen_limited. Paced ceiling probes still use I=1 quantization
-# (offer ≈ clients × 1000 / I); core sub_* capacity drops the 1 ms timer.
-DEFAULT_INGRESS_OFFER_MSGS_PER_S = 100000.0
+# Target offer for core sub_* capacity: clients × 1000 / I with I=1.
+# 150 clients → 150k msgs/s. emqtt-bench -I 1 still overruns on a single
+# loadgen core; observed_pub_rate is the real offer. MQTT_BENCH_LOADGEN=hammer
+# is a diagnostic firehose, not the ranking path.
+DEFAULT_INGRESS_OFFER_MSGS_PER_S = 150000.0
 
 # Topologies where a single SUT publisher is the *only* source of PUBLISHes, so
 # the broker's received-publish counter can be compared with what the adapter
@@ -1054,31 +1055,30 @@ def run_point(
                 elif topo == "unicode":
                     lg_topic = unicode_topic(run_id)
             limit_total = 0
-            explicit_target = point.get("ingress_target_msgs_per_s")
             interval = interval_for_rate(clients, target)
-            unpaced = (
-                cadence == "capacity"
-                and explicit_target is None
-                and int(point.get("qos_publish", 0)) == 0
-            )
-            if unpaced:
-                # Drop the 1 ms emqtt-bench timer. Cap connections so one
-                # loadgen core can tight-loop instead of scheduling 100 ticks.
-                interval = 0
-                clients = min(clients, UNPACED_PUB_CLIENTS)
             if burst_ingress:
                 # Offer a bounded burst at max speed, then silence; the subscriber's
                 # window rate plus delivered_during_drain expose backlog recovery.
                 # emqtt-bench -L is a global cap across all clients.
                 limit_total = 1000 if cadence == "microburst" else max(1, int(target * float(point.get("duration_s", 3))))
                 interval = 1
-                unpaced = False
             requested_mqtt_v = mqtt_version_for_point(point)
             loadgen_mqtt_v = effective_loadgen_mqtt_version(requested_mqtt_v)
-            engine = "emqtt" if topic_is_templated(lg_topic) else "auto"
+            engine = "emqtt"
+            env_engine = (os.environ.get("MQTT_BENCH_LOADGEN") or "emqtt").strip().lower()
+            if (
+                env_engine == "hammer"
+                and int(point.get("qos_publish", 0)) == 0
+                and not topic_is_templated(lg_topic)
+                and not burst_ingress
+            ):
+                # Diagnostic firehose (MQTT_BENCH_LOADGEN=hammer): drop the 1 ms
+                # timer so injection is not offer-capped by Erlang scheduling.
+                engine = "hammer"
+                interval = 0
+                clients = min(clients, UNPACED_PUB_CLIENTS)
             point["ingress_target_msgs_per_s"] = target
             point["loadgen_clients"] = clients
-            point["loadgen_unpaced"] = bool(unpaced)
             spec = LoadgenSpec(
                 host=host,
                 port=endpoint_port,

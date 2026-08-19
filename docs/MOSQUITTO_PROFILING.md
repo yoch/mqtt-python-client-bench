@@ -89,14 +89,13 @@ libwebsockets) are smaller than the syscall change on this path.
 
 ## What the bench now ships
 
-- `mosquitto/Dockerfile` builds **mqtt-bench-mosquitto:2.0.20-fast** from
-  Mosquitto 2.0.20 + `mosquitto/patches/0001-socket-read-ahead-buffer.patch`.
-- `docker-compose.yml` builds that image. Override with
-  `MQTT_BENCH_MOSQUITTO_IMAGE` only for A/B; mixed images are not comparable.
-- Core `sub_*` capacity points request 100k (`DEFAULT_INGRESS_OFFER_MSGS_PER_S`)
-  but **run unpaced**: QoS0 exact-topic pubs use `mqtt_hammer` (`-I 0` emqtt-bench
-  fallback) with `UNPACED_PUB_CLIENTS=2`. emqtt-bench `-c 100 -I 1` overruns on
-  one core (~83k real). Ceiling probes still pin an explicit 32/64/128k offer.
+- Default broker: **eclipse-mosquitto:2.1.2-alpine** (upstream `packet_buffer_size`).
+  `mosquitto/Dockerfile` + the 2.0.20 read-ahead patch remain as an optional A/B
+  (`MQTT_BENCH_MOSQUITTO_IMAGE=mqtt-bench-mosquitto:2.0.20-fast` after a local
+  `docker build`). Mixed images are not comparable.
+- Core `sub_*` capacity points use `loadgen_clients=150` and
+  `DEFAULT_INGRESS_OFFER_MSGS_PER_S = 150000` so `I=1` is a **150k** offer.
+  `MQTT_BENCH_LOADGEN=hammer` is a diagnostic firehose.
 - `broker_ceiling_ingress` / `client_ceiling_ingress` still sweep 32k / 64k /
   128k.
 

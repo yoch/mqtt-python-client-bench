@@ -32,7 +32,7 @@ source .venv/bin/activate            # pip install -e ".[dev,all,zmqtt,mqttium]"
 source .venv-aiomqtt3/bin/activate   # pip install -e ".[dev,aiomqtt3]"  (aiomqtt3 only)
 export PYTHONPATH=src
 
-python -m mqtt_client_bench.run broker up        # docker compose Mosquitto 2.0.20-fast + TLS certs
+python -m mqtt_client_bench.run broker up        # docker compose eclipse-mosquitto:2.1.2-alpine + TLS certs
 python -m mqtt_client_bench.run clients -v       # adapter capability matrix
 python -m mqtt_client_bench.run list --suite core
 
@@ -77,9 +77,9 @@ tagged `non_comparable` and `report build` skips `*-smoke.json` and `_*.json`.
 
 - `run.py` — argparse CLI only; every subcommand delegates to `harness`, `broker`,
   or `report`.
-- `docker-compose.yml` / `mosquitto/Dockerfile` — Mosquitto 2.0.20 rebuilt with
-  an 8 KiB socket read-ahead patch (see `docs/MOSQUITTO_PROFILING.md`). Core
-  `sub_*` capacity points firehose QoS0 via `mqtt_hammer` (emqtt-bench `-I 0` fallback).
+- `docker-compose.yml` — official `eclipse-mosquitto:2.1.2-alpine`. Core
+  `sub_*` capacity points offer 150k msgs/s (`loadgen_clients=150`, `I=1`).
+  `MQTT_BENCH_LOADGEN=hammer` is a diagnostic firehose.
 - `scenarios.py` — the catalogue. `Scenario` dataclass + `variants`;
   `expand_scenario()` applies `PROFILE_SPECS` timings and expands
   `dual_protocol`-tagged scenarios into `MQTTv311` × `MQTTv5` **points**. A point

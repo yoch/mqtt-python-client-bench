@@ -101,7 +101,7 @@ Experimental: `.[zmqtt]`, `.[aiomqtt3]`, or `.[mqttium]` (aiomqtt3 needs a separ
 
 | Command | Purpose |
 |---|---|
-| `broker up` / `broker down` | Local Mosquitto via docker compose (`network_mode: host`). First `up` builds `mqtt-bench-mosquitto:2.0.20-fast` from `mosquitto/Dockerfile`. |
+| `broker up` / `broker down` | Local Mosquitto via docker compose (`network_mode: host`). Pulls `eclipse-mosquitto:2.1.2-alpine`. |
 | `clients` | Adapter catalogue / capability matrix |
 | `list [--suite core\|full]` | Scenario catalogue |
 | `run --scenario NAME --client LIB` | Run one scenario (default `--profile standard`) |
@@ -213,10 +213,11 @@ QoS≥1 scenarios stay comparable. Campaign helpers:
 
 Mosquitto provides a local broker on `127.0.0.1:11883` (TCP) and
 `127.0.0.1:11884` (TLS — established TLS, no TLS 1.3 guarantee claimed).
-The compose file builds **mqtt-bench-mosquitto:2.0.20-fast** (glibc, jemalloc,
-socket read-ahead patch). See [docs/MOSQUITTO_PROFILING.md](docs/MOSQUITTO_PROFILING.md).
+The compose file pulls **eclipse-mosquitto:2.1.2-alpine**. Override with
+`MQTT_BENCH_MOSQUITTO_IMAGE` to A/B (the local `mosquitto/Dockerfile` 2.0.20-fast
+rebuild is optional). See [docs/MOSQUITTO_PROFILING.md](docs/MOSQUITTO_PROFILING.md).
 `emqtt-bench` is used only as an ingress load generator (MQTT version aligned
-to `point.protocol`).
+to `point.protocol`). `MQTT_BENCH_LOADGEN=hammer` is a diagnostic firehose.
 
 ## Adapter architecture
 
@@ -316,11 +317,9 @@ docstrings, scenario descriptions, commit messages and report output.
   the entire difference was the offered rate. For cross-client latency use
   `puback_latency_fixed_rate`, which offers every client the same absolute
   rates and lets a client that cannot sustain one come back inconclusive.
-- Core `sub_*` capacity points **firehose** QoS0 exact-topic pubs (`mqtt_hammer`,
-  2 unpaced connections). Catalogue `loadgen_clients=100` is the old paced
-  `-I 1` shape; ceiling probes still pin 32/64/128k. Older JSON under
-  `results/` was measured at 32k and is not comparable. See
-  [docs/MOSQUITTO_PROFILING.md](docs/MOSQUITTO_PROFILING.md).
+- Core `sub_*` capacity points offer **150k msgs/s** (`loadgen_clients=150`,
+  `I=1`). `MQTT_BENCH_LOADGEN=hammer` is a diagnostic firehose. Older JSON under
+  `results/` was measured at 32k against Mosquitto 2.0.20 and is not comparable.
 - The 64 KiB and 1 MiB points of `pub_payload_sweep_qos0` are **broker bound**:
   Mosquitto saturates before most clients do, so a valid median survives mainly
   for the clients too slow to saturate it. That inverts the ranking at those two
