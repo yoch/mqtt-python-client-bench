@@ -96,6 +96,10 @@ SYS_SETTLE_S = 1.5
 # measurement path (see provenance.py).
 HARNESS_FINGERPRINT = harness_fingerprint()
 
+# emqtt-bench -I is integer milliseconds, so offer ≈ clients × 1000 / I.
+# Keep this ≥ loadgen_clients × 1000 so capacity points actually run at I=1
+# (100 clients → 100k msgs/s). A lower target silently snaps back to 32k.
+DEFAULT_INGRESS_OFFER_MSGS_PER_S = 100000.0
 
 # Topologies where a single SUT publisher is the *only* source of PUBLISHes, so
 # the broker's received-publish counter can be compared with what the adapter
@@ -335,7 +339,7 @@ def resolve_ingress_offer(point: dict, clients: int) -> float:
         return float(point["ingress_target_msgs_per_s"])
     if point.get("fanin_mode") == "per_publisher":
         return float(clients) * 1000.0
-    return 40000.0
+    return DEFAULT_INGRESS_OFFER_MSGS_PER_S
 
 
 def _python() -> str:
@@ -1024,7 +1028,7 @@ def run_point(
                     # which also records the delivery. Cap avoids a connection storm.
                     clients = max(clients, min(callback_filters, 256))
                 # Keep aggregate offered load stable when client count grows with filters.
-                target = resolve_ingress_offer(point, clients) if point.get("ingress_target_msgs_per_s") is not None else 40000.0
+                target = resolve_ingress_offer(point, clients)
             elif point.get("subscription") in ("plus", "hash") or str(point.get("topic_topology", "")).startswith("fleet"):
                 lg_topic = f"bench/{run_id}/org/acme/site/s0000/device/d0000/telemetry/temperature"
             else:

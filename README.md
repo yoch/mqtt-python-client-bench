@@ -101,7 +101,7 @@ Experimental: `.[zmqtt]`, `.[aiomqtt3]`, or `.[mqttium]` (aiomqtt3 needs a separ
 
 | Command | Purpose |
 |---|---|
-| `broker up` / `broker down` | Local Mosquitto via docker compose (`network_mode: host`) |
+| `broker up` / `broker down` | Local Mosquitto via docker compose (`network_mode: host`). First `up` builds `mqtt-bench-mosquitto:2.0.20-fast` from `mosquitto/Dockerfile`. |
 | `clients` | Adapter catalogue / capability matrix |
 | `list [--suite core\|full]` | Scenario catalogue |
 | `run --scenario NAME --client LIB` | Run one scenario (default `--profile standard`) |
@@ -213,6 +213,8 @@ QoS≥1 scenarios stay comparable. Campaign helpers:
 
 Mosquitto provides a local broker on `127.0.0.1:11883` (TCP) and
 `127.0.0.1:11884` (TLS — established TLS, no TLS 1.3 guarantee claimed).
+The compose file builds **mqtt-bench-mosquitto:2.0.20-fast** (glibc, jemalloc,
+socket read-ahead patch). See [docs/MOSQUITTO_PROFILING.md](docs/MOSQUITTO_PROFILING.md).
 `emqtt-bench` is used only as an ingress load generator (MQTT version aligned
 to `point.protocol`).
 
@@ -273,8 +275,9 @@ src/mqtt_client_bench/
   scenarios.py        catalogue
   adapters/           paho, gmqtt, aiomqtt, amqtt, awscrt, zmqtt, aiomqtt3, mqttium, mqttium-compat
   roles/              worker processes
-docker-compose.yml    Mosquitto
-mosquitto/ certs/     broker config + TLS material
+docker-compose.yml    Mosquitto (builds mosquitto/Dockerfile)
+mosquitto/            broker config, Dockerfile, read-ahead patch
+docs/                 CEILING_PROBES.md, MOSQUITTO_PROFILING.md
 tests/                unit tests
 results/              committed raw JSON outputs
 ```
@@ -313,10 +316,9 @@ docstrings, scenario descriptions, commit messages and report output.
   the entire difference was the offered rate. For cross-client latency use
   `puback_latency_fixed_rate`, which offers every client the same absolute
   rates and lets a client that cannot sustain one come back inconclusive.
-- The `sub_*` scenarios are **load-generator bound on the reference host**, not
-  client bound: every client lands within a few tens of msgs/s of the same
-  ~30 300 ceiling, which is the ingress offer rather than a property of the
-  library. Read them as a delivery-correctness check, not as a ranking.
+- Core `sub_*` capacity points offer **100k msgs/s** (`loadgen_clients=100`,
+  `I=1`). Older JSON under `results/` was measured at 32k and is not
+  comparable. See [docs/MOSQUITTO_PROFILING.md](docs/MOSQUITTO_PROFILING.md).
 - The 64 KiB and 1 MiB points of `pub_payload_sweep_qos0` are **broker bound**:
   Mosquitto saturates before most clients do, so a valid median survives mainly
   for the clients too slow to saturate it. That inverts the ranking at those two

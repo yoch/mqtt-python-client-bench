@@ -1,8 +1,12 @@
 # Ceiling probes — broker vs client
 
-Diagnostic runbook to push ingress offer past the default ~32k msgs/s and
-separate **Mosquitto ceiling** from **SUT client ceiling**. These points are
-`suite=full`, tagged `diagnostic`, and **non_comparable** (not ranking core).
+Diagnostic runbook to push ingress offer past the core `sub_*` default
+(100k msgs/s with `loadgen_clients=100`) and separate **Mosquitto ceiling**
+from **SUT client ceiling**. These points are `suite=full`, tagged
+`diagnostic`, and **non_comparable** (not ranking core).
+
+Why the old 32k plateau was not a Mosquitto CPU cap, and what the
+read-ahead rebuild changes: [MOSQUITTO_PROFILING.md](MOSQUITTO_PROFILING.md).
 
 ## The 64k trap (emqtt-bench QoS0 double counting)
 

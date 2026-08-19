@@ -28,7 +28,13 @@ from mqtt_client_bench.adapters.registry import (  # noqa: E402
     list_clients,
     unsupported_for_client,
 )
-from mqtt_client_bench.harness import capacity_from_qos_sweep, capacity_from_scenario, unsupported_features  # noqa: E402
+from mqtt_client_bench.harness import (  # noqa: E402
+    DEFAULT_INGRESS_OFFER_MSGS_PER_S,
+    capacity_from_qos_sweep,
+    capacity_from_scenario,
+    resolve_ingress_offer,
+    unsupported_features,
+)
 from mqtt_client_bench.loadgen import (  # noqa: E402
     LoadgenSpec,
     enrich_loadgen_stats,
@@ -1210,11 +1216,19 @@ class CeilingProbeTests(unittest.TestCase):
             self.assertEqual(nominal_rate(p["loadgen_clients"], 1), float(p["ingress_target_msgs_per_s"]))
 
     def test_resolve_ingress_offer(self):
-        from mqtt_client_bench.harness import resolve_ingress_offer
-
-        self.assertEqual(resolve_ingress_offer({}, 32), 40000.0)
+        self.assertEqual(resolve_ingress_offer({}, 32), DEFAULT_INGRESS_OFFER_MSGS_PER_S)
         self.assertEqual(resolve_ingress_offer({"ingress_target_msgs_per_s": 64000}, 64), 64000.0)
         self.assertEqual(resolve_ingress_offer({"fanin_mode": "per_publisher"}, 16), 16000.0)
+        self.assertEqual(interval_for_rate(100, DEFAULT_INGRESS_OFFER_MSGS_PER_S), 1)
+        self.assertEqual(nominal_rate(100, 1), 100000.0)
+
+    def test_sub_exact_offer_is_100k(self):
+        points = expand_scenario(SCENARIO_BY_NAME["sub_exact_telemetry"], "smoke")
+        self.assertGreaterEqual(len(points), 1)
+        for p in points:
+            self.assertEqual(p["loadgen_clients"], 100)
+            self.assertEqual(resolve_ingress_offer(p, p["loadgen_clients"]), DEFAULT_INGRESS_OFFER_MSGS_PER_S)
+            self.assertEqual(interval_for_rate(p["loadgen_clients"], DEFAULT_INGRESS_OFFER_MSGS_PER_S), 1)
 
     def test_validate_run_uses_effective_offer_not_raw_qos0(self):
         from mqtt_client_bench.harness import validate_run
