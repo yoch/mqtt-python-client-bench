@@ -31,10 +31,13 @@ RATE_RE = re.compile(
 # ``recv`` is incremented once. Treat nominal_rate as the real offer for QoS0 pubs.
 QOS0_PUB_COUNTER_DOUBLE_COUNT = True
 
-# Tight-loop publishers on one loadgen core. 100 × 1 ms Erlang timers overrun.
-# One or two C threads at interval 0 coalesce; eight of them just flood the
-# broker (440k offer, 100 % CPU, $SYS drops) without raising delivered.
-UNPACED_PUB_CLIENTS = 2
+# Two C publisher threads on the loadgen core are enough to hold 150–200k
+# QoS0. Unpaced (no --rate) they flood; eight of them just raise $SYS drops.
+HAMMER_PUB_CLIENTS = 2
+UNPACED_PUB_CLIENTS = HAMMER_PUB_CLIENTS  # alias kept for older tests
+# Diagnostic / ceiling cap. Ranking QoS0 exact-topic uses the scenario target
+# (150k) through the same pacer, never above this.
+HAMMER_MAX_RATE_MSGS_PER_S = 200_000
 
 HAMMER_SRC = PROJECT_ROOT / "scripts" / "mosquitto_profile" / "mqtt_hammer.c"
 HAMMER_BIN = PROJECT_ROOT / "scripts" / "mosquitto_profile" / "mqtt_hammer"
@@ -57,7 +60,9 @@ class LoadgenSpec:
     mode: str = "pub"  # pub | sub
     # Requested aggregate offer before I=1 quantization (informational).
     target_requested: Optional[float] = None
-    # auto | emqtt | hammer. auto picks hammer for QoS0 pubs without topic templates.
+    # Aggregate pubs/s cap for mqtt_hammer --rate. None / 0 = unpaced firehose.
+    rate_msgs_per_s: Optional[float] = None
+    # auto | emqtt | hammer. auto uses paced hammer for QoS0 pubs without %i.
     engine: str = "auto"
 
 
@@ -65,21 +70,43 @@ def topic_is_templated(topic: str) -> bool:
     return any(token in (topic or "") for token in ("%i", "%c", "%u", "%I"))
 
 
-def select_loadgen_engine(spec: LoadgenSpec) -> str:
-    """Default is emqtt-bench. Hammer is MQTT 3.1.1 QoS0, no %i templates.
+def hammer_eligible(spec: LoadgenSpec) -> bool:
+    """mqtt_hammer is MQTT 3.1.1 QoS0 with a single concrete topic."""
+    return spec.mode == "pub" and int(spec.qos) == 0 and not topic_is_templated(spec.topic)
 
-    Set spec.engine='hammer' or MQTT_BENCH_LOADGEN=hammer for the C firehose.
+
+def select_loadgen_engine(spec: LoadgenSpec) -> str:
+    """Pick emqtt-bench or paced mqtt_hammer.
+
+    emqtt-bench ``-I`` is milliseconds, so 150k needs 150 clients at 1 ms and
+    overruns on one loadgen core. For QoS0 exact-topic pubs, auto uses hammer
+    paced at ``rate_msgs_per_s`` (capped at HAMMER_MAX_RATE_MSGS_PER_S).
+
+    Override with spec.engine or MQTT_BENCH_LOADGEN=emqtt|hammer.
+    hammer + no rate is a firehose (tests / explicit probes only).
     """
     if spec.engine in ("emqtt", "hammer"):
         return spec.engine
-    env = (os.environ.get("MQTT_BENCH_LOADGEN") or "emqtt").strip().lower()
-    if env == "hammer" and spec.mode == "pub" and int(spec.qos) == 0 and not topic_is_templated(spec.topic):
+    env = (os.environ.get("MQTT_BENCH_LOADGEN") or "auto").strip().lower()
+    if env == "emqtt":
+        return "emqtt"
+    if env in ("hammer", "auto") and hammer_eligible(spec):
         return "hammer"
     return "emqtt"
 
 
-def nominal_rate(clients: int, interval_ms: int) -> float:
-    """emqtt-bench -I is per-client interval; global rate ≈ clients * 1000 / I."""
+def nominal_rate(
+    clients: int,
+    interval_ms: int,
+    rate_msgs_per_s: Optional[float] = None,
+) -> float:
+    """Configured aggregate offer.
+
+    Hammer ``--rate`` is an absolute cap. emqtt-bench ``-I`` is per-client
+    interval in milliseconds; global rate ≈ clients * 1000 / I.
+    """
+    if rate_msgs_per_s is not None and float(rate_msgs_per_s) > 0:
+        return float(rate_msgs_per_s)
     if interval_ms <= 0:
         return float("inf")
     return clients * 1000.0 / interval_ms
@@ -162,9 +189,9 @@ def effective_offer_msgs_per_s(spec: LoadgenSpec) -> float:
 
     For paced QoS0 pub, prefer ``nominal_rate`` — raw ``pub`` rates from
     emqtt-bench are ~2× due to double-counting (see QOS0_PUB_COUNTER_DOUBLE_COUNT).
-    Unpaced (interval 0) has no nominal; callers should use observed_pub_rate.
+    Unpaced (interval 0, no --rate) has no nominal; callers should use observed_pub_rate.
     """
-    return nominal_rate(spec.clients, spec.interval_ms)
+    return nominal_rate(spec.clients, spec.interval_ms, spec.rate_msgs_per_s)
 
 
 def observed_pub_rate(parsed: dict, *, qos: int, engine: str = "emqtt") -> Optional[float]:
@@ -245,8 +272,14 @@ def build_args(spec: LoadgenSpec) -> List[str]:
     return build_pub_args(spec)
 
 
+def clamp_hammer_rate(target_msgs_per_s: Optional[float]) -> int:
+    """Cap hammer at HAMMER_MAX_RATE_MSGS_PER_S. 0 means unpaced."""
+    if target_msgs_per_s is None or float(target_msgs_per_s) <= 0:
+        return 0
+    return max(1, min(int(round(float(target_msgs_per_s))), HAMMER_MAX_RATE_MSGS_PER_S))
+
+
 def build_hammer_cmd(spec: LoadgenSpec, cpuset: Optional[str] = None) -> List[str]:
-    interval_us = 0 if spec.interval_ms <= 0 else int(spec.interval_ms) * 1000
     duration = max(1, int(spec.duration_s) + 30)
     cmd: List[str] = []
     if cpuset and shutil.which("taskset"):
@@ -267,10 +300,14 @@ def build_hammer_cmd(spec: LoadgenSpec, cpuset: Optional[str] = None) -> List[st
             str(spec.payload_size),
             "--duration",
             str(duration),
-            "--interval-us",
-            str(interval_us),
         ]
     )
+    rate = clamp_hammer_rate(spec.rate_msgs_per_s)
+    if rate > 0:
+        cmd.extend(["--rate", str(rate)])
+    else:
+        interval_us = 0 if spec.interval_ms <= 0 else int(spec.interval_ms) * 1000
+        cmd.extend(["--interval-us", str(interval_us)])
     return cmd
 
 
@@ -291,7 +328,7 @@ def ensure_mqtt_hammer() -> Path:
 def enrich_loadgen_stats(spec: LoadgenSpec, parsed: dict) -> dict:
     """Attach offer-reference fields; keep raw parsed rates for diagnostics."""
     engine = select_loadgen_engine(spec)
-    nom = nominal_rate(spec.clients, spec.interval_ms)
+    nom = nominal_rate(spec.clients, spec.interval_ms, spec.rate_msgs_per_s)
     nom_out: Optional[float] = None if nom == float("inf") else nom
     qos0_double = bool(
         spec.mode == "pub"
@@ -302,18 +339,21 @@ def enrich_loadgen_stats(spec: LoadgenSpec, parsed: dict) -> dict:
     observed = (
         observed_pub_rate(parsed, qos=spec.qos, engine=engine) if spec.mode == "pub" else None
     )
+    paced = bool(spec.rate_msgs_per_s and float(spec.rate_msgs_per_s) > 0) or spec.interval_ms > 0
     if spec.mode != "pub":
         effective = None
-    elif spec.interval_ms <= 0:
+    elif paced:
+        effective = nom_out
+    else:
         # Firehose: the offer is whatever the generator actually emitted.
         effective = observed
-    else:
-        effective = nom_out
     out = {
         "engine": engine,
         "nominal_rate": nom_out,
         "effective_offer_msgs_per_s": effective,
         "target_requested": spec.target_requested,
+        "rate_msgs_per_s": spec.rate_msgs_per_s,
+        "paced": paced,
         "interval_ms": spec.interval_ms,
         "clients": spec.clients,
         "mode": spec.mode,
@@ -468,6 +508,7 @@ def spawn_loadgen(spec: LoadgenSpec, cpuset: Optional[str] = None) -> LoadgenPro
                 mode=spec.mode,
                 target_requested=spec.target_requested,
                 engine="emqtt",
+                rate_msgs_per_s=spec.rate_msgs_per_s,
             )
             return EmqttBenchProcess(fallback, cpuset)
     return EmqttBenchProcess(spec, cpuset)

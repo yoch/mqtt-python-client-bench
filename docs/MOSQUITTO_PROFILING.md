@@ -93,9 +93,11 @@ libwebsockets) are smaller than the syscall change on this path.
   `mosquitto/Dockerfile` + the 2.0.20 read-ahead patch remain as an optional A/B
   (`MQTT_BENCH_MOSQUITTO_IMAGE=mqtt-bench-mosquitto:2.0.20-fast` after a local
   `docker build`). Mixed images are not comparable.
-- Core `sub_*` capacity points use `loadgen_clients=150` and
-  `DEFAULT_INGRESS_OFFER_MSGS_PER_S = 150000` so `I=1` is a **150k** offer.
-  `MQTT_BENCH_LOADGEN=hammer` is a diagnostic firehose.
+- Core `sub_*` QoS0 exact-topic capacity uses **paced mqtt_hammer at 150k**
+  (`--rate 150000`, two publisher threads). emqtt-bench `-I` is milliseconds, so
+  150×`I=1` overruns on one loadgen core (~95–120k observed here). Templated
+  topics and QoS>0 stay on emqtt-bench. `MQTT_BENCH_LOADGEN=emqtt` forces it;
+  `MQTT_BENCH_LOADGEN=hammer` is a **paced 200k** diagnostic (never a firehose).
 - `broker_ceiling_ingress` / `client_ceiling_ingress` still sweep 32k / 64k /
   128k.
 
@@ -116,16 +118,17 @@ python -m mqtt_client_bench.run broker up
 ```
 
 The C hammer in `scripts/mosquitto_profile/mqtt_hammer.c` is MQTT 3.1.1 QoS0
-only. It is **not** the ranking loadgen. Set `MQTT_BENCH_LOADGEN=hammer` (or
-run the binary standalone) to separate "Mosquitto cannot go faster" from
-"the 1 ms emqtt-bench timer is the offer". Templated topics and QoS>0 stay
-on emqtt-bench either way.
+only. It **is** the ranking loadgen for QoS0 exact-topic ingress, paced with
+`--rate` (busy-wait slot; `nanosleep` cannot hold a 5 µs period). Default
+ranking rate is 150k; `MQTT_BENCH_LOADGEN=hammer` caps at 200k. Omit `--rate`
+only for an explicit firehose probe. Templated topics (`%i`) and QoS>0 stay
+on emqtt-bench.
 
 The optional `mqtt-bench-mosquitto:2.0.20-fast` image does not understand
 `packet_buffer_size`; drop that line from `mosquitto/mosquitto.conf` before
 an A/B against 2.0.
 
-Diagnostic subscribe smoke (not ranking — `non_comparable`, do not commit):
+Diagnostic subscribe smoke at 200k (not ranking — `non_comparable`, do not commit):
 
 ```bash
 export PYTHONPATH=src MQTT_BENCH_LOADGEN=hammer
@@ -134,7 +137,5 @@ python -m mqtt_client_bench.run run --scenario sub_exact_telemetry \
   --output logs/smoke/mqttium-sub_exact_telemetry-hammer-smoke.json
 ```
 
-Two unpaced hammer clients are a firehose (hundreds of thousands of pubs/s,
-often more when the subscriber is slow and Mosquitto accept-then-drops).
-They are not a paced 200k offer. Read `primary_msgs_per_s`; expect broker
-CPU at 100 % and `$SYS` publish drops.
+`--rate 200000` is an aggregate cap. Read `loadgen.observed_pub_rate` (must
+stay ≤ 200k) and `primary_msgs_per_s`.
