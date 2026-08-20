@@ -1,8 +1,12 @@
 # Ceiling probes — broker vs client
 
-Diagnostic runbook to push ingress offer past the default ~32k msgs/s and
-separate **Mosquitto ceiling** from **SUT client ceiling**. These points are
-`suite=full`, tagged `diagnostic`, and **non_comparable** (not ranking core).
+Diagnostic runbook to push ingress offer past the core `sub_*` default
+(200k msgs/s, paced mqtt_hammer `--rate`) and separate **Mosquitto ceiling**
+from **SUT client ceiling**. These points are `suite=full`, tagged
+`diagnostic`, and **non_comparable** (not ranking core). The catalogue
+ceiling grid still uses `loadgen_clients` 32 / 64 / 128 (`I=1` nominal).
+QoS0 exact-topic steps ride paced mqtt_hammer; emqtt-bench cannot hold 128k
+on one loadgen core.
 
 ## The 64k trap (emqtt-bench QoS0 double counting)
 
@@ -18,21 +22,29 @@ The parsed rate is ≈ **2 × the real rate**.
 
 | JSON field | Meaning |
 |---|---|
-| `loadgen.nominal_rate` | Configured offer ≈ `clients × 1000 / interval_ms` |
-| `loadgen.effective_offer_msgs_per_s` | **Offer reference** (= `nominal_rate` for pub) |
-| `loadgen.parsed_pub_rate_raw` / `parsed.median_rate` | Raw emqtt-bench rate (**do not compare** at QoS0) |
-| `loadgen.observed_pub_rate` | Corrected rate (`raw / 2` at QoS0) |
-| `loadgen.qos0_pub_counter_double_count` | `true` when the correction applies |
+| `loadgen.engine` | `hammer` or `emqtt` |
+| `loadgen.nominal_rate` | Configured offer (hammer `--rate`, or `clients × 1000 / interval_ms`) |
+| `loadgen.effective_offer_msgs_per_s` | **Offer reference** |
+| `loadgen.parsed_pub_rate_raw` / `parsed.median_rate` | Raw generator rate (**do not compare** emqtt QoS0) |
+| `loadgen.observed_pub_rate` | Corrected rate (`raw / 2` at emqtt QoS0; 1:1 for hammer) |
+| `loadgen.qos0_pub_counter_double_count` | `true` when the emqtt correction applies |
 
-With `-c 32 -I 1`: the real offer is **32k**, not 64k. A client at ~30.5k already
-tracks ~95 % of the offer — you must **raise the nominal** (more clients) to look
-for a higher ceiling. Do not widen the broker cpuset (Mosquitto 2.0 is
-single-threaded).
+With `-c 32 -I 1`: the real offer is **32k**, not 64k. Do not widen the broker
+cpuset (Mosquitto 2.1 is single-threaded). emqtt-bench above 100 clients
+does not hold the nominal: 150×`I=1` measured ~98k `$SYS received` here.
+
+`mqtt_hammer` (in-tree, `scripts/mqtt_hammer.c`) counts one completed
+`write(2)` of a PUBLISH packet. On this host, `--rate 200000` with no
+subscriber was **189,777** msgs/s with `$SYS received` ratio **1.000**.
+Pub+sub counts matched 1:1 across hammer pub, `$SYS received`, `$SYS sent`,
+and hammer sub. A slow subscriber back-pressures TCP and the observed pub
+rate falls with the pipeline — that is not a counting error.
 
 ## Preconditions
 
-- Local managed broker (the repo's Mosquitto, `sys_interval 1`).
-- emqtt-bench image available; Docker host networking.
+- Local managed broker (the repo's Mosquitto 2.1.2, `sys_interval 1`).
+- `gcc` to build `scripts/mqtt_hammer` (lazy, on first hammer run).
+- emqtt-bench image available for templated / QoS>0 paths; Docker host networking.
 - The `paho` extra installed (used by the `$SYS` probe).
 - `smoke` profile to iterate; `standard` for a more stable verdict.
 
@@ -40,7 +52,7 @@ single-threaded).
 
 | Scenario | Topology | Offer (`loadgen_clients` / target) | Primary |
 |---|---|---|---|
-| `broker_ceiling_ingress` | `broker_ceiling` (emqtt pub + emqtt sub) | 32 / 64 / 128 → 32k / 64k / 128k | reference sub `recv` |
+| `broker_ceiling_ingress` | `broker_ceiling` (pub + emqtt sub) | 32 / 64 / 128 → 32k / 64k / 128k | reference sub `recv` |
 | `client_ceiling_ingress` | `subscriber_ingress` + `--client` | same grid | SUT delivered |
 
 Publish capacity stays covered by `pub_qos_sweep_telemetry` (already SUT-limited).
@@ -75,10 +87,10 @@ A single offer step:
 
 ## Reading
 
-1. **Offer** = `effective_offer_msgs_per_s` / `nominal_rate` — never QoS0 `parsed.median_rate`.
+1. **Offer** = `effective_offer_msgs_per_s` / `nominal_rate` — never QoS0 `parsed.median_rate` for emqtt-bench.
 2. **Delivered** = `primary_msgs_per_s` (SUT or `loadgen_ref_sub.observed_recv_rate`).
 3. **Ratio** = `delivery_offer_ratio` (delivered / offer).
-4. **`$SYS`** = `sys_counters.dropped_delta` (plus sent/received) over the measure window.
+4. **`$SYS`** = `sys_counters.dropped_delta` (plus sent/received) over the measure window. Ingress fails closed if loadgen and `$SYS received` diverge (`loadgen_unconfirmed_by_broker`).
 5. **CPU** = `broker_cpu_max_pct` and the `telemetry` samples (Mosquitto container + SUT processes).
 
 ## Verdicts
@@ -87,8 +99,8 @@ A single offer step:
 |---|---|
 | **VERIFIED broker ceiling** | On `broker_ceiling_ingress`, recv plateaus while the offer rises (64k→128k); and/or material `dropped_delta`; bottleneck `broker_limited`. |
 | **VERIFIED client ceiling** | On `client_ceiling_ingress`, the SUT plateaus **below** the `broker_ceiling` recv at the same offer; low `$SYS` drops; bottleneck `sut_limited`. |
-| **offer_limited** | Delivered ≥ ~90 % of the effective offer — raise `loadgen_clients` before concluding. |
-| **INCONCLUSIVE** | Loadgen &lt; half the offer, barrier/worker errors, missing `$SYS` probe, or contradictory signals. |
+| **offer_limited** | Delivered ≥ ~90 % of the effective offer — raise the offer before concluding. |
+| **INCONCLUSIVE** | Loadgen unconfirmed by `$SYS`, barrier/worker errors, missing `$SYS` probe, or contradictory signals. |
 
 Out of scope: changing the broker cpuset, replacing Mosquitto, or including
 these points in the core ranking.

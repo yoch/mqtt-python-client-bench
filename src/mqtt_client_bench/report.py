@@ -110,6 +110,7 @@ _ENVIRONMENT_REASON_PREFIXES = (
     "broker_telemetry_missing",
     "loadgen_emitted_nothing",
     "loadgen_below_half_nominal",
+    "loadgen_unconfirmed_by_broker",
     "barrier_failed",
     "sys_publish_dropped",
     "delivery_below_half_offer",

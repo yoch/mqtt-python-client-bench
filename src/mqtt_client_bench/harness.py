@@ -36,7 +36,17 @@ from mqtt_client_bench.broker import (
     wait_for_broker,
 )
 from mqtt_client_bench.control import BarrierServer, read_json, wait_for_file, write_json
-from mqtt_client_bench.loadgen import EmqttBenchProcess, LoadgenSpec, interval_for_rate
+from mqtt_client_bench.loadgen import (
+    EMQTT_MAX_OFFER_MSGS_PER_S,
+    LoadgenSpec,
+    clamp_emqtt_offer,
+    clamp_hammer_rate,
+    interval_for_rate,
+    loadgen_emitted_msgs,
+    resolve_hammer_pub_clients,
+    select_loadgen_engine,
+    spawn_loadgen,
+)
 from mqtt_client_bench.metrics import (
     abba_order,
     abba_block_ratios,
@@ -95,6 +105,12 @@ SYS_SETTLE_S = 1.5
 # Computed once: a result is only comparable with another from the same
 # measurement path (see provenance.py).
 HARNESS_FINGERPRINT = harness_fingerprint()
+
+# Target offer for core sub_* QoS0 exact-topic capacity (paced mqtt_hammer).
+# emqtt-bench -I is milliseconds and cannot hold this on one loadgen core;
+# those paths are clamped to EMQTT_MAX_OFFER_MSGS_PER_S. MQTT_BENCH_LOADGEN=emqtt
+# forces emqtt-bench; MQTT_BENCH_LOADGEN=hammer is the same paced ranking offer.
+DEFAULT_INGRESS_OFFER_MSGS_PER_S = 200000.0
 
 
 # Topologies where a single SUT publisher is the *only* source of PUBLISHes, so
@@ -304,6 +320,57 @@ def reconcile_broker_publishes(
     return result
 
 
+def reconcile_ingress_loadgen(
+    point: dict,
+    loadgen_stats: Optional[dict],
+    sys_counters: Optional[dict],
+) -> dict:
+    """Compare loadgen-reported PUBLISHes with the broker's received count.
+
+    A successful write(2) is not a decoded MQTT PUBLISH. If the generator
+    claims 200k and ``$SYS received`` saw 80k, the offer is a TCP-buffer
+    fiction and the run must not stay valid.
+    """
+    result = {
+        "applicable": False,
+        "reason": None,
+        "loadgen_msgs": None,
+        "broker_received": None,
+        "ratio": None,
+    }
+    if point.get("topology") not in ("subscriber_ingress", "broker_ceiling"):
+        return result
+    if point.get("cadence") in ("burst", "microburst"):
+        return result
+    if not loadgen_stats or loadgen_stats.get("mode") == "sub":
+        return result
+    result["applicable"] = True
+    emitted = loadgen_emitted_msgs(loadgen_stats)
+    result["loadgen_msgs"] = emitted
+    if emitted is None:
+        result["reason"] = "loadgen_unconfirmed_by_broker"
+        return result
+    if not sys_counters or sys_counters.get("error"):
+        result["reason"] = "loadgen_unconfirmed_by_broker"
+        return result
+    received = sys_counters.get("publish_received_delta")
+    if received is None:
+        result["reason"] = "loadgen_unconfirmed_by_broker"
+        return result
+    result["broker_received"] = int(received)
+    if emitted <= 0:
+        return result
+    ratio = float(received) / float(emitted)
+    result["ratio"] = ratio
+    duration_s = float(point.get("duration_s") or 12.0)
+    tick_slack = 1.0 / max(duration_s, 3.0)
+    lo = BROKER_RECONCILE_MIN_RATIO - tick_slack
+    hi = BROKER_RECONCILE_MAX_RATIO + tick_slack
+    if ratio < lo or ratio > hi:
+        result["reason"] = f"loadgen_unconfirmed_by_broker:{ratio:.2f}"
+    return result
+
+
 def mqtt_version_for_point(point: dict) -> int:
     """Map point.protocol to emqtt-bench -V (3=MQTT 3.1, 4=3.1.1, 5=5.0)."""
     protocol = str(point.get("protocol", "MQTTv311"))
@@ -325,17 +392,18 @@ def effective_loadgen_mqtt_version(requested: int) -> int:
 
 
 def resolve_ingress_offer(point: dict, clients: int) -> float:
-    """Aggregate msgs/s requested from emqtt-bench before I=1 quantization.
+    """Aggregate msgs/s requested from the ingress loadgen.
 
-    With ``interval_ms = max(1, round(clients * 1000 / target))``, an I=1
-    offer of N×1000 requires ``ingress_target_msgs_per_s >= N*1000`` (or
-    equivalently ``loadgen_clients = N`` and a high enough target).
+    Hammer ``--rate`` is an absolute cap. emqtt-bench ``-I`` is milliseconds, so
+    an I=1 offer of N×1000 requires ``ingress_target_msgs_per_s >= N*1000`` (or
+    equivalently ``loadgen_clients = N`` and a high enough target). emqtt paths
+    are clamped later to EMQTT_MAX_OFFER_MSGS_PER_S.
     """
     if point.get("ingress_target_msgs_per_s") is not None:
         return float(point["ingress_target_msgs_per_s"])
     if point.get("fanin_mode") == "per_publisher":
         return float(clients) * 1000.0
-    return 40000.0
+    return DEFAULT_INGRESS_OFFER_MSGS_PER_S
 
 
 def _python() -> str:
@@ -584,7 +652,16 @@ def validate_run(
         reasons.append("broker_telemetry_missing")
 
     # Loadgen health vs effective offer (never raw QoS0 pub rates — they are ~2×).
-    if loadgen_stats and loadgen_stats.get("parsed") and point.get("cadence") not in ("burst", "microburst"):
+    # Subscriber ingress is excluded: a slow SUT back-pressures TCP, the hammer
+    # write()s block, and observed pub rate falls with the pipeline. That is the
+    # measurement, not a broken generator. $SYS reconciliation still proves the
+    # remaining writes were decoded PUBLISHes.
+    if (
+        loadgen_stats
+        and loadgen_stats.get("parsed")
+        and point.get("cadence") not in ("burst", "microburst")
+        and topology not in ("subscriber_ingress", "broker_ceiling")
+    ):
         observed = loadgen_stats.get("observed_pub_rate")
         if observed is None:
             parsed = loadgen_stats["parsed"]
@@ -593,20 +670,22 @@ def validate_run(
                 observed = float(raw) / 2.0
             else:
                 observed = raw
-        if offer and observed is not None and float(offer) < float("inf"):
-            if float(observed) < 0.5 * float(offer):
+        floor = (loadgen_stats or {}).get("target_requested") or offer
+        if observed is not None and floor and float(floor) < float("inf"):
+            if float(observed) < 0.5 * float(floor):
                 reasons.append("loadgen_below_half_nominal")
 
-    # $SYS publish drops over the measure window. Fail closed: a run with
-    # material broker-side drops must not stay "valid" and poison medians
-    # (seen on subscriber_ingress when Mosquitto sheds under CPU pressure).
+    # $SYS publish drops. On subscriber_ingress a slow SUT is expected to make
+    # Mosquitto shed: the score is still callback deliveries. Elsewhere, drops
+    # mean the broker could not ingest the offer and the run is not a SUT score.
     dropped_delta = (sys_counters or {}).get("dropped_delta") if sys_counters else None
     drop_threshold = 100
     if offer and float(offer) < float("inf") and duration_s > 0:
         drop_threshold = max(100, int(0.01 * float(offer) * duration_s))
     sys_drops = dropped_delta is not None and int(dropped_delta) > drop_threshold
     diagnostic = "diagnostic" in (point.get("tags") or ()) or topology == "broker_ceiling"
-    if sys_drops:
+    ingress_consumer_drops = topology == "subscriber_ingress"
+    if sys_drops and not ingress_consumer_drops:
         reasons.append(f"sys_publish_dropped:{int(dropped_delta)}")
 
     # Delivered rate vs effective offer (ingress / broker ceiling).
@@ -638,22 +717,32 @@ def validate_run(
         and point.get("cadence") not in ("burst", "microburst")
     ):
         delivery_ratio = float(delivered_rate) / float(offer)
-        # Half-offer delivery under ingress/ceiling is not a trustworthy SUT score.
-        if delivery_ratio < 0.5 and (
-            diagnostic or topology in ("subscriber_ingress", "broker_ceiling")
-        ):
+        # Diagnostic / ceiling: delivered ≪ offer is not a trustworthy SUT score.
+        # Core capacity ingress keeps the number (a slow client at 15k of a
+        # 200k offer is the ranking). Unpaced firehose: the score *is* delivered.
+        unpaced_firehose = (
+            (loadgen_stats or {}).get("paced") is False
+            and int((loadgen_stats or {}).get("interval_ms") or 0) == 0
+            and not (loadgen_stats or {}).get("rate_msgs_per_s")
+        )
+        if diagnostic and delivery_ratio < 0.5 and not unpaced_firehose:
             reasons.append("delivery_below_half_offer")
 
     # Does the broker confirm what the adapter claimed to have published?
     reconciliation = reconcile_broker_publishes(point, worker_results, sys_counters)
     if reconciliation["reason"]:
         reasons.append(reconciliation["reason"])
+    ingress_reconciliation = reconcile_ingress_loadgen(point, loadgen_stats, sys_counters)
+    if ingress_reconciliation["reason"]:
+        reasons.append(ingress_reconciliation["reason"])
 
     status = "valid" if not reasons else "inconclusive"
     bottleneck = "bottleneck_unattributed"
     if reconciliation["reason"]:
         bottleneck = "broker_unconfirmed"
-    elif any(r.startswith("container_cpu_high:") and "mosquitto" in r for r in reasons) or sys_drops:
+    elif any(r.startswith("container_cpu_high:") and "mosquitto" in r for r in reasons) or (
+        sys_drops and not ingress_consumer_drops
+    ):
         bottleneck = "broker_limited"
     elif broker_cpu_max is not None and broker_cpu_max >= BROKER_CPU_HEADROOM_PCT:
         bottleneck = "broker_limited"
@@ -678,6 +767,7 @@ def validate_run(
         "delivery_offer_ratio": delivery_ratio,
         "broker_cpu_max_pct": sanitize_number(broker_cpu_max),
         "broker_reconciliation": reconciliation,
+        "ingress_reconciliation": ingress_reconciliation,
     }
 
 
@@ -1024,7 +1114,7 @@ def run_point(
                     # which also records the delivery. Cap avoids a connection storm.
                     clients = max(clients, min(callback_filters, 256))
                 # Keep aggregate offered load stable when client count grows with filters.
-                target = resolve_ingress_offer(point, clients) if point.get("ingress_target_msgs_per_s") is not None else 40000.0
+                target = resolve_ingress_offer(point, clients)
             elif point.get("subscription") in ("plus", "hash") or str(point.get("topic_topology", "")).startswith("fleet"):
                 lg_topic = f"bench/{run_id}/org/acme/site/s0000/device/d0000/telemetry/temperature"
             else:
@@ -1040,15 +1130,36 @@ def run_point(
                 elif topo == "unicode":
                     lg_topic = unicode_topic(run_id)
             limit_total = 0
-            interval = interval_for_rate(clients, target)
-            if burst_ingress:
-                # Offer a bounded burst at max speed, then silence; the subscriber's
-                # window rate plus delivered_during_drain expose backlog recovery.
-                # emqtt-bench -L is a global cap across all clients.
-                limit_total = 1000 if cadence == "microburst" else max(1, int(target * float(point.get("duration_s", 3))))
-                interval = 1
             requested_mqtt_v = mqtt_version_for_point(point)
             loadgen_mqtt_v = effective_loadgen_mqtt_version(requested_mqtt_v)
+            hammer_rate = None
+            if burst_ingress:
+                # Keep the burst on the I=1 emqtt offer of the configured
+                # client count, not the hammer ranking target.
+                target = min(float(clients) * 1000.0, float(EMQTT_MAX_OFFER_MSGS_PER_S))
+                limit_total = (
+                    1000
+                    if cadence == "microburst"
+                    else max(1, int(target * float(point.get("duration_s", 3))))
+                )
+                interval = 1
+                engine = "emqtt"
+            else:
+                engine = select_loadgen_engine(
+                    LoadgenSpec(
+                        topic=lg_topic,
+                        qos=int(point.get("qos_publish", 0)),
+                        mode="pub",
+                        engine="auto",
+                    )
+                )
+                if engine == "hammer":
+                    clients = resolve_hammer_pub_clients(point, clients)
+                    interval = 0
+                    hammer_rate = float(clamp_hammer_rate(target))
+                else:
+                    clients, target = clamp_emqtt_offer(clients, target)
+                    interval = interval_for_rate(clients, target)
             point["ingress_target_msgs_per_s"] = target
             point["loadgen_clients"] = clients
             spec = LoadgenSpec(
@@ -1064,8 +1175,10 @@ def run_point(
                 mqtt_version=loadgen_mqtt_v,
                 mode="pub",
                 target_requested=target,
+                rate_msgs_per_s=hammer_rate,
+                engine=engine,
             )
-            loadgen = EmqttBenchProcess(spec, cpuset=cpusets.get("loadgen"))
+            loadgen = spawn_loadgen(spec, cpuset=cpusets.get("loadgen"))
             # Warmup uses a separate short-lived loadgen so measure starts clean.
             if not burst_ingress:
                 warmup_spec = LoadgenSpec(
@@ -1081,8 +1194,10 @@ def run_point(
                     mqtt_version=loadgen_mqtt_v,
                     mode="pub",
                     target_requested=target,
+                    rate_msgs_per_s=hammer_rate,
+                    engine=engine,
                 )
-                warmup_loadgen = EmqttBenchProcess(warmup_spec, cpuset=cpusets.get("loadgen"))
+                warmup_loadgen = spawn_loadgen(warmup_spec, cpuset=cpusets.get("loadgen"))
             else:
                 warmup_loadgen = None
 
@@ -1099,10 +1214,11 @@ def run_point(
                     mqtt_version=loadgen_mqtt_v,
                     mode="sub",
                     target_requested=target,
+                    engine="emqtt",
                 )
                 # Keep the ref subscriber off the loadgen cpuset so pub and
                 # recv do not contend for the same pinned cores.
-                ref_sub_loadgen = EmqttBenchProcess(ref_spec, cpuset=cpusets.get("orch"))
+                ref_sub_loadgen = spawn_loadgen(ref_spec, cpuset=cpusets.get("orch"))
 
         elif topology == "duplex_gateway":
             # Modest command stream toward the SUT subscriber while the SUT publishes.
@@ -1121,8 +1237,9 @@ def run_point(
                 mqtt_version=loadgen_mqtt_v,
                 mode="pub",
                 target_requested=duplex_target,
+                engine="emqtt",
             )
-            loadgen = EmqttBenchProcess(spec, cpuset=cpusets.get("loadgen"))
+            loadgen = spawn_loadgen(spec, cpuset=cpusets.get("loadgen"))
             warmup_loadgen = None
             loadgen.start()
 
@@ -1347,6 +1464,7 @@ def run_point(
             "effective_offer_msgs_per_s": validity.get("effective_offer_msgs_per_s"),
             "broker_cpu_max_pct": validity.get("broker_cpu_max_pct"),
             "broker_reconciliation": validity.get("broker_reconciliation"),
+            "ingress_reconciliation": validity.get("ingress_reconciliation"),
             "cost_per_message": cost_per_message(worker_results, telemetry_samples),
             # Which drive path the publisher actually took. A run through the
             # sync facade and a native run measure different amounts of harness,

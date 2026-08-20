@@ -10,9 +10,12 @@ the ranking, since the tax is paid per message and so compresses the fast
 clients more than the slow ones.
 
 The fingerprint is derived from the code rather than from a constant someone has
-to remember to bump. It is taken over the *structure* — the AST with docstrings
-removed — so reformatting, comments and prose do not invalidate a campaign,
-while any change to what the code actually does invalidates it immediately.
+to remember to bump. Python modules are hashed by *structure* — the AST with
+docstrings removed — so reformatting, comments and prose do not invalidate a
+campaign, while any change to what the code actually does invalidates it
+immediately. Non-Python files (the in-tree C loadgen) are hashed as bytes:
+there is no AST to strip, and a pacing or counting change must invalidate
+``sub_*`` numbers.
 
 Per-adapter modules are deliberately excluded: a change to one client's adapter
 has no bearing on another client's numbers, and `client_identity` already
@@ -28,8 +31,10 @@ from pathlib import Path
 from typing import Iterable
 
 _ROOT = Path(__file__).resolve().parent
+_REPO_ROOT = _ROOT.parents[1]
 
 # The shared measurement path: anything here changes what a number means.
+# Package-relative unless the entry starts with ``scripts/`` (repo root).
 MEASUREMENT_PATH = (
     "harness.py",
     "control.py",
@@ -37,6 +42,7 @@ MEASUREMENT_PATH = (
     "sampling.py",
     "telemetry.py",
     "workloads.py",
+    "loadgen.py",
     "broker.py",
     "adapters/base.py",
     "adapters/async_bridge.py",
@@ -44,6 +50,7 @@ MEASUREMENT_PATH = (
     "roles/subscriber.py",
     "roles/rtt_initiator.py",
     "roles/responder.py",
+    "scripts/mqtt_hammer.c",
 )
 
 
@@ -60,18 +67,30 @@ def _strip_docstrings(tree: ast.AST) -> ast.AST:
     return tree
 
 
+def _measurement_file(rel: str) -> Path:
+    if rel.startswith("scripts/"):
+        return _REPO_ROOT / rel
+    return _ROOT / rel
+
+
 def _structural_digest(path: Path) -> str:
     tree = _strip_docstrings(ast.parse(path.read_text(encoding="utf-8")))
     return hashlib.sha256(ast.dump(tree).encode("utf-8")).hexdigest()
+
+
+def _file_digest(path: Path) -> str:
+    if path.suffix == ".py":
+        return _structural_digest(path)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def harness_fingerprint(files: Iterable[str] = MEASUREMENT_PATH) -> str:
     """Short digest of the measurement path, stable across prose-only edits."""
     digest = hashlib.sha256()
     for rel in sorted(files):
-        path = _ROOT / rel
+        path = _measurement_file(rel)
         digest.update(rel.encode("utf-8"))
         digest.update(b"\0")
-        digest.update((_structural_digest(path) if path.exists() else "missing").encode("utf-8"))
+        digest.update((_file_digest(path) if path.exists() else "missing").encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()[:16]

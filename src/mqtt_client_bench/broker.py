@@ -13,12 +13,15 @@ from typing import Optional, Tuple
 
 from mqtt_client_bench.paths import CERT_DIR, COMPOSE_FILE, MOSQUITTO_CONF
 
-# Pin by tag; digest is recorded at runtime after pull/inspect.
+# Pin by tag+digest; mixed images are not comparable.
+# Default is upstream Mosquitto 2.1.2 (packet_buffer_size already in tree).
+# Override with MQTT_BENCH_MOSQUITTO_IMAGE to A/B. 2.0 rejects packet_buffer_size
+# in mosquitto/mosquitto.conf.
 MOSQUITTO_IMAGE = os.environ.get(
     "MQTT_BENCH_MOSQUITTO_IMAGE",
     os.environ.get(
         "PAHO_BENCH_MOSQUITTO_IMAGE",
-        "eclipse-mosquitto:2.0.20@sha256:21421af7b32bf9ce508e9090c8eb13bb81f410ca778dc205506180a6f862d0eb",
+        "eclipse-mosquitto:2.1.2-alpine@sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797",
     ),
 )
 EMQTT_BENCH_IMAGE = os.environ.get(
@@ -231,7 +234,9 @@ def _container_state(name: str) -> Optional[str]:
 
 def broker_up(wait: bool = True, timeout_s: float = 30.0, cpuset: Optional[str] = None) -> dict:
     ensure_certs()
-    _run(compose_cmd("up", "-d", "mosquitto"))
+    env = os.environ.copy()
+    env["MQTT_BENCH_MOSQUITTO_IMAGE"] = MOSQUITTO_IMAGE
+    _run(compose_cmd("up", "-d", "mosquitto"), env=env)
     container = broker_container_name()
     # With network_mode=host, a stale mosquitto from another checkout can hold
     # the ports: our container then crash-loops on "Address in use" while the
