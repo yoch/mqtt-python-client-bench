@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import collections
 import json
+import os
 import re
 import threading
 import time
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -28,14 +30,33 @@ from mqtt_client_bench.adapters.registry import (  # noqa: E402
     list_clients,
     unsupported_for_client,
 )
-from mqtt_client_bench.harness import capacity_from_qos_sweep, capacity_from_scenario, unsupported_features  # noqa: E402
+from mqtt_client_bench.harness import (  # noqa: E402
+    DEFAULT_INGRESS_OFFER_MSGS_PER_S,
+    capacity_from_qos_sweep,
+    capacity_from_scenario,
+    reconcile_ingress_loadgen,
+    resolve_ingress_offer,
+    unsupported_features,
+)
 from mqtt_client_bench.loadgen import (  # noqa: E402
+    EMQTT_MAX_OFFER_MSGS_PER_S,
+    HAMMER_MAX_RATE_MSGS_PER_S,
+    HAMMER_PUB_CLIENTS,
+    UNPACED_PUB_CLIENTS,
     LoadgenSpec,
+    build_hammer_cmd,
+    build_pub_args,
+    clamp_emqtt_offer,
+    clamp_hammer_rate,
     enrich_loadgen_stats,
+    resolve_hammer_pub_clients,
     interval_for_rate,
     nominal_rate,
     observed_pub_rate,
     parse_emqtt_output,
+    parse_hammer_output,
+    select_loadgen_engine,
+    topic_is_templated,
 )
 from mqtt_client_bench.metrics import (  # noqa: E402
     abba_block_ratios,
@@ -532,10 +553,10 @@ class AdapterRegistryTests(unittest.TestCase):
                 )
 
     def test_mqttium_private_api_shape(self):
-        # mqttium moves fast (0.1.0a4 -> 0.2.0b2 in days) and the compat adapter
-        # rebuilds the façade's inner AsyncClient to equalise the in-flight
-        # window. If a release moves any of that, fail here rather than let the
-        # adapter silently measure something else.
+        # mqttium moves fast and the compat adapter still reaches into the
+        # façade for TLS, SUBACK delivery, and write-pump sizing. If a release
+        # moves any of that, fail here rather than let the adapter silently
+        # measure something else.
         import inspect
 
         from mqttium.api import AsyncClient
@@ -549,10 +570,8 @@ class AdapterRegistryTests(unittest.TestCase):
             "_sub_futs",
             "_collect_effects_locked",
             "_drain_effects",
-            "_queue_qos0_on_loop",
-            "_queue_qosn_on_loop",
-            "_finalize_loop_commands",
             "_reconfigure",
+            "_max_outbound_bytes",
         ):
             self.assertTrue(hasattr(async_client, attr), f"mqttium no longer exposes {attr}")
         # No on_subscribe hook is why the compat adapter mirrors the SUBACK
@@ -560,23 +579,31 @@ class AdapterRegistryTests(unittest.TestCase):
         self.assertFalse(hasattr(async_client, "on_subscribe"))
 
         facade = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="shape-probe")
-        for attr in (
-            "_async",
-            "_loop",
-            "_submit",
-            "_run_loop_mutation",
-            "_queue_qos0_on_loop",
-            "_queue_qosn_on_loop",
-            "_finalize_async_commands",
-        ):
+        for attr in ("_async", "_loop", "_submit", "_run_loop_mutation"):
             self.assertTrue(hasattr(facade, attr), f"mqttium façade no longer exposes {attr}")
-        # The rebuild exists only because the window cannot be set any other
-        # way. When either of these stops holding, drop it from the adapter.
-        self.assertNotIn(
+        # rc6 added the ctor parameter the adapter used to rebuild the inner
+        # client to set. Keep asserting attach-time-only so a later release
+        # that makes it runtime-mutable can drop the ctor-only comment.
+        self.assertIn(
             "max_outbound_inflight", inspect.signature(mqtt.Client.__init__).parameters
         )
         with self.assertRaises(AttributeError):
             facade._async._reconfigure(max_outbound_inflight=64)
+
+    def test_mqttium_compat_passes_inflight_and_write_pump_on_create(self):
+        from mqtt_client_bench.adapters.mqttium_compat import MqttiumCompatAdapter
+
+        adapter = MqttiumCompatAdapter.create(
+            client_id="inflight-probe",
+            max_inflight=64,
+            max_queued=200,
+            max_queued_bytes=8 << 20,
+        )
+        inner = adapter._client._async
+        self.assertEqual(inner._engine.config.max_outbound_inflight, 64)
+        self.assertEqual(inner._engine.config.max_pending_outbound_messages, 200)
+        self.assertEqual(inner._engine.config.max_pending_outbound_bytes, 64 << 20)
+        self.assertEqual(inner._max_outbound_bytes, 8 << 20)
 
     def test_gmqtt_v5_properties_align_payload_format(self):
         from mqtt_client_bench.adapters.gmqtt import GmqttAdapter
@@ -1148,12 +1175,21 @@ class LoadgenTests(unittest.TestCase):
 
     def test_qos0_effective_offer_not_parsed_rate(self):
         """QoS0 pub rates from emqtt-bench are ~2×; offer reference is nominal."""
-        spec = LoadgenSpec(clients=32, interval_ms=1, qos=0, mode="pub")
-        parsed = {"median_rate": 64000.0, "last_rate": 64000.0, "samples": 1, "rates": [64000.0], "totals": [64000], "kinds": ["pub"]}
+        spec = LoadgenSpec(clients=32, interval_ms=1, qos=0, mode="pub", engine="emqtt")
+        parsed = {
+            "median_rate": 64000.0,
+            "last_rate": 64000.0,
+            "last_total": 64000,
+            "samples": 1,
+            "rates": [64000.0],
+            "totals": [64000],
+            "kinds": ["pub"],
+        }
         stats = enrich_loadgen_stats(spec, parsed)
         self.assertEqual(stats["effective_offer_msgs_per_s"], 32000.0)
         self.assertEqual(stats["nominal_rate"], 32000.0)
         self.assertTrue(stats["qos0_pub_counter_double_count"])
+        self.assertEqual(stats["emitted_msgs"], 32000)
         self.assertEqual(stats["parsed_pub_rate_raw"], 64000.0)
         self.assertEqual(stats["observed_pub_rate"], 32000.0)
         self.assertEqual(observed_pub_rate(parsed, qos=0), 32000.0)
@@ -1169,11 +1205,85 @@ class LoadgenTests(unittest.TestCase):
         self.assertEqual(effective_loadgen_mqtt_version(5), 5)
 
     def test_loadgen_shortids_for_v311(self):
-        from mqtt_client_bench.loadgen import build_pub_args
-
         args = build_pub_args(LoadgenSpec(mqtt_version=4))
         self.assertIn("--shortids", args)
+        self.assertIn("-w", args)
         self.assertNotIn("--shortids", build_pub_args(LoadgenSpec(mqtt_version=5)))
+
+    def test_unpaced_firehose_uses_observed_offer(self):
+        spec = LoadgenSpec(clients=8, interval_ms=0, qos=0, mode="pub", engine="hammer")
+        parsed = {
+            "median_rate": 220000.0,
+            "last_rate": 220000.0,
+            "samples": 1,
+            "rates": [220000.0],
+            "totals": [220000],
+            "kinds": ["pub"],
+        }
+        stats = enrich_loadgen_stats(spec, parsed)
+        self.assertIsNone(stats["nominal_rate"])
+        self.assertEqual(stats["effective_offer_msgs_per_s"], 220000.0)
+        self.assertEqual(stats["observed_pub_rate"], 220000.0)
+        self.assertFalse(stats["qos0_pub_counter_double_count"])
+        self.assertEqual(stats["engine"], "hammer")
+        self.assertFalse(stats["paced"])
+
+    def test_paced_hammer_offer_is_configured_rate(self):
+        spec = LoadgenSpec(
+            clients=2, interval_ms=0, qos=0, mode="pub", engine="hammer", rate_msgs_per_s=200000
+        )
+        parsed = {
+            "median_rate": 189777.0,
+            "last_rate": 189777.0,
+            "samples": 1,
+            "rates": [189777.0],
+            "totals": [1897770],
+            "kinds": ["pub"],
+        }
+        stats = enrich_loadgen_stats(spec, parsed)
+        self.assertEqual(stats["nominal_rate"], 200000.0)
+        self.assertEqual(stats["effective_offer_msgs_per_s"], 200000.0)
+        self.assertTrue(stats["paced"])
+        self.assertEqual(clamp_hammer_rate(500000), HAMMER_MAX_RATE_MSGS_PER_S)
+        self.assertEqual(clamp_hammer_rate(200000), 200000)
+        cmd = build_hammer_cmd(spec)
+        self.assertIn("--rate", cmd)
+        self.assertEqual(cmd[cmd.index("--rate") + 1], "200000")
+        self.assertNotIn("--interval-us", cmd)
+
+    def test_select_hammer_for_qos0_exact_topic(self):
+        spec = LoadgenSpec(topic="bench/t", qos=0, mode="pub")
+        with patch.dict(os.environ, {"MQTT_BENCH_LOADGEN": "auto"}, clear=False):
+            self.assertEqual(select_loadgen_engine(spec), "hammer")
+        with patch.dict(os.environ, {"MQTT_BENCH_LOADGEN": "emqtt"}, clear=False):
+            self.assertEqual(select_loadgen_engine(spec), "emqtt")
+        with patch.dict(os.environ, {"MQTT_BENCH_LOADGEN": "nope"}, clear=False):
+            self.assertEqual(select_loadgen_engine(spec), "emqtt")
+        self.assertEqual(
+            select_loadgen_engine(LoadgenSpec(topic="bench/t", qos=0, mode="pub", engine="emqtt")),
+            "emqtt",
+        )
+        self.assertTrue(topic_is_templated("bench/%i/data"))
+        templated = LoadgenSpec(topic="bench/%i/data", qos=0, mode="pub")
+        with patch.dict(os.environ, {"MQTT_BENCH_LOADGEN": "auto"}, clear=False):
+            self.assertEqual(select_loadgen_engine(templated), "emqtt")
+        qos1 = LoadgenSpec(topic="bench/t", qos=1, mode="pub")
+        self.assertEqual(select_loadgen_engine(qos1), "emqtt")
+        self.assertEqual(HAMMER_PUB_CLIENTS, 2)
+        self.assertEqual(UNPACED_PUB_CLIENTS, 2)
+        self.assertEqual(resolve_hammer_pub_clients({}, 32), HAMMER_PUB_CLIENTS)
+        self.assertEqual(resolve_hammer_pub_clients({"fanin_mode": "constant_aggregate"}, 128), 128)
+        self.assertEqual(resolve_hammer_pub_clients({"fanin_mode": "per_publisher"}, 1), 1)
+        self.assertEqual(HAMMER_MAX_RATE_MSGS_PER_S, 200000)
+        clients, target = clamp_emqtt_offer(150, 200000)
+        self.assertEqual(clients, 100)
+        self.assertEqual(target, float(EMQTT_MAX_OFFER_MSGS_PER_S))
+
+    def test_parse_hammer_json(self):
+        text = 'noise\n{"role":"pub","clients":8,"msgs":1000,"seconds":1.0,"msgs_per_s":12345.6}\n'
+        parsed = parse_hammer_output(text)
+        self.assertEqual(parsed["last_total"], 1000)
+        self.assertAlmostEqual(parsed["median_rate"], 12345.6)
 
     def test_callback_match_helpers(self):
         run_id = "abcd1234"
@@ -1210,11 +1320,16 @@ class CeilingProbeTests(unittest.TestCase):
             self.assertEqual(nominal_rate(p["loadgen_clients"], 1), float(p["ingress_target_msgs_per_s"]))
 
     def test_resolve_ingress_offer(self):
-        from mqtt_client_bench.harness import resolve_ingress_offer
-
-        self.assertEqual(resolve_ingress_offer({}, 32), 40000.0)
+        self.assertEqual(resolve_ingress_offer({}, 32), DEFAULT_INGRESS_OFFER_MSGS_PER_S)
         self.assertEqual(resolve_ingress_offer({"ingress_target_msgs_per_s": 64000}, 64), 64000.0)
         self.assertEqual(resolve_ingress_offer({"fanin_mode": "per_publisher"}, 16), 16000.0)
+        self.assertEqual(DEFAULT_INGRESS_OFFER_MSGS_PER_S, 200000.0)
+
+    def test_sub_exact_offer_is_200k(self):
+        points = expand_scenario(SCENARIO_BY_NAME["sub_exact_telemetry"], "smoke")
+        self.assertGreaterEqual(len(points), 1)
+        for p in points:
+            self.assertEqual(resolve_ingress_offer(p, p["loadgen_clients"]), DEFAULT_INGRESS_OFFER_MSGS_PER_S)
 
     def test_validate_run_uses_effective_offer_not_raw_qos0(self):
         from mqtt_client_bench.harness import validate_run
@@ -1234,7 +1349,9 @@ class CeilingProbeTests(unittest.TestCase):
             "qos0_pub_counter_double_count": True,
             "parsed": {"last_rate": 64000.0, "last_total": 1280000, "median_rate": 64000.0},
         }
-        validity = validate_run(point, workers, loadgen, [])
+        # last_total 1_280_000 with QoS0 double-count → 640_000 decoded PUBLISHes.
+        sys_counters = {"dropped_delta": 0, "publish_received_delta": 640_000}
+        validity = validate_run(point, workers, loadgen, [], sys_counters=sys_counters)
         self.assertNotIn("loadgen_below_half_nominal", validity["reasons"])
         self.assertEqual(validity["bottleneck"], "offer_limited")
         self.assertAlmostEqual(validity["delivery_offer_ratio"], 30000.0 / 32000.0)
@@ -1259,8 +1376,9 @@ class CeilingProbeTests(unittest.TestCase):
             "observed_recv_rate": 28000.0,
             "parsed": {"last_rate": 28000.0, "last_total": 560000, "median_rate": 28000.0},
         }
-        # > 1% of offer*duration (64000*20*0.01 = 12800)
-        sys_counters = {"dropped_delta": 20000}
+        # > 1% of offer*duration (64000*20*0.01 = 12800).
+        # last_total 2_400_000 with QoS0 double-count → 1_200_000 decoded PUBLISHes.
+        sys_counters = {"dropped_delta": 20000, "publish_received_delta": 1_200_000}
         validity = validate_run(point, [], loadgen, [], sys_counters=sys_counters, loadgen_ref_sub=ref_sub)
         self.assertEqual(validity["bottleneck"], "broker_limited")
         self.assertEqual(validity["status"], "inconclusive")
@@ -1271,7 +1389,7 @@ class CeilingProbeTests(unittest.TestCase):
         self.assertIn("delivery_below_half_offer", validity["reasons"])
 
     def test_validate_run_sys_drops_fail_closed_subscriber_ingress(self):
-        """Core ranking runs must not stay valid when Mosquitto sheds publishes."""
+        """Ingress drops mean the SUT did not drain; the delivery count is still a score."""
         from mqtt_client_bench.harness import validate_run
 
         point = {
@@ -1288,22 +1406,22 @@ class CeilingProbeTests(unittest.TestCase):
             }
         ]
         loadgen = {
-            "nominal_rate": 32000.0,
-            "effective_offer_msgs_per_s": 32000.0,
-            "observed_pub_rate": 28000.0,
-            "parsed": {"last_rate": 28000.0, "last_total": 560000, "median_rate": 28000.0},
+            "nominal_rate": 200000.0,
+            "effective_offer_msgs_per_s": 200000.0,
+            "observed_pub_rate": 180000.0,
+            "parsed": {"last_rate": 180000.0, "last_total": 3600000, "median_rate": 180000.0},
         }
-        # > 1% of 32000*20 = 6400
-        sys_counters = {"dropped_delta": 42699}
+        sys_counters = {"dropped_delta": 42699, "publish_received_delta": 3_600_000}
         validity = validate_run(point, workers, loadgen, [], sys_counters=sys_counters)
-        self.assertEqual(validity["status"], "inconclusive")
-        self.assertEqual(validity["bottleneck"], "broker_limited")
-        self.assertTrue(
+        self.assertEqual(validity["status"], "valid")
+        self.assertFalse(
             any(str(r).startswith("sys_publish_dropped:") for r in validity["reasons"]),
             validity["reasons"],
         )
+        self.assertEqual(validity["bottleneck"], "sut_limited")
 
     def test_validate_run_delivery_below_half_subscriber_ingress(self):
+        """Core capacity: a slow SUT well below the offer is still a score."""
         from mqtt_client_bench.harness import validate_run
 
         point = {
@@ -1320,15 +1438,157 @@ class CeilingProbeTests(unittest.TestCase):
             }
         ]
         loadgen = {
-            "nominal_rate": 32000.0,
-            "effective_offer_msgs_per_s": 32000.0,
-            "observed_pub_rate": 30000.0,
-            "parsed": {"last_rate": 30000.0, "last_total": 600000, "median_rate": 30000.0},
+            "engine": "hammer",
+            "nominal_rate": 200000.0,
+            "effective_offer_msgs_per_s": 200000.0,
+            "observed_pub_rate": 199000.0,
+            "target_requested": 200000.0,
+            "rate_msgs_per_s": 200000.0,
+            "interval_ms": 0,
+            "paced": True,
+            "parsed": {"last_rate": 199000.0, "last_total": 3980000, "median_rate": 199000.0},
         }
-        validity = validate_run(point, workers, loadgen, [], sys_counters={"dropped_delta": 0})
+        validity = validate_run(
+            point, workers, loadgen, [],
+            sys_counters={"dropped_delta": 0, "publish_received_delta": 3_980_000},
+        )
+        self.assertEqual(validity["status"], "valid")
+        self.assertNotIn("delivery_below_half_offer", validity["reasons"])
+        self.assertEqual(validity["bottleneck"], "sut_limited")
+
+    def test_validate_run_unpaced_slow_client_is_valid_sut(self):
+        from mqtt_client_bench.harness import validate_run
+
+        point = {
+            "topology": "subscriber_ingress",
+            "cadence": "capacity",
+            "duration_s": 20.0,
+        }
+        workers = [
+            {
+                "ok": True,
+                "role": "subscriber",
+                "msgs_per_s": 15000.0,
+                "subscriber_delivered": 300000,
+            }
+        ]
+        loadgen = {
+            "engine": "hammer",
+            "nominal_rate": None,
+            "effective_offer_msgs_per_s": 220000.0,
+            "observed_pub_rate": 220000.0,
+            "target_requested": 100000.0,
+            "interval_ms": 0,
+            "paced": False,
+            "parsed": {"last_rate": 220000.0, "last_total": 4400000, "median_rate": 220000.0},
+        }
+        validity = validate_run(
+            point, workers, loadgen, [],
+            sys_counters={"dropped_delta": 0, "publish_received_delta": 4_400_000},
+        )
+        self.assertEqual(validity["status"], "valid")
+        self.assertNotIn("delivery_below_half_offer", validity["reasons"])
+        self.assertEqual(validity["bottleneck"], "sut_limited")
+
+    def test_validate_run_diagnostic_delivery_below_half(self):
+        from mqtt_client_bench.harness import validate_run
+
+        point = {
+            "topology": "subscriber_ingress",
+            "cadence": "capacity",
+            "duration_s": 20.0,
+            "tags": ["diagnostic"],
+        }
+        workers = [
+            {
+                "ok": True,
+                "role": "subscriber",
+                "msgs_per_s": 15000.0,
+                "subscriber_delivered": 300000,
+            }
+        ]
+        loadgen = {
+            "engine": "hammer",
+            "nominal_rate": 200000.0,
+            "effective_offer_msgs_per_s": 200000.0,
+            "observed_pub_rate": 199000.0,
+            "target_requested": 200000.0,
+            "rate_msgs_per_s": 200000.0,
+            "interval_ms": 0,
+            "paced": True,
+            "parsed": {"last_rate": 199000.0, "last_total": 3980000, "median_rate": 199000.0},
+        }
+        validity = validate_run(
+            point, workers, loadgen, [],
+            sys_counters={"dropped_delta": 0, "publish_received_delta": 3_980_000},
+        )
         self.assertEqual(validity["status"], "inconclusive")
         self.assertIn("delivery_below_half_offer", validity["reasons"])
         self.assertEqual(validity["bottleneck"], "sut_limited")
+
+    def test_ingress_reconciliation_matches_sys_received(self):
+        point = {"topology": "subscriber_ingress", "cadence": "capacity"}
+        loadgen = {
+            "mode": "pub",
+            "qos0_pub_counter_double_count": False,
+            "parsed": {"last_total": 1_897_882},
+        }
+        out = reconcile_ingress_loadgen(
+            point, loadgen, {"publish_received_delta": 1_897_882}
+        )
+        self.assertTrue(out["applicable"])
+        self.assertIsNone(out["reason"])
+        self.assertAlmostEqual(out["ratio"], 1.0)
+
+    def test_ingress_reconciliation_rejects_write_fiction(self):
+        point = {"topology": "subscriber_ingress", "cadence": "capacity", "duration_s": 12.0}
+        loadgen = {
+            "mode": "pub",
+            "qos0_pub_counter_double_count": False,
+            "parsed": {"last_total": 2_000_000},
+        }
+        out = reconcile_ingress_loadgen(
+            point, loadgen, {"publish_received_delta": 80_000}
+        )
+        self.assertTrue(out["applicable"])
+        self.assertTrue(str(out["reason"]).startswith("loadgen_unconfirmed_by_broker"))
+
+    def test_ingress_reconciliation_fails_closed_without_sys(self):
+        point = {"topology": "subscriber_ingress", "cadence": "capacity"}
+        loadgen = {
+            "mode": "pub",
+            "qos0_pub_counter_double_count": False,
+            "parsed": {"last_total": 1_897_882},
+        }
+        for sys_counters in (None, {}, {"error": "probe_failed"}, {"dropped_delta": 0}):
+            with self.subTest(sys_counters=sys_counters):
+                out = reconcile_ingress_loadgen(point, loadgen, sys_counters)
+                self.assertTrue(out["applicable"])
+                self.assertEqual(out["reason"], "loadgen_unconfirmed_by_broker")
+
+    def test_ingress_reconciliation_fails_closed_without_loadgen_total(self):
+        point = {"topology": "subscriber_ingress", "cadence": "capacity"}
+        loadgen = {"mode": "pub", "parsed": {}}
+        out = reconcile_ingress_loadgen(
+            point, loadgen, {"publish_received_delta": 1_897_882}
+        )
+        self.assertTrue(out["applicable"])
+        self.assertEqual(out["reason"], "loadgen_unconfirmed_by_broker")
+        self.assertIsNone(out["loadgen_msgs"])
+
+    def test_ingress_reconciliation_uses_corrected_emitted_msgs(self):
+        point = {"topology": "subscriber_ingress", "cadence": "capacity"}
+        loadgen = {
+            "mode": "pub",
+            "qos0_pub_counter_double_count": True,
+            "parsed": {"last_total": 1_280_000},
+        }
+        out = reconcile_ingress_loadgen(
+            point, loadgen, {"publish_received_delta": 640_000}
+        )
+        self.assertTrue(out["applicable"])
+        self.assertIsNone(out["reason"])
+        self.assertEqual(out["loadgen_msgs"], 640_000)
 
     def test_sys_counters_delta(self):
         from mqtt_client_bench.sys_probe import sys_counters_delta
@@ -2453,11 +2713,15 @@ class DualProtocolTests(unittest.TestCase):
         fingerprint closes that, but only if it reacts to code and ignores
         prose — otherwise a docstring fix silently invalidates twelve hours.
         """
-        import hashlib
         import tempfile
-        from pathlib import Path
 
-        from mqtt_client_bench.provenance import MEASUREMENT_PATH, harness_fingerprint
+        from mqtt_client_bench.provenance import (
+            MEASUREMENT_PATH,
+            _file_digest,
+            _measurement_file,
+            _structural_digest,
+            harness_fingerprint,
+        )
 
         base = harness_fingerprint()
         self.assertEqual(base, harness_fingerprint(), "must be deterministic")
@@ -2465,23 +2729,26 @@ class DualProtocolTests(unittest.TestCase):
 
         # Every module the fingerprint covers must exist, or it silently
         # degrades to hashing the word "missing".
-        root = Path(harness_fingerprint.__module__ and __import__(
-            "mqtt_client_bench.provenance", fromlist=["x"]).__file__).parent
+        self.assertIn("scripts/mqtt_hammer.c", MEASUREMENT_PATH)
         for rel in MEASUREMENT_PATH:
-            self.assertTrue((root / rel).exists(), f"{rel} is not in the tree")
+            self.assertTrue(_measurement_file(rel).exists(), f"{rel} is not in the tree")
 
         with tempfile.TemporaryDirectory() as tmp:
             mod = Path(tmp) / "m.py"
             mod.write_text('"""Doc."""\n\n\ndef f():\n    return 1\n')
-            first = harness_fingerprint.__wrapped__ if hasattr(harness_fingerprint, "__wrapped__") else None
-            del first
-            from mqtt_client_bench.provenance import _structural_digest
-
             a = _structural_digest(mod)
             mod.write_text('"""Different prose entirely."""\n# and a comment\n\n\ndef f():\n    return 1\n')
             self.assertEqual(a, _structural_digest(mod), "prose must not invalidate a campaign")
             mod.write_text('"""Doc."""\n\n\ndef f():\n    return 2\n')
             self.assertNotEqual(a, _structural_digest(mod), "changed code must invalidate")
+
+            hammer = Path(tmp) / "mqtt_hammer.c"
+            hammer.write_text("static int g_rate = 200000;\n")
+            hashed = _file_digest(hammer)
+            hammer.write_text("/* comment only */\nstatic int g_rate = 200000;\n")
+            self.assertNotEqual(hashed, _file_digest(hammer), "C comment changes must invalidate")
+            hammer.write_text("static int g_rate = 100000;\n")
+            self.assertNotEqual(hashed, _file_digest(hammer), "C code changes must invalidate")
 
     def test_write_json_never_leaves_a_partial_document(self):
         # A campaign is paused with SIGINT, which can land in the middle of a

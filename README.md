@@ -27,7 +27,7 @@ generalized behind a per-library adapter layer.
 |---|---|---|
 | `zmqtt` | [faststream-community/zMQTT](https://github.com/faststream-community/zMQTT) | Pure asyncio MQTT 3.1.1/5 (Alpha) — `pip install 'mqtt-client-bench[zmqtt]'` |
 | `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | aiomqtt **v3** alpha (mqtt5 sans-io, MQTT5 only). **Cannot** share an env with `aiomqtt` v2 |
-| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (RC ≥1.0.0rc1, `publish_nowait` on bridge loop) — `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
+| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (RC ≥1.0.0rc8, `publish_nowait` on bridge loop) — `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
 | `mqttium-compat` | same | Paho VERSION2 façade only (`mqttium.compat.paho`) — ranked separately from `mqttium` |
 
 ```bash
@@ -101,7 +101,7 @@ Experimental: `.[zmqtt]`, `.[aiomqtt3]`, or `.[mqttium]` (aiomqtt3 needs a separ
 
 | Command | Purpose |
 |---|---|
-| `broker up` / `broker down` | Local Mosquitto via docker compose (`network_mode: host`) |
+| `broker up` / `broker down` | Local Mosquitto via docker compose (`network_mode: host`). Pulls `eclipse-mosquitto:2.1.2-alpine`. |
 | `clients` | Adapter catalogue / capability matrix |
 | `list [--suite core\|full]` | Scenario catalogue |
 | `run --scenario NAME --client LIB` | Run one scenario (default `--profile standard`) |
@@ -197,24 +197,31 @@ that its peers do not. Rankings remain peer-grouped by `io_model` (sync vs
 asyncio_bridged vs CRT); do not treat paho and aiomqtt as interchangeable.
 
 `mqttium` uses ``AsyncClient.publish_nowait`` on the bridge event-loop thread
-(PyPI ≥1.0.0rc1; loop-bound, not cross-thread). QoS≥1 completion is
+(PyPI ≥1.0.0rc8; loop-bound, not cross-thread). QoS≥1 completion is
 ``receipt.wait()``, which also re-raises an admission failure so a refused
 publish is not counted as a completion. The adapter installs no
 ``AsyncClient.on_publish``: mqttium takes its direct QoS0 transport write only
 while that callback is unset, so setting one would benchmark the slower path.
 The Paho façade remains a separate client id (`mqttium-compat`). Bench
 ``max_queued`` maps to ``max_pending_outbound_messages``
-(``EngineConfig.max_queued`` was removed in 0.1.0a2). Through 1.0.0rc1 the façade
-does not expose ``max_outbound_inflight`` and the engine refuses it once
-attached; the compat adapter rebuilds the inner ``AsyncClient`` before connect so
-QoS≥1 scenarios stay comparable. Campaign helpers:
+(``EngineConfig.max_queued`` was removed in 0.1.0a2). From 1.0.0rc6 the façade
+exposes ``max_outbound_inflight`` on the constructor (still attach-time only);
+the compat adapter passes it through instead of rebuilding the inner
+``AsyncClient``. The write-pump byte bound is still sized from bench
+``max_queued_bytes`` because the façade ctor does not expose
+``max_outbound_bytes``. Campaign helpers:
 `scripts/run_mqttium_campaign.sh`,
 `scripts/run_asyncio_bridged_qos0_campaign.sh`.
 
 Mosquitto provides a local broker on `127.0.0.1:11883` (TCP) and
 `127.0.0.1:11884` (TLS — established TLS, no TLS 1.3 guarantee claimed).
-`emqtt-bench` is used only as an ingress load generator (MQTT version aligned
-to `point.protocol`).
+The compose file pulls **eclipse-mosquitto:2.1.2-alpine** (pinned digest).
+Override with `MQTT_BENCH_MOSQUITTO_IMAGE` to A/B; Mosquitto 2.0 rejects
+`packet_buffer_size` in `mosquitto.conf`.
+`emqtt-bench` is the ingress generator for templated topics and QoS>0, capped
+at 100k msgs/s. QoS0 exact-topic `sub_*` capacity uses paced `mqtt_hammer`
+(`scripts/mqtt_hammer.c`, an in-tree C publisher — not emqtt-bench) at
+`--rate 200000`. MQTT version for emqtt-bench is aligned to `point.protocol`.
 
 ## Adapter architecture
 
@@ -273,8 +280,10 @@ src/mqtt_client_bench/
   scenarios.py        catalogue
   adapters/           paho, gmqtt, aiomqtt, amqtt, awscrt, zmqtt, aiomqtt3, mqttium, mqttium-compat
   roles/              worker processes
-docker-compose.yml    Mosquitto
-mosquitto/ certs/     broker config + TLS material
+docker-compose.yml    Mosquitto 2.1.2-alpine (pinned digest)
+mosquitto/            broker config (packet_buffer_size)
+scripts/mqtt_hammer.c in-tree QoS0 ingress loadgen
+docs/                 CEILING_PROBES.md
 tests/                unit tests
 results/              committed raw JSON outputs
 ```
@@ -313,10 +322,12 @@ docstrings, scenario descriptions, commit messages and report output.
   the entire difference was the offered rate. For cross-client latency use
   `puback_latency_fixed_rate`, which offers every client the same absolute
   rates and lets a client that cannot sustain one come back inconclusive.
-- The `sub_*` scenarios are **load-generator bound on the reference host**, not
-  client bound: every client lands within a few tens of msgs/s of the same
-  ~30 300 ceiling, which is the ingress offer rather than a property of the
-  library. Read them as a delivery-correctness check, not as a ranking.
+- Core `sub_*` QoS0 exact-topic capacity offers **200k msgs/s** via paced
+  `mqtt_hammer --rate 200000`. emqtt-bench cannot hold 150k on one loadgen
+  core (`-I` is milliseconds; 150×`I=1` tops out around 100k `$SYS received`
+  here). Templated topics and QoS>0 stay on emqtt-bench, capped at 100k.
+  Older JSON under `results/` was measured at 32k against Mosquitto 2.0.20
+  and is not comparable.
 - The 64 KiB and 1 MiB points of `pub_payload_sweep_qos0` are **broker bound**:
   Mosquitto saturates before most clients do, so a valid median survives mainly
   for the clients too slow to saturate it. That inverts the ranking at those two

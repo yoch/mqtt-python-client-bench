@@ -32,7 +32,7 @@ source .venv/bin/activate            # pip install -e ".[dev,all,zmqtt,mqttium]"
 source .venv-aiomqtt3/bin/activate   # pip install -e ".[dev,aiomqtt3]"  (aiomqtt3 only)
 export PYTHONPATH=src
 
-python -m mqtt_client_bench.run broker up        # docker compose Mosquitto + TLS certs
+python -m mqtt_client_bench.run broker up        # docker compose eclipse-mosquitto:2.1.2-alpine + TLS certs
 python -m mqtt_client_bench.run clients -v       # adapter capability matrix
 python -m mqtt_client_bench.run list --suite core
 
@@ -77,6 +77,11 @@ tagged `non_comparable` and `report build` skips `*-smoke.json` and `_*.json`.
 
 - `run.py` — argparse CLI only; every subcommand delegates to `harness`, `broker`,
   or `report`.
+- `docker-compose.yml` — official `eclipse-mosquitto:2.1.2-alpine` (pinned digest).
+  Core `sub_*` QoS0 exact-topic capacity offers 200k msgs/s via paced mqtt_hammer
+  (`scripts/mqtt_hammer.c`, `--rate 200000`). emqtt-bench cannot hold more than
+  ~100k on one loadgen core (`-I` is milliseconds); templated topics and QoS>0
+  stay on emqtt-bench, capped at 100k. `MQTT_BENCH_LOADGEN=emqtt` forces it.
 - `scenarios.py` — the catalogue. `Scenario` dataclass + `variants`;
   `expand_scenario()` applies `PROFILE_SPECS` timings and expands
   `dual_protocol`-tagged scenarios into `MQTTv311` × `MQTTv5` **points**. A point
@@ -148,14 +153,20 @@ results.
   it. Only `pub_qos1_inflight` sweeps the window (and requires the knob).
 - **Broker reconciliation**: for single-publisher topologies, adapter-reported
   completions are compared with the broker's `$SYS` received-publish counter; a
-  run the broker cannot confirm is `inconclusive` (`broker_unconfirmed`). The
-  `$SYS` probe runs for every managed-broker run, not just ingress.
+  run the broker cannot confirm is `inconclusive` (`broker_unconfirmed`). Ingress
+  points also compare loadgen PUBLISH counts with `$SYS received`
+  (`loadgen_unconfirmed_by_broker`) so a TCP `write()` is not counted as a
+  decoded MQTT packet. The `$SYS` probe runs for every managed-broker run, not
+  just ingress.
 - **Fail closed in `validate_run()`**: worker errors, open-loop rate drift > 2 %,
   `$SYS` publish drops, broker CPU ≥ 85 % (or ≥ 70 % headroom gate), a non-
-  `performance` CPU governor, a busy host at T0, loadgen below half the effective
-  offer, or delivery below half the offer make a run `inconclusive` and set a
-  `bottleneck` (`sut_limited` / `broker_limited` / `broker_unconfirmed` /
-  `loadgen_limited` / `offer_limited`). Only `valid` runs enter medians.
+  `performance` CPU governor, a busy host at T0, or a loadgen the broker cannot
+  confirm make a run `inconclusive` and set a `bottleneck` (`sut_limited` /
+  `broker_limited` / `broker_unconfirmed` / `loadgen_limited` / `offer_limited`).
+  Core subscribe capacity does **not** fail `delivery_below_half_offer` — a slow
+  client at 15k of a 200k offer is the ranking. Ingress `$SYS` drops from a slow
+  subscriber are expected and do not invalidate the delivery count. Only `valid`
+  runs enter medians.
 - **No unequal harness tax**: fairness is *not* holding every client to the
   slowest common shape — each library must be driven the fastest way its own API
   allows. What must be equal is the harness's own cost, because that cost is
@@ -186,7 +197,9 @@ results.
   `experimental` clients are ranked separately.
 - Ingress offer accounting: emqtt-bench double-counts QoS0 publishes — compare
   against `effective_offer_msgs_per_s` / `observed_pub_rate`, never the raw
-  parsed rate (`docs/CEILING_PROBES.md`).
+  parsed rate (`docs/CEILING_PROBES.md`). Hammer counts are 1:1 with `$SYS
+  received` on this host. A slow SUT back-pressures the publisher; that is not
+  `loadgen_below_half_nominal`.
 
 ## Gotchas
 
