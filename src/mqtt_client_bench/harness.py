@@ -618,6 +618,12 @@ def validate_run(
     # Telemetry saturation heuristics. Peak broker CPU is computed over the whole
     # run (not just the tail) and reported as a first-class field so a reader can
     # see how much headroom the broker had for any published number.
+    diagnostic = "diagnostic" in (point.get("tags") or ()) or topology == "broker_ceiling"
+    # A 200k ingress offer pegs single-threaded Mosquitto even when clients
+    # still differentiate (preview: 14k–60k at 100 % CPU). Ranking subscribe
+    # scores callback deliveries; CPU here is the cost of shedding, not a
+    # shared ceiling. Diagnostic / ceiling probes still fail closed.
+    ingress_ranking = topology == "subscriber_ingress" and not diagnostic
     broker_cpu_max: Optional[float] = None
     saturated_containers = set()
     for sample in _samples_in_window(telemetry_samples, measure_window):
@@ -629,16 +635,17 @@ def validate_run(
                 broker_cpu_max = cpu
             if cpu >= 85.0:
                 saturated_containers.add(name)
-    for name in sorted(saturated_containers):
-        reasons.append(f"container_cpu_high:{name}")
-    # Headroom gate: below hard saturation the number is still partly the
-    # broker's, so it must not enter a client ranking.
-    if (
-        broker_cpu_max is not None
-        and not saturated_containers
-        and broker_cpu_max >= BROKER_CPU_HEADROOM_PCT
-    ):
-        reasons.append(f"broker_headroom_low:{broker_cpu_max:.0f}")
+    if not ingress_ranking:
+        for name in sorted(saturated_containers):
+            reasons.append(f"container_cpu_high:{name}")
+        # Headroom gate: below hard saturation the number is still partly the
+        # broker's, so it must not enter a client ranking.
+        if (
+            broker_cpu_max is not None
+            and not saturated_containers
+            and broker_cpu_max >= BROKER_CPU_HEADROOM_PCT
+        ):
+            reasons.append(f"broker_headroom_low:{broker_cpu_max:.0f}")
     # Managed-broker runs must observe the broker; a silently dead stats probe
     # would mislabel broker-limited runs as sut_limited.
     watched_any = False
@@ -683,7 +690,6 @@ def validate_run(
     if offer and float(offer) < float("inf") and duration_s > 0:
         drop_threshold = max(100, int(0.01 * float(offer) * duration_s))
     sys_drops = dropped_delta is not None and int(dropped_delta) > drop_threshold
-    diagnostic = "diagnostic" in (point.get("tags") or ()) or topology == "broker_ceiling"
     ingress_consumer_drops = topology == "subscriber_ingress"
     if sys_drops and not ingress_consumer_drops:
         reasons.append(f"sys_publish_dropped:{int(dropped_delta)}")
@@ -744,7 +750,11 @@ def validate_run(
         sys_drops and not ingress_consumer_drops
     ):
         bottleneck = "broker_limited"
-    elif broker_cpu_max is not None and broker_cpu_max >= BROKER_CPU_HEADROOM_PCT:
+    elif (
+        not ingress_ranking
+        and broker_cpu_max is not None
+        and broker_cpu_max >= BROKER_CPU_HEADROOM_PCT
+    ):
         bottleneck = "broker_limited"
     elif any(r.startswith("loadgen_") for r in reasons):
         bottleneck = "loadgen_limited"

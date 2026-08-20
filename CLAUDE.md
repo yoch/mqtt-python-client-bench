@@ -164,9 +164,10 @@ results.
   confirm make a run `inconclusive` and set a `bottleneck` (`sut_limited` /
   `broker_limited` / `broker_unconfirmed` / `loadgen_limited` / `offer_limited`).
   Core subscribe capacity does **not** fail `delivery_below_half_offer` — a slow
-  client at 15k of a 200k offer is the ranking. Ingress `$SYS` drops from a slow
-  subscriber are expected and do not invalidate the delivery count. Only `valid`
-  runs enter medians.
+  client at 15k of a 200k offer is the ranking. Ingress `$SYS` drops and a pegged
+  Mosquitto CPU from a 200k offer are expected and do not invalidate the
+  delivery count (diagnostic / `broker_ceiling` still fail those gates). Only
+  `valid` runs enter medians.
 - **No unequal harness tax**: fairness is *not* holding every client to the
   slowest common shape — each library must be driven the fastest way its own API
   allows. What must be equal is the harness's own cost, because that cost is
