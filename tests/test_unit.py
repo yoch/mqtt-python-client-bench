@@ -1456,6 +1456,59 @@ class CeilingProbeTests(unittest.TestCase):
         self.assertNotIn("delivery_below_half_offer", validity["reasons"])
         self.assertEqual(validity["bottleneck"], "sut_limited")
 
+    def test_validate_run_ingress_ranking_ignores_pegged_broker_cpu(self):
+        """A 200k offer pegs Mosquitto; ranking sub_* still scores deliveries."""
+        from mqtt_client_bench.harness import validate_run
+
+        point = {
+            "topology": "subscriber_ingress",
+            "cadence": "capacity",
+            "duration_s": 20.0,
+        }
+        workers = [
+            {
+                "ok": True,
+                "role": "subscriber",
+                "msgs_per_s": 45000.0,
+                "subscriber_delivered": 900000,
+            }
+        ]
+        loadgen = {
+            "engine": "hammer",
+            "nominal_rate": 200000.0,
+            "effective_offer_msgs_per_s": 200000.0,
+            "observed_pub_rate": 199000.0,
+            "target_requested": 200000.0,
+            "rate_msgs_per_s": 200000.0,
+            "interval_ms": 0,
+            "paced": True,
+            "parsed": {"last_rate": 199000.0, "last_total": 3980000, "median_rate": 199000.0},
+        }
+        samples = [{"containers": {"mosquitto": {"cpu_pct": 100.0}}}]
+        sys_counters = {"dropped_delta": 50000, "publish_received_delta": 3_980_000}
+        validity = validate_run(point, workers, loadgen, samples, sys_counters=sys_counters)
+        self.assertEqual(validity["status"], "valid")
+        self.assertEqual(validity["bottleneck"], "sut_limited")
+        self.assertAlmostEqual(validity["broker_cpu_max_pct"], 100.0)
+        self.assertFalse(
+            any(str(r).startswith("container_cpu_high:") for r in validity["reasons"]),
+            validity["reasons"],
+        )
+        self.assertFalse(
+            any(str(r).startswith("broker_headroom_low:") for r in validity["reasons"]),
+            validity["reasons"],
+        )
+
+        diagnostic = dict(point)
+        diagnostic["tags"] = ["diagnostic"]
+        refused = validate_run(diagnostic, workers, loadgen, samples, sys_counters=sys_counters)
+        self.assertEqual(refused["status"], "inconclusive")
+        self.assertTrue(
+            any(str(r).startswith("container_cpu_high:") for r in refused["reasons"]),
+            refused["reasons"],
+        )
+        self.assertEqual(refused["bottleneck"], "broker_limited")
+
     def test_validate_run_unpaced_slow_client_is_valid_sut(self):
         from mqtt_client_bench.harness import validate_run
 

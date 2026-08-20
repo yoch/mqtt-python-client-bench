@@ -102,10 +102,12 @@ capped at **100,000**. Compare against `effective_offer_msgs_per_s` /
 [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md)). Ceiling probes still pin
 32k / 64k / 128k (hammer can hold those; emqtt cannot hold 128k).
 
-If delivered ≈ offer, the point is **offer_limited**. If broker CPU ≥ 70 %,
-it is **broker_limited** even when delivery matches the offer. A slow client
-well below half the offer stays **valid** + **sut_limited** on core capacity
-points.
+If delivered ≈ offer, the point is **offer_limited**. A slow client well
+below half the offer stays **valid** + **sut_limited** on core capacity
+points. Mosquitto 2.1 is single-threaded: a 200k offer routinely pegs broker
+CPU while clients still differentiate; that CPU is recorded
+(`broker_cpu_max_pct`) but does not invalidate ranking `sub_*`. Diagnostic
+and `broker_ceiling` points still fail closed at ≥ 70 % / 85 %.
 
 Mosquitto 2.1 is single-threaded: do not widen the broker cpuset.
 
