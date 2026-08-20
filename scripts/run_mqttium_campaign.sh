@@ -9,7 +9,7 @@ cd "$ROOT"
 source .venv/bin/activate
 export PYTHONPATH=src
 
-MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc5}"
+MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc8}"
 echo "=== ensure mqttium==${MQTTIUM_VER} (site-packages, no editable) ==="
 pip install --force-reinstall --no-cache-dir "mqttium==${MQTTIUM_VER}"
 python - <<'PY'
@@ -30,8 +30,13 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ARCHIVE="results/_archive_mqttium_${STAMP}"
 mkdir -p "$ARCHIVE"
 shopt -s nullglob
-# Archive compat first: mqttium-*.json would otherwise swallow mqttium-compat-*.
-for f in results/mqttium-compat-*.json results/mqttium-*.json; do
+# Two loops, not one glob list: `mqttium-*.json` also matches
+# `mqttium-compat-*.json`, and with `set -e` the second copy of a name
+# that the first glob already moved aborts the campaign.
+for f in results/mqttium-compat-*.json; do
+  mv -v "$f" "$ARCHIVE/"
+done
+for f in results/mqttium-*.json; do
   mv -v "$f" "$ARCHIVE/"
 done
 shopt -u nullglob
