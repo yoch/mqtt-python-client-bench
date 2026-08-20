@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ssl
 import threading
 from collections import deque
@@ -20,16 +21,15 @@ class MqttiumCompatAdapter:
 
     MQTT_ERR_SUCCESS = 0
     # See GmqttAdapter._PRIVATE_API for the rationale of this inventory.
-    # Re-verified against mqttium 1.0.0rc1; MqttiumPrivateApiShapeTests pins it.
+    # Re-verified against mqttium 1.0.0rc8; MqttiumPrivateApiShapeTests pins it.
     _PRIVATE_API = {
-        "Client._async": "façade ctor exposes no max_outbound_inflight (through 1.0.0rc1); the inner AsyncClient is rebuilt so QoS>=1 runs the same window as peers",
+        "Client._async": "TLS connect passes SSLContext to the inner client (public connect() does not) and the write-pump byte bound is sized on it",
         "Client._loop": "needed to schedule the properties publish path on the façade's own loop",
-        "Client._submit": "connect() must pass an SSLContext, which the façade's own connect() does not accept",
-        "Client._run_loop_mutation": "applies the bench keepalive on the façade's loop before connecting",
-        "Client._queue_qos0_on_loop / _queue_qosn_on_loop / _finalize_async_commands": "façade caches these bound methods at construction; rebound after the inner client is replaced",
-        "AsyncClient._queue_qos0_on_loop / _queue_qosn_on_loop / _finalize_loop_commands": "source of the rebound façade fast path",
+        "Client._submit": "TLS connect must pass an SSLContext, which the façade's own connect() does not accept",
+        "Client._run_loop_mutation": "applies the bench keepalive on the façade's loop before a TLS connect",
         "AsyncClient._engine / _engine_lock / _sub_futs / _collect_effects_locked / _drain_effects": "subscribe registration mirrored from AsyncClient.subscribe: the façade has no on_subscribe hook to deliver grants",
-        "AsyncClient._reconfigure": "loop-confined config boundary used to set keepalive before connect",
+        "AsyncClient._reconfigure": "loop-confined config boundary used to set keepalive before TLS connect",
+        "AsyncClient._max_outbound_bytes": "façade ctor has no max_outbound_bytes; the 1 MiB write-pump default would bind payload sweeps unless sized from bench max_queued_bytes",
     }
 
     def __init__(self, client: Any):
@@ -123,51 +123,29 @@ class MqttiumCompatAdapter:
                 "mqttium is not installed. Install with: pip install 'mqtt-client-bench[mqttium]'"
             ) from exc
 
-        from mqttium.api import AsyncClient
-
         proto = getattr(MQTTProtocolVersion, protocol)
         pending = max(0, int(max_queued))
         inflight = max(1, int(max_inflight))
+        kwargs: Dict[str, Any] = {}
+        if max_queued_bytes:
+            kwargs["max_pending_outbound_bytes"] = max(64 << 20, int(max_queued_bytes))
+        # rc6 exposes max_outbound_inflight on the façade ctor (attach-time only;
+        # _reconfigure still rejects it). Pass it here instead of replacing the
+        # inner AsyncClient, which would also miss the façade's cached
+        # _try_direct_qos0_publish binding.
         client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=client_id,
             protocol=proto,
             clean_session=clean_session,
             max_pending_outbound_messages=pending,
-        )
-        # Through 1.0.0rc1: max_outbound_inflight is attach-time only; the façade
-        # ctor does not expose it and it is absent from
-        # _RUNTIME_MUTABLE_ENGINE_CONFIG_FIELDS, so _reconfigure() rejects it
-        # once attached. Replace the inner AsyncClient before loop_start/connect
-        # so QoS>=1 points run with the same window as the other clients.
-        # Re-check on each mqttium bump: if the façade gains the parameter, drop
-        # this rebuild and pass it straight to Client(...).
-        # Same byte-bound sizing as the native adapter: the façade's inner client
-        # carries the 1 MiB write-pump default too. See MqttiumAdapter.connect.
-        byte_kwargs = {}
-        if max_queued_bytes:
-            byte_kwargs["max_outbound_bytes"] = max(1 << 20, int(max_queued_bytes))
-            byte_kwargs["max_pending_outbound_bytes"] = max(64 << 20, int(max_queued_bytes))
-        inner = AsyncClient(
-            client_id=client_id,
-            protocol=proto,
-            clean_start=bool(clean_session),
             max_outbound_inflight=inflight,
-            max_pending_outbound_messages=pending,
-            publish_backpressure="error",
-            **byte_kwargs,
+            **kwargs,
         )
-        inner.on_connect = client._async.on_connect
-        inner.on_disconnect = client._async.on_disconnect
-        inner.on_message = client._async.on_message
-        inner.on_publish = client._async.on_publish
-        client._async = inner
-        client._queue_qosn_on_loop = inner._queue_qosn_on_loop
-        client._queue_qos0_on_loop = inner._queue_qos0_on_loop
-        client._finalize_async_commands = inner._finalize_loop_commands
-        # Keep public queue setters in sync for identity / later mutations.
-        if hasattr(client, "max_queued_messages_set"):
-            client.max_queued_messages_set(pending)
+        # Same write-pump sizing as the native adapter: the façade still defaults
+        # to 1 MiB, which is 16 slots for a 64 KiB payload. See MqttiumAdapter.connect.
+        if max_queued_bytes:
+            client._async._max_outbound_bytes = max(1 << 20, int(max_queued_bytes))
         adapter = cls(client)
         if tls_ca_certs:
             adapter.tls_set(ca_certs=tls_ca_certs)
@@ -177,8 +155,11 @@ class MqttiumCompatAdapter:
         self._tls_ctx = ssl.create_default_context(cafile=ca_certs)
 
     def connect(self, host: str, port: int, keepalive: int = 60) -> None:
-        # Same call the façade's own connect() makes; it is bypassed here only
-        # because that connect() takes no SSLContext.
+        if self._tls_ctx is None:
+            self._client.connect(host, port, keepalive=keepalive)
+            return
+        # Public connect() takes no SSLContext; keep the same two private calls
+        # it makes, plus ssl=.
         self._client._run_loop_mutation(
             lambda: self._client._async._reconfigure(keepalive=keepalive)
         )
@@ -260,8 +241,6 @@ class MqttiumCompatAdapter:
         # publish_nowait on the owning loop without a per-message blocking
         # cross-thread wait — that wait violated the harness tax budget and
         # silently penalised mqttium-compat on mqttv5_properties vs Paho.
-        import asyncio
-
         if self._client._loop is None:
             self._client.loop_start()
         assert self._client._loop is not None
@@ -298,15 +277,13 @@ class MqttiumCompatAdapter:
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
         """Paho-shaped subscribe: return mid before SUBACK, then fire on_subscribe.
 
-        The façade (through 1.0.0rc1) exposes ``Client.subscribe`` but has no
+        The façade (through 1.0.0rc8) exposes ``Client.subscribe`` but has no
         ``on_subscribe`` hook, so the bench mirrors ``AsyncClient.subscribe``
         registration (queue + ``_sub_futs`` + effect drain) to deliver grants to
         the harness.
         Mid must be returned before the callback: roles add mid to a wait-set
         only after ``subscribe()`` returns.
         """
-        import asyncio
-
         if self._client._loop is None:
             self._client.loop_start()
         assert self._client._loop is not None
