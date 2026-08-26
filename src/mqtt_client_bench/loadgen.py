@@ -301,11 +301,29 @@ def build_args(spec: LoadgenSpec) -> List[str]:
     return build_pub_args(spec)
 
 
+def hammer_rate_cap() -> int:
+    """Hammer pacing cap: the ranking constant, unless the diagnostic offer
+    override asks for more.
+
+    The harness validates MQTT_BENCH_INGRESS_OFFER and marks overridden points
+    non_comparable; this helper only keeps the clamp from silently truncating
+    the offer the harness already accepted. Unparseable values fall back to the
+    conservative constant — the harness raises on them first.
+    """
+    raw = (os.environ.get("MQTT_BENCH_INGRESS_OFFER") or "").strip()
+    if raw:
+        try:
+            return max(HAMMER_MAX_RATE_MSGS_PER_S, int(round(float(raw))))
+        except ValueError:
+            pass
+    return HAMMER_MAX_RATE_MSGS_PER_S
+
+
 def clamp_hammer_rate(target_msgs_per_s: Optional[float]) -> int:
-    """Cap hammer at HAMMER_MAX_RATE_MSGS_PER_S. 0 means unpaced."""
+    """Cap hammer at hammer_rate_cap(). 0 means unpaced."""
     if target_msgs_per_s is None or float(target_msgs_per_s) <= 0:
         return 0
-    return max(1, min(int(round(float(target_msgs_per_s))), HAMMER_MAX_RATE_MSGS_PER_S))
+    return max(1, min(int(round(float(target_msgs_per_s))), hammer_rate_cap()))
 
 
 def resolve_hammer_pub_clients(point: dict, declared_clients: int) -> int:

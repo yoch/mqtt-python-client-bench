@@ -1325,6 +1325,36 @@ class CeilingProbeTests(unittest.TestCase):
         self.assertEqual(resolve_ingress_offer({"fanin_mode": "per_publisher"}, 16), 16000.0)
         self.assertEqual(DEFAULT_INGRESS_OFFER_MSGS_PER_S, 200000.0)
 
+    def test_ingress_offer_override_marks_non_comparable(self):
+        with patch.dict(os.environ, {"MQTT_BENCH_INGRESS_OFFER": "240000"}, clear=False):
+            point = {}
+            self.assertEqual(resolve_ingress_offer(point, 32), 240000.0)
+            self.assertTrue(point["non_comparable"])
+            self.assertTrue(point["ingress_offer_overridden"])
+            # Explicit ceiling-grid targets and per_publisher offers stay untouched.
+            explicit = {"ingress_target_msgs_per_s": 64000}
+            self.assertEqual(resolve_ingress_offer(explicit, 64), 64000.0)
+            self.assertNotIn("ingress_offer_overridden", explicit)
+            fanin = {"fanin_mode": "per_publisher"}
+            self.assertEqual(resolve_ingress_offer(fanin, 16), 16000.0)
+            self.assertNotIn("ingress_offer_overridden", fanin)
+            # The hammer clamp lifts to the override instead of truncating it.
+            self.assertEqual(clamp_hammer_rate(240000), 240000)
+            self.assertEqual(clamp_hammer_rate(500000), 240000)
+        with patch.dict(os.environ, {"MQTT_BENCH_INGRESS_OFFER": "garbage"}, clear=False):
+            with self.assertRaises(ValueError):
+                resolve_ingress_offer({}, 32)
+        with patch.dict(os.environ, {"MQTT_BENCH_INGRESS_OFFER": "-1"}, clear=False):
+            with self.assertRaises(ValueError):
+                resolve_ingress_offer({}, 32)
+        # Without the env var nothing changes: default offer, conservative clamp.
+        clean = {k: v for k, v in os.environ.items() if k != "MQTT_BENCH_INGRESS_OFFER"}
+        with patch.dict(os.environ, clean, clear=True):
+            point = {}
+            self.assertEqual(resolve_ingress_offer(point, 32), DEFAULT_INGRESS_OFFER_MSGS_PER_S)
+            self.assertNotIn("non_comparable", point)
+            self.assertEqual(clamp_hammer_rate(500000), HAMMER_MAX_RATE_MSGS_PER_S)
+
     def test_sub_exact_offer_is_200k(self):
         points = expand_scenario(SCENARIO_BY_NAME["sub_exact_telemetry"], "smoke")
         self.assertGreaterEqual(len(points), 1)
