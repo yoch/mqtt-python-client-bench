@@ -112,6 +112,29 @@ HARNESS_FINGERPRINT = harness_fingerprint()
 # forces emqtt-bench; MQTT_BENCH_LOADGEN=hammer is the same paced ranking offer.
 DEFAULT_INGRESS_OFFER_MSGS_PER_S = 200000.0
 
+# Diagnostic override for the core ingress offer. The default stays 200k because
+# committed rankings were measured against it; a different offer produces
+# delivery numbers that must not be compared with them, so every point that
+# takes the override is forced non_comparable (fail closed, like netem). The
+# knob exists because 200k is a *broker* property of the reference host
+# (single-threaded Mosquitto saturates at ~206k rx+tx there): on a larger host
+# the same offer would silently turn a client ranking into an offer ceiling.
+INGRESS_OFFER_ENV = "MQTT_BENCH_INGRESS_OFFER"
+
+
+def ingress_offer_override() -> Optional[float]:
+    """Value of MQTT_BENCH_INGRESS_OFFER, or None. Garbage is refused, not defaulted."""
+    raw = (os.environ.get(INGRESS_OFFER_ENV) or "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{INGRESS_OFFER_ENV} must be a number, got {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{INGRESS_OFFER_ENV} must be > 0, got {raw!r}")
+    return value
+
 
 # Topologies where a single SUT publisher is the *only* source of PUBLISHes, so
 # the broker's received-publish counter can be compared with what the adapter
@@ -398,11 +421,21 @@ def resolve_ingress_offer(point: dict, clients: int) -> float:
     an I=1 offer of N×1000 requires ``ingress_target_msgs_per_s >= N*1000`` (or
     equivalently ``loadgen_clients = N`` and a high enough target). emqtt paths
     are clamped later to EMQTT_MAX_OFFER_MSGS_PER_S.
+
+    MQTT_BENCH_INGRESS_OFFER replaces the 200k default for diagnostic probes
+    past the reference broker ceiling. A point that takes the override is
+    marked non_comparable: its delivery count answers "what does this host's
+    pipeline do at offer X", never "how does this client rank".
     """
     if point.get("ingress_target_msgs_per_s") is not None:
         return float(point["ingress_target_msgs_per_s"])
     if point.get("fanin_mode") == "per_publisher":
         return float(clients) * 1000.0
+    override = ingress_offer_override()
+    if override is not None:
+        point["non_comparable"] = True
+        point["ingress_offer_overridden"] = True
+        return override
     return DEFAULT_INGRESS_OFFER_MSGS_PER_S
 
 

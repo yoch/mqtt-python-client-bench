@@ -93,6 +93,28 @@ A single offer step:
 4. **`$SYS`** = `sys_counters.dropped_delta` (plus sent/received) over the measure window. Ingress fails closed if loadgen and `$SYS received` diverge (`loadgen_unconfirmed_by_broker`).
 5. **CPU** = `broker_cpu_max_pct` and the `telemetry` samples (Mosquitto container + SUT processes).
 
+## Overriding the core offer (`MQTT_BENCH_INGRESS_OFFER`)
+
+The 200k default is a property of the reference host, not of the harness: on a
+4-core KVM guest with Mosquitto pinned to one core, a paced hammer sweep
+(pub 256 B on core 2, hammer sub on core 0, `$SYS` probe on core 3) measured
+the full pipeline ceiling at **~206k msgs/s** — rx and tx both, broker CPU
+pegged at ~100 %, zero `$SYS` drops, and no further gain from a 320k cap or an
+unpaced firehose. 200k is therefore ~97 % of that ceiling; a client delivering
+at the offer (`offer_limited`) cannot be separated further **on that host** by
+raising the offer.
+
+On a larger host, set `MQTT_BENCH_INGRESS_OFFER=<msgs/s>` to replace the
+default core `sub_*` offer (it also lifts the hammer `--rate` clamp to the
+requested value). Fail-closed semantics:
+
+- every point that takes the override is forced `non_comparable` and carries
+  `ingress_offer_overridden: true` — the numbers answer "what does this host's
+  pipeline do at offer X", never "how does this client rank";
+- explicit `ingress_target_msgs_per_s` variants (the ceiling grids) and
+  `per_publisher` fan-in offers are untouched;
+- an unparseable or non-positive value is refused, not defaulted.
+
 ## Verdicts
 
 | Verdict | Typical criteria |
