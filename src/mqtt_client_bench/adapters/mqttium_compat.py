@@ -21,7 +21,7 @@ class MqttiumCompatAdapter:
 
     MQTT_ERR_SUCCESS = 0
     # See GmqttAdapter._PRIVATE_API for the rationale of this inventory.
-    # Re-verified against mqttium 1.0.0rc8; MqttiumPrivateApiShapeTests pins it.
+    # Re-verified against mqttium 1.0.0rc10; MqttiumPrivateApiShapeTests pins it.
     _PRIVATE_API = {
         "Client._async": "TLS connect passes SSLContext to the inner client (public connect() does not) and the write-pump byte bound is sized on it",
         "Client._loop": "needed to schedule the properties publish path on the façade's own loop",
@@ -277,7 +277,7 @@ class MqttiumCompatAdapter:
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
         """Paho-shaped subscribe: return mid before SUBACK, then fire on_subscribe.
 
-        The façade (through 1.0.0rc8) exposes ``Client.subscribe`` but has no
+        The façade (through 1.0.0rc10) exposes ``Client.subscribe`` but has no
         ``on_subscribe`` hook, so the bench mirrors ``AsyncClient.subscribe``
         registration (queue + ``_sub_futs`` + effect drain) to deliver grants to
         the harness.
