@@ -2193,6 +2193,61 @@ class SchemaTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
+    def test_qos0_latency_boundary_flagged_on_detail_page(self):
+        """QoS0 completion latency from a non-socket boundary must be marked.
+
+        A 'queue' boundary times admission to the client's write path, not the
+        socket write; showing those percentiles bare invites a cross-contract
+        latency comparison the methodology page only warns about globally.
+        """
+        from mqtt_client_bench.report import classify_payload, render_detail
+
+        def sample(qos0_boundary, qos):
+            return {
+                "schema_version": 1,
+                "scenario": "pub_qos_sweep_telemetry",
+                "profile": "standard",
+                "runs": 1,
+                "client": "mqttium",
+                "client_identity": {"client": "mqttium", "qos0_boundary": qos0_boundary},
+                "results": [
+                    {
+                        "point": {"payload": "telemetry256", "qos_publish": qos},
+                        "runs": [
+                            {
+                                "status": "valid",
+                                "primary_msgs_per_s": 100000.0,
+                                "workers": [
+                                    {
+                                        "role": "publisher",
+                                        "ok": True,
+                                        "latency_summary": {
+                                            "p50_ms": 0.1,
+                                            "p95_ms": 0.2,
+                                            "p99_ms": 0.3,
+                                            "p99_published": True,
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                        "summary": {"median": 100000.0, "min": 100000.0, "max": 100000.0},
+                    }
+                ],
+            }
+
+        doc = classify_payload(sample("queue", 0), "mqttium-x.json")
+        self.assertEqual(doc.points[0].latency_boundary, "queue")
+        html = render_detail(doc, "now")
+        self.assertIn("†", html)
+        self.assertIn("qos0_boundary", html)
+
+        # Socket boundary (paho contract) and QoS>=1 points stay unmarked:
+        # PUBACK/PUBCOMP are the same boundary for every client.
+        self.assertIsNone(classify_payload(sample("socket", 0), "x.json").points[0].latency_boundary)
+        self.assertIsNone(classify_payload(sample(None, 0), "x.json").points[0].latency_boundary)
+        self.assertIsNone(classify_payload(sample("queue", 1), "x.json").points[0].latency_boundary)
+
     def test_build_site_from_scenario_json(self):
         import json
         import tempfile
