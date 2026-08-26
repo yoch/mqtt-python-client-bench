@@ -1012,6 +1012,11 @@ class PointRow:
     total_runs: int
     non_comparable: bool
     latency: Dict[str, Optional[float]] = field(default_factory=dict)
+    # Set when this point's completion-latency percentiles were measured at a
+    # non-socket QoS0 boundary (client_identity.qos0_boundary, e.g. "queue").
+    # Throughput stays broker-reconciled and comparable; the latency samples do
+    # not, because they time admission rather than the socket write.
+    latency_boundary: Optional[str] = None
     integrity: Optional[Dict[str, Any]] = None
     spread_low: Optional[float] = None
     spread_high: Optional[float] = None
@@ -1244,6 +1249,15 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
         empty_reason, reason_detail = _empty_cell_reason(runs, median_rate)
         if stale_facade and empty_reason == "missing":
             empty_reason, reason_detail = "failed", "sync_facade publish path (not comparable)"
+        point_latency = _collect_latency(runs, client=client_name)
+        latency_boundary = None
+        qos0_boundary = identity.get("qos0_boundary")
+        if (
+            int(point.get("qos_publish", 0) or 0) == 0
+            and qos0_boundary not in (None, "socket")
+            and any(point_latency.get(k) is not None for k in ("p50_ms", "p95_ms", "p99_ms"))
+        ):
+            latency_boundary = str(qos0_boundary)
         points.append(
             PointRow(
                 label=_point_label(point, varying),
@@ -1252,7 +1266,8 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
                 valid_runs=counts["valid"],
                 total_runs=counts["total"],
                 non_comparable=non_comparable,
-                latency=_collect_latency(runs, client=client_name),
+                latency=point_latency,
+                latency_boundary=latency_boundary,
                 integrity=_collect_integrity(runs, client=client_name),
                 spread_low=float(point_min) if point_min is not None and not non_comparable else None,
                 spread_high=float(point_max) if point_max is not None and not non_comparable else None,
@@ -1669,6 +1684,7 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
             checks.append(f"broker×{point.broker_reconcile_ratio:.2f}")
         if point.delivery_offer_ratio is not None:
             checks.append(f"offer×{point.delivery_offer_ratio:.2f}")
+        boundary_mark = " †" if point.latency_boundary else ""
         point_rows.append(
             f"""<tr>
   <td>{_esc(point.label)}</td>
@@ -1676,9 +1692,9 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
   <td class="num">{median_cell}</td>
   <td class="num">{spread_cell}</td>
   <td>{_esc(point.bottleneck or '—')}</td>
-  <td class="num">{_esc(_fmt_num(lat.get('p50_ms'), digits=2))}</td>
-  <td class="num">{_esc(_fmt_num(lat.get('p95_ms'), digits=2))}</td>
-  <td class="num">{_esc(_fmt_num(lat.get('p99_ms'), digits=2))}{' *' if lat.get('p99_gated') else ''}</td>
+  <td class="num">{_esc(_fmt_num(lat.get('p50_ms'), digits=2))}{boundary_mark}</td>
+  <td class="num">{_esc(_fmt_num(lat.get('p95_ms'), digits=2))}{boundary_mark}</td>
+  <td class="num">{_esc(_fmt_num(lat.get('p99_ms'), digits=2))}{' *' if lat.get('p99_gated') else ''}{boundary_mark}</td>
   <td class="num">{_esc(integ.get('missing', '—'))} / {_esc(integ.get('duplicates', '—'))} (worst {_esc(integ.get('worst_missing', '—'))})</td>
   <td class="num">{cost_cell}</td>
   <td class="muted">{_esc(' · '.join(checks)) or '—'}</td>
@@ -1849,6 +1865,16 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
 """
 
     points_table = ""
+    boundary_note = ""
+    boundaries = sorted({p.latency_boundary for p in doc.points if p.latency_boundary})
+    if boundaries:
+        boundary_note = (
+            '<p class="hint">† QoS0 completion latency for this client is measured at the '
+            f"<code>{_esc(', '.join(boundaries))}</code> boundary declared in "
+            "<code>client_identity.qos0_boundary</code> (admission to the client's write path), "
+            "not at the socket write. Throughput stays broker-reconciled and comparable; these "
+            "latency percentiles must not be compared with socket-boundary clients such as Paho.</p>"
+        )
     if point_rows:
         points_table = f"""
       <section class="panel">
@@ -1877,6 +1903,7 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
           </table>
         </div>
         <p class="hint"><strong>Spread</strong> is half the observed run-to-run range, as a percentage of the median — a wide spread means the number is not repeatable, whatever its value. <strong>Bottleneck</strong> is the harness's attribution: only <code>sut_limited</code> says something about the client. <strong>Checks</strong> shows peak broker CPU, the broker-confirmed fraction of reported publishes, and delivered/offered where applicable. * marks a gated p99 (incomplete sample coverage).</p>
+        {boundary_note}
       </section>
 """
 
