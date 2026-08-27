@@ -205,7 +205,10 @@ results.
   against `effective_offer_msgs_per_s` / `observed_pub_rate`, never the raw
   parsed rate (`docs/CEILING_PROBES.md`). Hammer counts are 1:1 with `$SYS
   received` on this host. A slow SUT back-pressures the publisher; that is not
-  `loadgen_below_half_nominal`.
+  `loadgen_below_half_nominal`. Templated / QoS>0 emqtt paths take the 200k
+  ranking default clamped to 100k: `clamp_emqtt_offer` **raises** publishers
+  so I=1 holds that cap (32 catalogue clients must not stay at 32k). Burst
+  recovery keeps the I=1 offer of the configured client count on purpose.
 
 ## Gotchas
 
