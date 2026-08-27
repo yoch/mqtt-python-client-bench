@@ -102,12 +102,23 @@ def clamp_emqtt_offer(clients: int, target_msgs_per_s: float) -> tuple:
     """Keep emqtt-bench at or below EMQTT_MAX_OFFER_MSGS_PER_S.
 
     Returns ``(clients, target)``. I=1 offer is ``clients * 1000``.
+
+    Lowering the target alone is not enough: ``interval_for_rate(32, 100000)``
+    rounds to I=1 and the real offer stays 32k. Raise the publisher count
+    when the current I=1 capacity cannot hold the (already capped) target,
+    otherwise the 200k ranking default silently remains a 32k emqtt offer
+    on templated / QoS>0 paths.
     """
     target = min(float(target_msgs_per_s), float(EMQTT_MAX_OFFER_MSGS_PER_S))
+    max_clients = int(EMQTT_MAX_OFFER_MSGS_PER_S // 1000)
     if clients <= 0:
-        return 1, target
-    if clients * 1000.0 > EMQTT_MAX_OFFER_MSGS_PER_S:
-        clients = int(EMQTT_MAX_OFFER_MSGS_PER_S // 1000)
+        clients = 1
+    i1_cap = float(clients) * 1000.0
+    if i1_cap < target:
+        needed = max(1, int(round(target / 1000.0)))
+        clients = min(max_clients, max(clients, needed))
+    elif i1_cap > EMQTT_MAX_OFFER_MSGS_PER_S:
+        clients = max_clients
     return clients, target
 
 

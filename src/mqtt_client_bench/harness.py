@@ -43,6 +43,7 @@ from mqtt_client_bench.loadgen import (
     clamp_hammer_rate,
     interval_for_rate,
     loadgen_emitted_msgs,
+    nominal_rate,
     resolve_hammer_pub_clients,
     select_loadgen_engine,
     spawn_loadgen,
@@ -1157,12 +1158,12 @@ def run_point(
                 # Publish onto cb/%i/data so local message_callback_add filters receive traffic.
                 lg_topic = callback_match_loadgen_topic(run_id)
                 if not overlapping:
-                    # Keep the client count (and thus offered load) comparable across
-                    # variants: every message goes through iter_match; messages whose
-                    # cb/<i> topic has no registered filter fall back to on_message,
-                    # which also records the delivery. Cap avoids a connection storm.
+                    # Distinct cb/<i> publishers so local filters see matching
+                    # traffic. Unmatched topics still hit on_message (also
+                    # counted). Cap 256 avoids a connection storm; offered load
+                    # is equalized later by clamp_emqtt_offer (I=1 at the
+                    # emqtt 100k cap), not by this bump.
                     clients = max(clients, min(callback_filters, 256))
-                # Keep aggregate offered load stable when client count grows with filters.
                 target = resolve_ingress_offer(point, clients)
             elif point.get("subscription") in ("plus", "hash") or str(point.get("topic_topology", "")).startswith("fleet"):
                 lg_topic = f"bench/{run_id}/org/acme/site/s0000/device/d0000/telemetry/temperature"
@@ -1209,6 +1210,10 @@ def run_point(
                 else:
                     clients, target = clamp_emqtt_offer(clients, target)
                     interval = interval_for_rate(clients, target)
+                    # I=1 quantization: record the offer that will actually run,
+                    # not the pre-interval request (32 clients × 100k used to
+                    # store target_requested=100000 while effective stayed 32k).
+                    target = nominal_rate(clients, interval)
             point["ingress_target_msgs_per_s"] = target
             point["loadgen_clients"] = clients
             spec = LoadgenSpec(
