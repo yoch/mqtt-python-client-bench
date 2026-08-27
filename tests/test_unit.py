@@ -1278,6 +1278,16 @@ class LoadgenTests(unittest.TestCase):
         clients, target = clamp_emqtt_offer(150, 200000)
         self.assertEqual(clients, 100)
         self.assertEqual(target, float(EMQTT_MAX_OFFER_MSGS_PER_S))
+        # Ranking default with the catalogue's 32 loadgen_clients must not
+        # stay at 32k: I=1 of 32 is 32k, so publishers have to rise to 100.
+        clients, target = clamp_emqtt_offer(32, DEFAULT_INGRESS_OFFER_MSGS_PER_S)
+        self.assertEqual(clients, 100)
+        self.assertEqual(target, float(EMQTT_MAX_OFFER_MSGS_PER_S))
+        self.assertEqual(interval_for_rate(clients, target), 1)
+        self.assertEqual(nominal_rate(clients, 1), float(EMQTT_MAX_OFFER_MSGS_PER_S))
+        # Explicit I=1 grid / burst-shaped targets keep their client count.
+        self.assertEqual(clamp_emqtt_offer(32, 32000), (32, 32000.0))
+        self.assertEqual(clamp_emqtt_offer(64, 64000), (64, 64000.0))
 
     def test_parse_hammer_json(self):
         text = 'noise\n{"role":"pub","clients":8,"msgs":1000,"seconds":1.0,"msgs_per_s":12345.6}\n'
@@ -1360,6 +1370,23 @@ class CeilingProbeTests(unittest.TestCase):
         self.assertGreaterEqual(len(points), 1)
         for p in points:
             self.assertEqual(resolve_ingress_offer(p, p["loadgen_clients"]), DEFAULT_INGRESS_OFFER_MSGS_PER_S)
+
+    def test_templated_emqtt_offer_raises_clients_to_hold_100k(self):
+        """Catalogue loadgen_clients=32 must not keep a 32k I=1 offer after 200k default."""
+        clients = 32
+        target = resolve_ingress_offer({"callback_filters": 1}, clients)
+        self.assertEqual(target, DEFAULT_INGRESS_OFFER_MSGS_PER_S)
+        clients, target = clamp_emqtt_offer(clients, target)
+        interval = interval_for_rate(clients, target)
+        self.assertEqual(clients, 100)
+        self.assertEqual(target, float(EMQTT_MAX_OFFER_MSGS_PER_S))
+        self.assertEqual(interval, 1)
+        self.assertEqual(nominal_rate(clients, interval), float(EMQTT_MAX_OFFER_MSGS_PER_S))
+        # Filter sweep: 1 / 16 / 256 must share that offer once clamped.
+        for filters in (1, 16, 256):
+            n = max(32, min(filters, 256))
+            n, tgt = clamp_emqtt_offer(n, resolve_ingress_offer({}, n))
+            self.assertEqual(nominal_rate(n, interval_for_rate(n, tgt)), float(EMQTT_MAX_OFFER_MSGS_PER_S))
 
     def test_validate_run_uses_effective_offer_not_raw_qos0(self):
         from mqtt_client_bench.harness import validate_run

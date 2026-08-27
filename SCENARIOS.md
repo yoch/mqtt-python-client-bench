@@ -97,8 +97,12 @@ callback deliveries.
 
 emqtt-bench `-I` is milliseconds: 150×`I=1` does not hold 150k (`$SYS
 received` ~98k here). Templated topics (`%i`) and QoS>0 stay on emqtt-bench,
-capped at **100,000**. Compare against `effective_offer_msgs_per_s` /
-`observed_pub_rate` — emqtt-bench QoS0 `pub` rates are double-counted (see
+capped at **100,000**. `clamp_emqtt_offer` **raises** the publisher count
+so that I=1 can hold that cap — 32 catalogue clients must not silently
+stay at 32k after the ranking default moved to 200k. Burst recovery is
+an exception: it keeps the I=1 offer of the configured client count
+(32k), not the ranking target. Compare against `effective_offer_msgs_per_s`
+/ `observed_pub_rate` — emqtt-bench QoS0 `pub` rates are double-counted (see
 [docs/CEILING_PROBES.md](docs/CEILING_PROBES.md)). Ceiling probes still pin
 32k / 64k / 128k (hammer can hold those; emqtt cannot hold 128k).
 
@@ -166,8 +170,9 @@ Mosquitto 2.1 is single-threaded: do not widen the broker cpuset.
 
 - **Goal**: cost of **local** `message_callback_add` matching (Paho).
 - **Topology**: `subscriber_ingress` · broker subscription `#`, loadgen publishes on `cb/<i>/…` · tag `diagnostic`.
+- **Loadgen**: templated `cb/%i/data` → emqtt-bench. Offer is the 200k ranking default clamped to **100k** (emqtt I=1 cap); publisher count is raised to 100 so variants 1 / 16 / 256 share the same offer. Campaign JSON that still shows 32k for filters=1/16 and 100k for 256 predates this equalization and is not internally comparable across the filter sweep.
 - **Variants**: `callback_filters ∈ {1,16,256}`.
-- **Refusals**: clients without `native_message_callback_add` (everything except paho in the stable catalogue).
+- **Refusals**: clients without `native_message_callback_add` (everything except paho / mqttium-compat).
 
 ### `duplex_gateway`
 

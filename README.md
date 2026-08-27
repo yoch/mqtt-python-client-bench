@@ -325,7 +325,10 @@ docstrings, scenario descriptions, commit messages and report output.
 - Core `sub_*` QoS0 exact-topic capacity offers **200k msgs/s** via paced
   `mqtt_hammer --rate 200000`. emqtt-bench cannot hold 150k on one loadgen
   core (`-I` is milliseconds; 150×`I=1` tops out around 100k `$SYS received`
-  here). Templated topics and QoS>0 stay on emqtt-bench, capped at 100k.
+  here). Templated topics and QoS>0 stay on emqtt-bench, capped at 100k —
+  `clamp_emqtt_offer` raises the publisher count so I=1 actually holds that
+  cap (32 catalogue clients must not remain a silent 32k offer). Burst
+  recovery keeps the I=1 offer of the configured client count on purpose.
   Older JSON under `results/` was measured at 32k against Mosquitto 2.0.20
   and is not comparable.
 - The 64 KiB and 1 MiB points of `pub_payload_sweep_qos0` are **broker bound**:
