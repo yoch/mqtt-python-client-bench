@@ -31,6 +31,7 @@ from mqtt_client_bench.workloads import (
     fleet_topics,
     long_topic,
     overlapping_match_filters,
+    retained_wildcard,
     single_topic,
     unicode_topic,
     wildcard_hash,
@@ -205,21 +206,14 @@ def main(argv=None) -> int:
         adapter.loop_stop()
         return 1
 
+    defer_subscribe = bool(cfg.get("defer_subscribe") or cfg.get("retained_count"))
+
     # Subscribe from the role thread — never from on_connect.
     # Bridged asyncio adapters deadlock if bridge.run() is re-entered from the loop thread.
-    for filt in filters:
-        result = adapter.subscribe(filt, qos=qos)
-        if result.rc == adapter.MQTT_ERR_SUCCESS and result.mid is not None:
-            with state["lock"]:
-                state["sub_mids"].add(result.mid)
-        elif result.rc == adapter.MQTT_ERR_SUCCESS and result.mid is None:
-            # Some adapters ACK synchronously without a mid.
-            state["subscribed"].set()
-    with state["lock"]:
-        if not state["sub_mids"] and state["granted_ok"]:
-            state["subscribed"].set()
-
-    if not state["subscribed"].wait(30):
+    # Retained-bootstrap must not subscribe until T_MEASURE: the dump arrives on
+    # SUBSCRIBE, and a pre-T0 subscribe plus the warmup counter reset would
+    # throw the snapshot away.
+    if not defer_subscribe and not _subscribe_filters(adapter, state, filters, qos):
         write_json(cfg["result_path"], {"ok": False, "error": "subscribe_timeout", **identity})
         adapter.loop_stop()
         return 1
@@ -274,6 +268,16 @@ def main(argv=None) -> int:
     # See the publisher: CPU is measured over the window it is divided by.
     cpu_ns_start = time.process_time_ns()
     t0 = time.perf_counter()
+    if defer_subscribe:
+        # Phase is already measure so the retained dump is counted. Subscribe
+        # here, not before T0.
+        if not _subscribe_filters(adapter, state, filters, qos):
+            write_json(
+                cfg["result_path"],
+                {"ok": False, "error": "subscribe_timeout", **identity},
+            )
+            adapter.loop_stop()
+            return 1
     outage_s = float(cfg.get("outage_s") or 0.0)
     if outage_s > 0:
         # Go offline mid-window so the publisher keeps producing on both sides of
@@ -354,6 +358,12 @@ def main(argv=None) -> int:
         if state["reconnect_error"] is not None:
             result["ok"] = False
             result["error"] = state["reconnect_error"]
+    retained_count = cfg.get("retained_count")
+    if retained_count is not None:
+        received = int(delivered) + int(during_drain)
+        result["retained_expected"] = int(retained_count)
+        result["retained_received"] = received
+        result["retained_complete"] = received >= int(retained_count)
     write_json(cfg["result_path"], result)
     return 0
 
@@ -415,8 +425,26 @@ def _run_outage_cycle(adapter, state, cfg, outage_s: float) -> None:
     state["phase"] = "resume"
 
 
+def _subscribe_filters(adapter, state, filters, qos) -> bool:
+    """Issue SUBSCRIBE on the role thread and wait for SUBACK. Returns False on timeout."""
+    for filt in filters:
+        result = adapter.subscribe(filt, qos=qos)
+        if result.rc == adapter.MQTT_ERR_SUCCESS and result.mid is not None:
+            with state["lock"]:
+                state["sub_mids"].add(result.mid)
+        elif result.rc == adapter.MQTT_ERR_SUCCESS and result.mid is None:
+            # Some adapters ACK synchronously without a mid.
+            state["subscribed"].set()
+    with state["lock"]:
+        if not state["sub_mids"] and state["granted_ok"]:
+            state["subscribed"].set()
+    return bool(state["subscribed"].wait(30))
+
+
 def _subscription_filters(cfg, run_id):
     kind = cfg.get("subscription", "exact")
+    if kind == "retained":
+        return [retained_wildcard(run_id)]
     if kind == "exact":
         topo = cfg.get("topic_topology", "single")
         if topo == "deep32":
