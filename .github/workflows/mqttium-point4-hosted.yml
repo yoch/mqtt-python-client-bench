@@ -1,0 +1,140 @@
+name: MQTTium point 4 hosted A/B
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Exact 40-character MQTTium baseline commit SHA
+        required: true
+        type: string
+      candidate_ref:
+        description: Exact 40-character MQTTium candidate commit SHA
+        required: true
+        type: string
+      confirm_trusted_code:
+        description: Both commits contain trusted code
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mqttium-point4-hosted
+  cancel-in-progress: false
+
+jobs:
+  abba:
+    if: inputs.confirm_trusted_code
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      OUT: ${{ runner.temp }}/mqttium-point4
+    steps:
+      - name: Check out trusted benchmark harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          path: harness
+          persist-credentials: false
+
+      - name: Validate immutable MQTTium commits
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_REF" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "base_ref must be an exact SHA" >&2; exit 2; }
+          [[ "$CANDIDATE_REF" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "candidate_ref must be an exact SHA" >&2; exit 2; }
+
+      - name: Check out MQTTium baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: yoch/mqttium
+          ref: ${{ inputs.base_ref }}
+          path: base
+          persist-credentials: false
+
+      - name: Check out MQTTium candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: yoch/mqttium
+          ref: ${{ inputs.candidate_ref }}
+          path: candidate
+          persist-credentials: false
+
+      - name: Verify exact checkouts
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref }}
+        run: |
+          set -euo pipefail
+          test "$(git -C base rev-parse HEAD)" = "$BASE_REF"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_REF"
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Install harness and MQTTium adapter
+        run: python -m pip install -e "./harness[mqttium]"
+
+      - name: Start Mosquitto 2.1.2
+        working-directory: harness
+        run: |
+          mkdir -p "$OUT"
+          python -m mqtt_client_bench.run broker up
+          docker inspect "$(docker compose ps -q mosquitto)" --format '{{json .Config.Image}}' > "$OUT/broker-image.json"
+
+      - name: Calibrate both exact sources
+        working-directory: harness
+        run: |
+          python -m mqtt_client_bench.run calibrate --client mqttium --client-path "$GITHUB_WORKSPACE/base" --profile standard --output "$OUT/base-load.json"
+          python -m mqtt_client_bench.run calibrate --client mqttium --client-path "$GITHUB_WORKSPACE/candidate" --profile standard --output "$OUT/candidate-load.json"
+
+      - name: QoS 0/1/2 publish capacity ABBA
+        working-directory: harness
+        run: |
+          python -m mqtt_client_bench.run run --scenario pub_qos_sweep_telemetry --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/base" --output "$OUT/base-pub-1.json"
+          python -m mqtt_client_bench.run run --scenario pub_qos_sweep_telemetry --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/candidate" --output "$OUT/candidate-pub-1.json"
+          python -m mqtt_client_bench.run run --scenario pub_qos_sweep_telemetry --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/candidate" --output "$OUT/candidate-pub-2.json"
+          python -m mqtt_client_bench.run run --scenario pub_qos_sweep_telemetry --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/base" --output "$OUT/base-pub-2.json"
+
+      - name: Application RTT capacity ABBA
+        working-directory: harness
+        run: |
+          python -m mqtt_client_bench.run run --scenario rtt_capacity_qos1 --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/candidate" --output "$OUT/candidate-rtt-cap-1.json"
+          python -m mqtt_client_bench.run run --scenario rtt_capacity_qos1 --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/base" --output "$OUT/base-rtt-cap-1.json"
+          python -m mqtt_client_bench.run run --scenario rtt_capacity_qos1 --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/base" --output "$OUT/base-rtt-cap-2.json"
+          python -m mqtt_client_bench.run run --scenario rtt_capacity_qos1 --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/candidate" --output "$OUT/candidate-rtt-cap-2.json"
+
+      - name: Application RTT latency ABBA
+        working-directory: harness
+        run: |
+          python -m mqtt_client_bench.run run --scenario application_rtt_qos1 --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/base" --load-profile "$OUT/base-load.json" --output "$OUT/base-app-rtt-1.json"
+          python -m mqtt_client_bench.run run --scenario application_rtt_qos1 --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/candidate" --load-profile "$OUT/candidate-load.json" --output "$OUT/candidate-app-rtt-1.json"
+          python -m mqtt_client_bench.run run --scenario application_rtt_qos1 --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/candidate" --load-profile "$OUT/candidate-load.json" --output "$OUT/candidate-app-rtt-2.json"
+          python -m mqtt_client_bench.run run --scenario application_rtt_qos1 --profile standard --runs 2 --client mqttium --client-path "$GITHUB_WORKSPACE/base" --load-profile "$OUT/base-load.json" --output "$OUT/base-app-rtt-2.json"
+
+      - name: Record immutable request
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
+          CANDIDATE_REF: ${{ inputs.candidate_ref }}
+        run: |
+          python -c 'import json, os, pathlib; pathlib.Path(os.environ["OUT"], "request.json").write_text(json.dumps({"base_ref": os.environ["BASE_REF"], "candidate_ref": os.environ["CANDIDATE_REF"], "runner": "ubuntu-24.04", "python": "3.12", "order": "ABBA"}, indent=2))'
+
+      - name: Upload measurements
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mqttium-point4-hosted-${{ github.run_id }}
+          path: ${{ runner.temp }}/mqttium-point4
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Stop broker
+        if: always()
+        working-directory: harness
+        run: python -m mqtt_client_bench.run broker down
