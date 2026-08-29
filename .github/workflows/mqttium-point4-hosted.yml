@@ -27,7 +27,7 @@ concurrency:
 jobs:
   abba:
     if: inputs.confirm_trusted_code
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     env:
       PYTHONUNBUFFERED: "1"
@@ -123,7 +123,7 @@ jobs:
           BASE_REF: ${{ inputs.base_ref }}
           CANDIDATE_REF: ${{ inputs.candidate_ref }}
         run: |
-          python -c 'import json, os, pathlib; pathlib.Path(os.environ["OUT"], "request.json").write_text(json.dumps({"base_ref": os.environ["BASE_REF"], "candidate_ref": os.environ["CANDIDATE_REF"], "runner": "ubuntu-24.04", "python": "3.12", "order": "ABBA"}, indent=2))'
+          python -c 'import json, os, pathlib; pathlib.Path(os.environ["OUT"], "request.json").write_text(json.dumps({"base_ref": os.environ["BASE_REF"], "candidate_ref": os.environ["CANDIDATE_REF"], "runner": "ubuntu-24.04-arm", "python": "3.12", "order": "ABBA"}, indent=2))'
 
       - name: Upload measurements
         if: always()
