@@ -11,7 +11,13 @@ import time
 from pathlib import Path
 from typing import Optional, Tuple
 
-from mqtt_client_bench.paths import CERT_DIR, COMPOSE_FILE, MOSQUITTO_CONF
+from mqtt_client_bench.paths import (
+    CERT_DIR,
+    COMPOSE_FILE,
+    MOSQUITTO_CONF,
+    MOSQUITTO_CONF_D,
+    RECEIVE_MAXIMUM_OVERRIDE,
+)
 
 # Pin by tag+digest; mixed images are not comparable.
 # Default is upstream Mosquitto 2.1.2 (packet_buffer_size already in tree).
@@ -371,6 +377,56 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
             raise ConnectionError("socket closed while reading CONNACK")
         buf.extend(chunk)
     return bytes(buf)
+
+
+def receive_maximum_overlay_text(n: int) -> str:
+    """Mosquitto drop-in that advertises MQTT v5 Receive Maximum = n.
+
+    Mosquitto 2.x sends CONNACK Receive Maximum from ``max_inflight_messages``.
+    The overlay is loaded after the main config (include_dir at the end) so it
+    wins for new connections after SIGHUP.
+    """
+    value = int(n)
+    if value < 1:
+        raise ValueError("receive_maximum must be >= 1")
+    return f"max_inflight_messages {value}\n"
+
+
+def write_receive_maximum_overlay(n: int) -> Path:
+    MOSQUITTO_CONF_D.mkdir(parents=True, exist_ok=True)
+    path = RECEIVE_MAXIMUM_OVERRIDE
+    path.write_text(receive_maximum_overlay_text(n), encoding="utf-8")
+    return path
+
+
+def clear_receive_maximum_overlay() -> None:
+    if RECEIVE_MAXIMUM_OVERRIDE.exists():
+        RECEIVE_MAXIMUM_OVERRIDE.unlink()
+
+
+def apply_receive_maximum(n: int, *, sighup: bool = True) -> dict:
+    """Pin broker Receive Maximum for the next connections, then optionally SIGHUP."""
+    path = write_receive_maximum_overlay(n)
+    if sighup:
+        sighup_broker()
+    return {"receive_maximum": int(n), "overlay": str(path)}
+
+
+def restore_receive_maximum(*, sighup: bool = True) -> None:
+    """Drop the overlay so the main ``max_inflight_messages 1000`` applies again."""
+    clear_receive_maximum_overlay()
+    if sighup:
+        sighup_broker()
+
+
+def sighup_broker() -> None:
+    """Ask Mosquitto to reload config. New connections see the overlay."""
+    container = broker_container_name()
+    proc = _run(["docker", "kill", "--signal", "HUP", container], check=False)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        raise RuntimeError(f"broker SIGHUP failed on {container!r}: {err}")
+    wait_for_broker(DEFAULT_HOST, DEFAULT_PORT, timeout_s=15.0)
 
 
 def parse_broker_endpoint(value: str) -> Tuple[str, int]:

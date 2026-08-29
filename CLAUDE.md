@@ -249,3 +249,6 @@ results.
   by `ensure_certs()`.
 - Scenarios tagged `planned` stay in the catalogue but are refused by
   `unsupported_features()` — keep them listed rather than deleting them.
+  `mqttv5_flow_control`, `queue_rejection` and `retained_bootstrap` are
+  executable (no `planned` tag); leftover knobs (`topic_alias`, `wan_cut`,
+  `fleet4k_zipf`, …) still refuse per-point.

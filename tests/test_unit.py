@@ -320,13 +320,14 @@ class WorkloadTests(unittest.TestCase):
 
     def test_unsupported_features_guard(self):
         self.assertEqual(unsupported_features({"payload": "telemetry256", "qos_publish": 0}), [])
-        self.assertIn("receive_maximum", unsupported_features({"receive_maximum": 10}))
-        self.assertIn("retained_count", unsupported_features({"retained_count": 10_000}))
+        # receive_maximum / retained_count / submit_count are executable now.
+        self.assertEqual(unsupported_features({"receive_maximum": 10}), [])
+        self.assertEqual(unsupported_features({"retained_count": 10_000}), [])
+        self.assertEqual(unsupported_features({"submit_count": 150}), [])
         # outage_s is implemented (graceful disconnect/reconnect), so it must no
         # longer be refused; it only requires an adapter that can reconnect and
         # an outage short enough to leave traffic on both sides of the gap.
         self.assertEqual(unsupported_features({"outage_s": 2.0, "duration_s": 12.0}), [])
-        self.assertIn("queue_rejection_protocol", unsupported_features({"submit_count": 150}))
         self.assertIn("properties_profile:topic_alias", unsupported_features({"properties_profile": "topic_alias"}))
         self.assertIn("connect_mode:tcp_concurrent", unsupported_features({"connect_mode": "tcp_concurrent"}))
         self.assertIn("topic_topology:fleet4k_zipf", unsupported_features({"topic_topology": "fleet4k_zipf"}))
@@ -1067,14 +1068,14 @@ class ScenarioTests(unittest.TestCase):
             AwscrtAdapter.capabilities().missing_for_point({"topology": "publisher_only"}),
         )
 
-    def test_niche_scenarios_are_planned(self):
-        # Harness-level gaps: kept in the catalogue, excluded from suite
-        # execution instead of burning campaign time on refused points.
+    def test_former_planned_scenarios_are_executable(self):
         for name in ("mqttv5_flow_control", "queue_rejection", "retained_bootstrap"):
             scenario = SCENARIO_BY_NAME[name]
-            self.assertIn("planned", scenario.tags, name)
+            self.assertNotIn("planned", scenario.tags, name)
+            self.assertEqual(scenario.suite, "full", name)
             for point in expand_scenario(scenario, "standard"):
-                self.assertTrue(point.get("non_comparable"), name)
+                missing = [m for m in unsupported_features(point) if m == "planned_scenario"]
+                self.assertEqual(missing, [], name)
 
     def test_inflight_variant_marks_requirement(self):
         points = expand_scenario(SCENARIO_BY_NAME["pub_qos1_inflight"], "standard")
@@ -1914,6 +1915,175 @@ class FairnessGateTests(unittest.TestCase):
                 # both sides, otherwise there is no backlog to replay.
                 self.assertLess(float(point["outage_s"]), float(point["duration_s"]), name)
 
+    def test_mqttv5_flow_control_pins_receive_maximum(self):
+        points = expand_scenario(SCENARIO_BY_NAME["mqttv5_flow_control"], "standard")
+        self.assertEqual(len(points), 2)
+        rms = sorted(int(p["receive_maximum"]) for p in points)
+        self.assertEqual(rms, [10, 100])
+        for point in points:
+            self.assertEqual(point["protocol"], "MQTTv5")
+            self.assertEqual(point["qos_publish"], 1)
+            self.assertEqual(point["inflight"], 100)
+            self.assertTrue(point.get("require_max_inflight"))
+            self.assertNotIn("planned_scenario", unsupported_features(point))
+
+    def test_queue_rejection_keeps_the_pinned_window(self):
+        points = expand_scenario(SCENARIO_BY_NAME["queue_rejection"], "standard")
+        self.assertEqual(len(points), 1)
+        point = points[0]
+        self.assertEqual(point["submit_count"], 150)
+        self.assertEqual(point["inflight"], 1)
+        self.assertEqual(point["max_queued"], 100)
+        self.assertTrue(point.get("require_max_inflight"))
+        self.assertTrue(point.get("require_max_queued"))
+        self.assertEqual(point["expected_accepts"], 100)
+        self.assertEqual(point["expected_rejects"], 50)
+
+    def test_retained_bootstrap_defers_subscribe_and_is_non_comparable(self):
+        standard = expand_scenario(SCENARIO_BY_NAME["retained_bootstrap"], "standard")
+        self.assertEqual([p["retained_count"] for p in standard], [10_000, 100_000])
+        for point in standard:
+            self.assertTrue(point.get("non_comparable"))
+            self.assertTrue(point.get("defer_subscribe"))
+            self.assertEqual(point["subscription"], "retained")
+        smoke = expand_scenario(SCENARIO_BY_NAME["retained_bootstrap"], "smoke")
+        self.assertTrue(all(int(p["retained_count"]) <= 200 for p in smoke))
+
+    def test_queue_accounting_reasons(self):
+        from mqtt_client_bench.harness import queue_accounting_reasons
+
+        point = {
+            "submit_count": 150,
+            "expected_accepts": 100,
+            "expected_rejects": 50,
+        }
+        ok = [{"role": "publisher", "offered": 150, "publish_accepted": 100, "sync_rejected": 50}]
+        self.assertEqual(queue_accounting_reasons(point, ok), [])
+        never = [{"role": "publisher", "offered": 150, "publish_accepted": 150, "sync_rejected": 0}]
+        self.assertIn("queue_never_rejected", queue_accounting_reasons(point, never))
+        mismatch = [{"role": "publisher", "offered": 150, "publish_accepted": 80, "sync_rejected": 70}]
+        reasons = queue_accounting_reasons(point, mismatch)
+        self.assertTrue(any(r.startswith("queue_accepts_mismatch") for r in reasons), reasons)
+
+    def test_validate_run_retained_snapshot_empty(self):
+        from mqtt_client_bench.harness import validate_run
+
+        point = {
+            "topology": "subscriber_ingress",
+            "cadence": "capacity",
+            "retained_count": 10_000,
+            "duration_s": 12.0,
+            "tags": ["stress", "functional"],
+        }
+        empty = validate_run(point, [{"role": "subscriber", "ok": True, "subscriber_delivered": 0}], None, [])
+        self.assertIn("retained_snapshot_empty", empty["reasons"])
+        ok = validate_run(point, [{"role": "subscriber", "ok": True, "subscriber_delivered": 10_000}], None, [])
+        self.assertNotIn("retained_snapshot_empty", ok["reasons"])
+        self.assertNotIn("loadgen_emitted_nothing", ok["reasons"])
+
+    def test_retained_packet_roundtrip_shape(self):
+        from mqtt_client_bench.broker import encode_remaining_length
+        from mqtt_client_bench.retained import (
+            encode_connect,
+            encode_disconnect,
+            encode_publish_qos0_retain,
+            retained_payload,
+        )
+        from mqtt_client_bench.workloads import HEADER_SIZE, decode_header_fields, retained_topics
+
+        topics = retained_topics("abcd1234", 3)
+        self.assertEqual(topics[0], "bench/abcd1234/retained/000000")
+        self.assertEqual(len(topics), 3)
+        payload = retained_payload(b"abcd1234", 7, 256)
+        self.assertEqual(len(payload), 256)
+        _pub, sequence, _corr, _send = decode_header_fields(payload)
+        self.assertEqual(sequence, 7)
+        packet = encode_publish_qos0_retain(topics[0], payload)
+        self.assertEqual(packet[0], 0x31)
+        self.assertGreater(len(packet), HEADER_SIZE)
+        self.assertEqual(encode_disconnect(), b"\xe0\x00")
+        connect = encode_connect("retseed")
+        self.assertEqual(connect[0], 0x10)
+        # Remaining length of the CONNECT is encoded, not a placeholder.
+        self.assertEqual(encode_remaining_length(0), b"\x00")
+
+    def test_subscription_filters_retained(self):
+        from mqtt_client_bench.roles.subscriber import _subscription_filters
+        from mqtt_client_bench.workloads import retained_wildcard
+
+        self.assertEqual(
+            _subscription_filters({"subscription": "retained"}, "abcd1234"),
+            [retained_wildcard("abcd1234")],
+        )
+
+    def test_receive_maximum_overlay_text(self):
+        from mqtt_client_bench.broker import receive_maximum_overlay_text, write_receive_maximum_overlay
+        from mqtt_client_bench.paths import RECEIVE_MAXIMUM_OVERRIDE
+
+        self.assertEqual(receive_maximum_overlay_text(10), "max_inflight_messages 10\n")
+        path = write_receive_maximum_overlay(100)
+        try:
+            self.assertEqual(path, RECEIVE_MAXIMUM_OVERRIDE)
+            self.assertEqual(path.read_text(encoding="utf-8"), "max_inflight_messages 100\n")
+        finally:
+            if path.exists():
+                path.unlink()
+
+    def test_submit_burst_counts_rejects(self):
+        from mqtt_client_bench.adapters.base import PublishResult
+        from mqtt_client_bench.roles.publisher import _run_submit_burst
+        from mqtt_client_bench.sampling import CompletionLog, ReservoirSampler
+
+        class FakeAdapter:
+            def __init__(self):
+                self.calls = 0
+
+            def publish(self, topic, payload=None, qos=0, retain=False, properties=None):
+                del topic, payload, qos, retain, properties
+                self.calls += 1
+                if self.calls <= 100:
+                    return PublishResult(rc=0, mid=self.calls)
+                return PublishResult(rc=4, mid=None)
+
+        state = {
+            "offered": 0,
+            "publish_calls": 0,
+            "submitted": 0,
+            "sync_rejected": 0,
+            "publish_accepted": 0,
+            "publish_rejected": 0,
+            "completed_failed": 0,
+            "protocol_failed": 0,
+            "inflight_local": 0,
+            "seen_mids_inflight": set(),
+            "early_acks": {},
+            "mid_send_ns": {},
+            "lock": threading.Lock(),
+            "completions": CompletionLog(16, sampler=ReservoirSampler(8, seed=1)),
+            "overflow_success": 0,
+            "overflow_failed": 0,
+            "overflow_in_window": 0,
+            "overflow_during_drain": 0,
+            "phase": "measure",
+        }
+        adapter = FakeAdapter()
+        _run_submit_burst(
+            adapter,
+            state,
+            topic="bench/t",
+            qos=1,
+            body=b"x" * 16,
+            corpus=[],
+            run_id=b"abcd1234",
+            submit_count=150,
+            properties_builder=lambda: None,
+            force_header=False,
+        )
+        self.assertEqual(adapter.calls, 150)
+        self.assertEqual(state["offered"], 150)
+        self.assertEqual(state["publish_accepted"], 100)
+        self.assertEqual(state["sync_rejected"], 50)
+
     def test_memory_guard_trips_and_invalidates_the_run(self):
         # A QoS0 path completing at an in-process queue leaves the outstanding
         # gate with nothing to hold back; one worker was observed at 11.5 GB on
@@ -1987,6 +2157,9 @@ class FairnessGateTests(unittest.TestCase):
 
         self.assertIn("session_resume_qos1", _CHART_EXCLUDED_SCENARIOS)
         self.assertIn("reconnect_ordering", _CHART_EXCLUDED_SCENARIOS)
+        self.assertIn("queue_rejection", _CHART_EXCLUDED_SCENARIOS)
+        self.assertIn("retained_bootstrap", _CHART_EXCLUDED_SCENARIOS)
+        self.assertIn("mqttv5_flow_control", _CHART_EXCLUDED_SCENARIOS)
         # Fraction-of-own-capacity latency is an intra-client question.
         self.assertIn("puback_latency_qos1", _CHART_EXCLUDED_SCENARIOS)
         self.assertIn("application_rtt_qos1", _CHART_EXCLUDED_SCENARIOS)
