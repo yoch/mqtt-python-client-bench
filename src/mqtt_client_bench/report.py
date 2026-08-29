@@ -61,6 +61,9 @@ _CHART_EXCLUDED_SCENARIOS = frozenset(
         "remaining_length_boundaries",
         "broker_ceiling_ingress",
         "client_ceiling_ingress",
+        "queue_rejection",
+        "retained_bootstrap",
+        "mqttv5_flow_control",
         # Fraction-of-own-capacity latency is an intra-client question, not a
         # cross-client ranking. The public latency comparison is
         # puback_latency_fixed_rate (equal absolute offered rates).
@@ -77,6 +80,9 @@ _CHART_EXCLUDED_ORDER = (
     "remaining_length_boundaries",
     "broker_ceiling_ingress",
     "client_ceiling_ingress",
+    "queue_rejection",
+    "retained_bootstrap",
+    "mqttv5_flow_control",
     "puback_latency_qos1",
     "application_rtt_qos1",
 )
