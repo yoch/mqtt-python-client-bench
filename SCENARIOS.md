@@ -355,15 +355,46 @@ Two stronger outages were considered and are **not** implemented:
 
 ---
 
-## `planned` scenarios (catalogue only)
+### `mqttv5_flow_control`
 
-Not executed by the suites; forcing one yields `not_implemented:planned_scenario`:
+- **Goal**: does the publisher honour the broker's MQTT v5 Receive Maximum when its own inflight window is larger?
+- **Suite**: `full` · tags `diagnostic` · topology `publisher_only` · QoS 1 · `MQTTv5`.
+- **Variants**: `receive_maximum ∈ {10, 100}` with `inflight = 100` (`require_max_inflight`).
+- **Wiring**: the harness writes a Mosquitto `conf.d` overlay (`max_inflight_messages = RM`) and SIGHUPs the managed broker before the point; the main config (`1000`) is restored afterwards. Unmanaged brokers are refused (`receive_maximum_requires_managed_broker`).
+- **Primary**: publish completions / s. RM=10 should throttle below RM=100 if the client waits for the CONNACK window; identical scores mean the client ignored it.
+- **Refusals**: no MQTT v5 (`amqtt`) or no `max_inflight` knob.
+- **Report**: excluded from the overview throughput chart.
 
-| Name | Intent |
+### `queue_rejection`
+
+- **Goal**: accept/reject accounting when the outbound queue is the gate.
+- **Suite**: `full` · tags `functional` · topology `publisher_only` · QoS 1.
+- **Variant**: `submit_count=150`, `inflight=1`, `max_queued=100`, `expected_accepts=100`, `expected_rejects=50`.
+- **Wiring**: the publisher skips warmup traffic, then at `T_MEASURE` fires 150 `publish()` calls **without** the outstanding gate. Driven on the sync facade so `publish()` can return `QUEUE_FULL` (an awaited native path would never fill the queue).
+- **Requires**: `max_inflight` and `max_queued`.
+- **Validation**: fail closed if the client never rejects, if the submit count drifts, or if accept/reject miss the expected counts by more than 1 (some libraries fold the in-flight slot into `max_queued`).
+- **Primary**: the `queue_accounting` block — not a throughput ranking.
+- **Report**: excluded from the overview throughput chart.
+
+### `retained_bootstrap`
+
+- **Goal**: how fast does a subscriber ingest a retained snapshot that is already on the broker?
+- **Suite**: `full` · tags `stress`, `functional` · topology `subscriber_ingress` · always `non_comparable` (broker-sensitive).
+- **Variants**: `retained_count ∈ {10_000, 100_000}` (smoke caps at 200 so a 3 s window is not spent seeding).
+- **Wiring**: the orchestrator seeds `bench/{run_id}/retained/{i}` with stdlib MQTT PUBLISH retain=1 (**not** the SUT). The subscriber connects without subscribing, then subscribes to `bench/{run_id}/retained/#` at `T_MEASURE` so the dump lands in the measure window. No live loadgen. Empties are published after the point to clear the store.
+- **Primary**: delivered / s in the window, plus `retained_received` / `retained_expected`. A zero dump is `retained_snapshot_empty`.
+- **Report**: excluded from the overview throughput chart.
+
+## Remaining catalogue refusals (not full scenarios)
+
+These knobs stay in the catalogue and are still refused per-point with `not_implemented:*` until a later honest implementation:
+
+| Knob | Why it is still refused |
 |---|---|
-| `mqttv5_flow_control` | Broker `Receive Maximum` vs client in-flight interaction |
-| `queue_rejection` | Accept/reject accounting under queue pressure |
-| `retained_bootstrap` | Massive retained snapshot (very broker-sensitive) |
+| `properties_profile:topic_alias` / `subscription_identifier` | Adapter PUBLISH/SUBSCRIBE property support is not wired. |
+| `connect_mode:tls_resume` / `tcp_concurrent` | Connect probe is serial-only. |
+| `topic_topology:fleet4k_zipf` / `fleet100k` | Loadgen publishes on one concrete topic. |
+| `network:wan_cut` | Timed blackhole needs `tc` + `CAP_NET_ADMIN` mid-window. |
 
 ---
 
@@ -393,6 +424,7 @@ clients (`zmqtt`, `aiomqtt3`, `mqttium`, `mqttium-compat`). See the README.
 | `src/mqtt_client_bench/loadgen.py` | emqtt-bench, `nominal_rate`, parsing |
 | `src/mqtt_client_bench/sys_probe.py` | `$SYS` probe: dropped / sent / received |
 | `src/mqtt_client_bench/workloads.py` | Payloads, topics, integrity header |
+| `src/mqtt_client_bench/retained.py` | Stdlib seeder for retained snapshots |
 | `src/mqtt_client_bench/roles/` | publisher / subscriber / RTT / responder workers |
 | `docs/CEILING_PROBES.md` | Broker / client ceiling runbook |
 | `README.md` | Bench overview and CLI commands |

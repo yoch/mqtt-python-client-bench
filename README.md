@@ -255,21 +255,18 @@ against its own MQTT 3.1.1 and MQTT 5 regime capacities (publish or RTT), then
 execute every client × protocol × 50/75/90/100 % point. Fixed 5 s cooldown
 between slots.
 
-## Planned (not executable yet)
+## Planned knobs (per-point refusals)
 
-Niche/functional scenarios stay in the catalogue but are tagged `planned` and
-excluded from suite execution — they probe protocol corner cases, not everyday
-client performance, so they are deliberately not implemented for now:
+These catalogue variants still refuse with `not_implemented:*` until they can
+be driven honestly. They are not tagged `planned` on a whole scenario:
 
-- `session_resume_qos1` persistent-session outage drain
-- `mqttv5_flow_control` (`receive_maximum`)
-- `retained_bootstrap` (broker-sensitive snapshot)
-- `queue_rejection` accounting protocol
 - `fleet4k_zipf` / `fleet100k` topic cardinality in the loadgen
 - `wan_cut` controlled blackhole outage
 - `mqttv5_rich` variants `topic_alias` / `subscription_identifier` and
-  `connect_latency_and_churn` variants `tls_resume` / `tcp_concurrent` refuse
-  per-point with `not_implemented:*`; the other variants of those scenarios run.
+  `connect_latency_and_churn` variants `tls_resume` / `tcp_concurrent`
+
+`mqttv5_flow_control`, `queue_rejection` and `retained_bootstrap` are executable
+in the `full` suite (see `SCENARIOS.md`). `session_resume_qos1` is too.
 
 ## Layout
 
@@ -301,9 +298,9 @@ docstrings, scenario descriptions, commit messages and report output.
 
 ## Known limitations
 
-- Niche scenarios (`receive_maximum`, retained bootstrap, session outage,
-  queue rejection) are tagged `planned`: skipped by suites, refused with
-  `not_implemented:*` if forced — see “Planned”.
+- `mqttv5_rich` `topic_alias` / `subscription_identifier`, connect
+  `tls_resume` / `tcp_concurrent`, `fleet4k_zipf` / `fleet100k` and `wan_cut`
+  still refuse with `not_implemented:*` — see “Planned knobs”.
 - `aiomqtt` v2 and v3 cannot cohabit in one environment.
 - `amqtt` has no MQTT v5 client path in this bench (`mqtt_v5=false`).
 - `gmqtt` QoS2 completion is at PUBREC in 0.7 (`qos2=false`).
