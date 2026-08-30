@@ -2317,6 +2317,32 @@ class HostCalibrationTests(unittest.TestCase):
         shuffled = [steps[1], steps[0], steps[3], steps[2]]
         self.assertEqual(_ceiling_from_steps(shuffled), 63800)
 
+    def test_each_ceiling_reads_its_own_counter(self):
+        from mqtt_client_bench.hostcal import _ceiling_from_steps
+
+        # The first version of the probe read the subscriber's delivery for all
+        # three ceilings and reported a 64k loadgen on a host whose loadgen
+        # holds 200k: in this topology the reference subscriber shares a core
+        # group with the publisher, so delivery is the weakest link of a shape
+        # no ranking scenario uses. Each ceiling must come off its own counter.
+        steps = [
+            {
+                "effective_offer_msgs_per_s": 100000,
+                "emitted_msgs_per_s": 99800,
+                "broker_received_msgs_per_s": 99000,
+                "delivered_msgs_per_s": 76000,
+            },
+            {
+                "effective_offer_msgs_per_s": 200000,
+                "emitted_msgs_per_s": 199000,
+                "broker_received_msgs_per_s": 150000,
+                "delivered_msgs_per_s": 77000,
+            },
+        ]
+        self.assertEqual(_ceiling_from_steps(steps, "emitted_msgs_per_s"), 199000)
+        self.assertEqual(_ceiling_from_steps(steps, "broker_received_msgs_per_s"), 99000)
+        self.assertEqual(_ceiling_from_steps(steps, "delivered_msgs_per_s"), None)
+
     def test_cpu_utilisation_decides_when_loadavg_looks_fine(self):
         from mqtt_client_bench import hostcal
 
