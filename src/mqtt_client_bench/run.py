@@ -198,6 +198,41 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_calibrate_host(args: argparse.Namespace) -> int:
+    from mqtt_client_bench.hostcal import HostNotIdle, calibrate_host, profile_path_name
+
+    try:
+        profile = calibrate_host(
+            profile=args.profile,
+            role=args.role,
+            skip_ceilings=args.skip_ceilings,
+            allow_busy=args.allow_busy,
+        )
+    except HostNotIdle as exc:
+        # Not a traceback: this is the expected answer on a working machine,
+        # and the operator needs the sentence, not the stack.
+        print(f"host calibration refused: {exc}")
+        return 2
+
+    output = args.output or str(Path("hosts") / profile_path_name(profile))
+    Path(output).parent.mkdir(parents=True, exist_ok=True)
+    write_json(output, profile)
+    print(
+        json.dumps(
+            {
+                "output": output,
+                "host_fingerprint": profile["host_fingerprint"],
+                "role": profile["role"],
+                "idle_verified": profile["idle"]["verified"],
+                "host": profile["host"],
+                "ceilings": profile["ceilings"],
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     clients = [c.strip() for c in args.clients.split(",") if c.strip()]
     if len(clients) < 2:
@@ -311,6 +346,36 @@ def build_parser() -> argparse.ArgumentParser:
     cal_p.add_argument("--output", required=True)
     cal_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
     cal_p.set_defaults(func=cmd_calibrate)
+
+    host_p = sub.add_parser(
+        "calibrate-host",
+        help="Measure this machine's ceilings and harness cost into a host profile",
+    )
+    host_p.add_argument(
+        "--output",
+        help="Default: hosts/<hostname>-<fingerprint>.json",
+    )
+    host_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
+    host_p.add_argument(
+        "--role",
+        choices=["reference", "runner"],
+        default="runner",
+        help="Only the reference host is published; runners validate locally.",
+    )
+    host_p.add_argument(
+        "--skip-ceilings",
+        action="store_true",
+        help="Harness cost only; no broker needed.",
+    )
+    host_p.add_argument(
+        "--allow-busy",
+        action="store_true",
+        help=(
+            "Measure anyway on a machine that is not quiet. The profile is "
+            "marked idle_verified=false and can never be the reference."
+        ),
+    )
+    host_p.set_defaults(func=cmd_calibrate_host)
 
     cmp_p = sub.add_parser("compare", help="ABBA compare two client adapters")
     cmp_p.add_argument("--clients", required=True, help="Comma-separated pair, e.g. paho,gmqtt")

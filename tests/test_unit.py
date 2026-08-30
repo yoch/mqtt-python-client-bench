@@ -2228,6 +2228,117 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(inside, {int(c) for c in cpusets["sut"].split(",")})
 
 
+class HostCalibrationTests(unittest.TestCase):
+    """The host profile is what makes a number readable on another machine."""
+
+    def test_harness_cost_probe_returns_a_floor_and_its_spread(self):
+        from mqtt_client_bench.hostcal import measure_harness_cost_ns
+
+        # Two passes keep the test fast; the statistic is what is under test,
+        # not the value. The floor must be the smallest sample, and the spread
+        # must describe the samples rather than being assumed quiet.
+        result = measure_harness_cost_ns(passes=2)
+        self.assertGreater(result["ns_per_message"], 0.0)
+        self.assertLessEqual(result["ns_per_message"], result["median_ns_per_message"])
+        self.assertLessEqual(result["median_ns_per_message"], result["max_ns_per_message"])
+        self.assertEqual(result["passes"], 2)
+        self.assertGreaterEqual(result["spread_pct"], 0.0)
+
+    def test_frequency_policy_names_an_unreadable_governor(self):
+        from mqtt_client_bench.hostcal import frequency_policy
+
+        # A container reports None. It must get a name of its own, not inherit
+        # the reference host's posture by silence — that silence is exactly what
+        # let a container campaign come back valid.
+        self.assertEqual(frequency_policy({"scaling_governor": None}), "unpinned")
+        self.assertEqual(frequency_policy({"scaling_governor": "performance"}), "performance")
+        self.assertEqual(frequency_policy({"scaling_governor": "powersave"}), "governed:powersave")
+
+    def test_fingerprint_tracks_identity_and_ceilings_only(self):
+        from mqtt_client_bench.hostcal import host_fingerprint
+
+        base = {
+            "host": {
+                "cpu_model": "Test CPU",
+                "cpu_count": 8,
+                "physical_groups": 4,
+                "threads_per_group": 2,
+                "frequency_policy": "performance",
+                "hostname": "a",
+            },
+            "ceilings": {
+                "harness_cost_ns_per_message": 3500.0,
+                "loadgen_ceiling_msgs_per_s": 200000.0,
+                "broker_ceiling_msgs_per_s": 200000.0,
+                "emqtt_ceiling_msgs_per_s": 100000.0,
+            },
+        }
+        fp = host_fingerprint(base)
+
+        # Hostname is identity for a human, not for a measurement.
+        renamed = json.loads(json.dumps(base))
+        renamed["host"]["hostname"] = "b"
+        self.assertEqual(host_fingerprint(renamed), fp)
+
+        # Measurement noise must not churn the digest.
+        jittered = json.loads(json.dumps(base))
+        jittered["ceilings"]["harness_cost_ns_per_message"] = 3512.0
+        self.assertEqual(host_fingerprint(jittered), fp)
+
+        # A different machine, or a real change in what it can do, must.
+        for mutation in (
+            ("host", "threads_per_group", 1),
+            ("host", "frequency_policy", "unpinned"),
+            ("ceilings", "broker_ceiling_msgs_per_s", 60000.0),
+        ):
+            section, key, value = mutation
+            changed = json.loads(json.dumps(base))
+            changed[section][key] = value
+            self.assertNotEqual(host_fingerprint(changed), fp, f"{key} did not move the fingerprint")
+
+    def test_ceiling_is_the_last_sustained_step_not_the_last_attempted(self):
+        from mqtt_client_bench.hostcal import _ceiling_from_steps
+
+        steps = [
+            {"effective_offer_msgs_per_s": 32000, "delivered_msgs_per_s": 31900},
+            {"effective_offer_msgs_per_s": 64000, "delivered_msgs_per_s": 63800},
+            # The knee: the host stops keeping up.
+            {"effective_offer_msgs_per_s": 128000, "delivered_msgs_per_s": 70000},
+            # Anything past it is the loadgen or the broker falling behind, and
+            # recording it as a ceiling is the mistake the 200k constant made.
+            {"effective_offer_msgs_per_s": 200000, "delivered_msgs_per_s": 90000},
+        ]
+        self.assertEqual(_ceiling_from_steps(steps), 63800)
+        self.assertIsNone(_ceiling_from_steps([]))
+
+    def test_calibration_refuses_a_busy_machine(self):
+        from mqtt_client_bench import hostcal
+
+        # A contended run is re-run; a contended calibration is committed and
+        # then governs every campaign after it. So this one refuses rather
+        # than annotating.
+        busy = {"idle": False, "reasons": ["host_busy:loadavg=9.0 over 1.6"], "loadavg_before": 9.0}
+        with patch.object(hostcal, "check_host_idle", return_value=busy):
+            with self.assertRaises(hostcal.HostNotIdle):
+                hostcal.calibrate_host(skip_ceilings=True, passes=1)
+
+    def test_host_profile_must_match_the_machine_it_runs_on(self):
+        from mqtt_client_bench.harness import _validate_host_profile
+        from mqtt_client_bench.hostcal import host_identity
+
+        _validate_host_profile({"host": host_identity(), "role": "runner"})
+
+        foreign = {"host": dict(host_identity(), cpu_model="Some Other CPU"), "role": "runner"}
+        with self.assertRaises(ValueError):
+            _validate_host_profile(foreign)
+
+        # The reference host is the one that gets published, so its profile
+        # carries the stricter requirement.
+        unverified = {"host": host_identity(), "role": "reference", "idle": {"verified": False}}
+        with self.assertRaises(ValueError):
+            _validate_host_profile(unverified)
+
+
 class SchemaTests(unittest.TestCase):
     def test_schema_file_exists_and_parses(self):
         import json

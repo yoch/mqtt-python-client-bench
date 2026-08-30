@@ -124,52 +124,10 @@ def main(argv=None) -> int:
         corpus = build_payload_corpus(payload_name, count=64, seed=7)
         corpus = [c.encode("utf-8") if isinstance(c, str) else c for c in corpus]
 
-    state = {
-        "connected": threading.Event(),
-        "offered": 0,
-        "submitted": 0,
-        "sync_rejected": 0,
-        "completed_success": 0,
-        "completed_failed": 0,
-        "missed_due_to_backpressure": 0,
-        # Legacy aliases kept for older report consumers.
-        "publish_calls": 0,
-        "publish_accepted": 0,
-        "publish_rejected": 0,
-        "protocol_completed": 0,
-        "protocol_failed": 0,
-        "socket_completed_qos0": 0,
-        "completed_in_window": 0,
-        "completed_during_drain": 0,
-        "latencies_ns": ReservoirSampler(metric_sample_limit, seed=11),
-        "scheduler_lags_ns": ReservoirSampler(metric_sample_limit, seed=29),
-        "lock": threading.Lock(),
-        "inflight_local": 0,
-        "phase": "init",
-        "mid_send_ns": {},
-        # Callbacks that arrive before mid_send_ns registration land here.
-        "early_acks": {},
-        "warmup_drain_ok": True,
-        "seen_mids_inflight": set(),
-        # Async path only: the future the loop parks on, the deadline flag, and
-        # the two slots that let a publish acknowledged inside its own call
-        # complete without going through the early-ack dictionaries.
-        "gate_waiter": None,
-        "loop_expired": False,
-        "pending_send_ns": None,
-        "completed_inline": None,
-        # Completions are logged, not counted, inside the measure window.
-        # The overflow_* counters only move if the log fills up.
-        "completions": None,  # needs the latency sampler; set just below
-        "overflow_success": 0,
-        "overflow_failed": 0,
-        "overflow_in_window": 0,
-        "overflow_during_drain": 0,
-        "fold_pending": False,
-    }
-    # The log hands folded latencies straight to the sampler, so a fold loses
-    # nothing: the sampler keeps its own bounded copy and the buffer is reused.
-    state["completions"] = CompletionLog(completion_log_limit, sampler=state["latencies_ns"])
+    state = new_publisher_state(
+        metric_sample_limit=metric_sample_limit,
+        completion_log_limit=completion_log_limit,
+    )
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
         rc = int(getattr(reason_code, "value", reason_code))
@@ -477,6 +435,67 @@ def _wake_gate(state) -> None:
         state["gate_waiter"] = None
         if not fut.done():
             fut.set_result(None)
+
+
+def new_publisher_state(
+    *,
+    metric_sample_limit: int = DEFAULT_METRIC_SAMPLE_LIMIT,
+    completion_log_limit: int = DEFAULT_COMPLETION_LOG_LIMIT,
+) -> dict:
+    """The publisher's counter block, built in one place.
+
+    The host calibrator drives the same publish loop against a null client to
+    price the harness itself, and the unit tests drive it against fakes. All
+    three must see the state the production worker sees: a counter that exists
+    here but not there would price a loop nobody runs.
+    """
+    state = {
+        "connected": threading.Event(),
+        "offered": 0,
+        "submitted": 0,
+        "sync_rejected": 0,
+        "completed_success": 0,
+        "completed_failed": 0,
+        "missed_due_to_backpressure": 0,
+        # Legacy aliases kept for older report consumers.
+        "publish_calls": 0,
+        "publish_accepted": 0,
+        "publish_rejected": 0,
+        "protocol_completed": 0,
+        "protocol_failed": 0,
+        "socket_completed_qos0": 0,
+        "completed_in_window": 0,
+        "completed_during_drain": 0,
+        "latencies_ns": ReservoirSampler(metric_sample_limit, seed=11),
+        "scheduler_lags_ns": ReservoirSampler(metric_sample_limit, seed=29),
+        "lock": threading.Lock(),
+        "inflight_local": 0,
+        "phase": "init",
+        "mid_send_ns": {},
+        # Callbacks that arrive before mid_send_ns registration land here.
+        "early_acks": {},
+        "warmup_drain_ok": True,
+        "seen_mids_inflight": set(),
+        # Async path only: the future the loop parks on, the deadline flag, and
+        # the two slots that let a publish acknowledged inside its own call
+        # complete without going through the early-ack dictionaries.
+        "gate_waiter": None,
+        "loop_expired": False,
+        "pending_send_ns": None,
+        "completed_inline": None,
+        # Completions are logged, not counted, inside the measure window.
+        # The overflow_* counters only move if the log fills up.
+        "completions": None,  # needs the latency sampler; set just below
+        "overflow_success": 0,
+        "overflow_failed": 0,
+        "overflow_in_window": 0,
+        "overflow_during_drain": 0,
+        "fold_pending": False,
+    }
+    # The log hands folded latencies straight to the sampler, so a fold loses
+    # nothing: the sampler keeps its own bounded copy and the buffer is reused.
+    state["completions"] = CompletionLog(completion_log_limit, sampler=state["latencies_ns"])
+    return state
 
 
 def _make_on_publish(state, qos, *, lock):
