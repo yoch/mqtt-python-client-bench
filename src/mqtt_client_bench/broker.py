@@ -206,6 +206,20 @@ def compose_cmd(*args: str) -> list:
 _BROKER_CONTAINER_CACHE: Optional[str] = None
 
 
+def broker_running(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> bool:
+    """Is a broker accepting connections right now?
+
+    Deliberately a socket probe rather than a container query: what a caller
+    needs to know is whether the thing it is about to measure through will
+    answer, and a container can be `Up` while the listener is not.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=2.0):
+            return True
+    except OSError:
+        return False
+
+
 def broker_container_name() -> str:
     """Resolve the actual container name for the compose 'mosquitto' service.
 

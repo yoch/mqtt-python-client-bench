@@ -1075,6 +1075,9 @@ class ResultDoc:
     # failures stay visible even when excluded from the throughput chart.
     load_reasons: Dict[str, int] = field(default_factory=dict)
     capability_reasons: Dict[str, int] = field(default_factory=dict)
+    # True when a run of this document was allowed despite an unreadable CPU
+    # governor, on a host whose profile declares the clock unpinned.
+    clock_unpinned: bool = False
     environment_reasons: Dict[str, int] = field(default_factory=dict)
     inconclusive_runs: int = 0
     total_runs: int = 0
@@ -1336,6 +1339,11 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
         },
         spread_low=spread_low,
         spread_high=spread_high,
+        clock_unpinned=any(
+            bool(run.get("clock_unpinned"))
+            for entry in (data.get("results") or [])
+            for run in (entry.get("runs") or [])
+        ),
         load_reasons=load_reasons,
         capability_reasons=capability_reasons,
         environment_reasons=environment_reasons,
@@ -1695,6 +1703,13 @@ def render_detail(doc: ResultDoc, generated_at: str, related: Optional[Dict[str,
     for key in ("hostname", "platform", "python", "cpu_count"):
         if doc.environment.get(key) is not None:
             env_bits.append(f"<li><strong>{_esc(key)}</strong> {_esc(doc.environment[key])}</li>")
+    if doc.clock_unpinned:
+        env_bits.append(
+            "<li><strong>clock</strong> unpinned - this host exposes no cpufreq "
+            "governor and its profile declares it. Run-to-run variance is wider "
+            "than on a pinned clock; these numbers rank clients against each "
+            "other on this machine and are not published.</li>"
+        )
     versions = (doc.environment.get("client_versions") or {}) if isinstance(doc.environment, dict) else {}
     if versions:
         env_bits.append(
