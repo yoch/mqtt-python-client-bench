@@ -27,6 +27,7 @@ from mqtt_client_bench.adapters.registry import (
     adapter_identity,
     create_adapter,
     create_async_adapter,
+    get_async_adapter_class,
     has_async_adapter,
 )
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
@@ -139,10 +140,30 @@ def main(argv=None) -> int:
     # with payload size while the message-bounded clients keep the full depth.
     payload_bytes = len(body) if isinstance(body, (bytes, bytearray)) else len(str(body).encode())
 
+    submit_count = cfg.get("submit_count")
+    if submit_count is not None:
+        submit_count = int(submit_count)
+
     # A client with a native path is driven on its own loop unless the point
     # explicitly asks otherwise. Which path ran is recorded in the result: a run
     # through the bridge and a native run are not comparable with each other.
-    native = bool(cfg.get("native_async", True)) and has_async_adapter(client_name)
+    #
+    # Queue-rejection fires publish() without waiting for completions, and an
+    # *awaited* native path would drain the outbound queue between submissions
+    # and never fill it. That is true of await-only libraries and false of the
+    # ones that admit a publish on the loop: for those, submitting without
+    # awaiting *is* the native shape, and it is the facade that cannot answer -
+    # its engine is on another thread, so admission costs a round trip per call
+    # that drains the queue far more thoroughly than any await would.
+    native_burst_ok = submit_count is None or (
+        has_async_adapter(client_name)
+        and get_async_adapter_class(client_name).capabilities().publish_sync_on_loop
+    )
+    native = (
+        bool(cfg.get("native_async", True))
+        and has_async_adapter(client_name)
+        and native_burst_ok
+    )
     build = create_async_adapter if native else create_adapter
     adapter = build(
         client_name,
@@ -196,25 +217,29 @@ def main(argv=None) -> int:
     gc.collect()
     gc_start = gc.get_count()
     state["phase"] = "warmup"
-    warmup_end = time.perf_counter() + warmup_s
-    driver.run_loop(
-        state,
-        topic=topic,
-        qos=qos,
-        body=body,
-        corpus=corpus,
-        run_id=run_id,
-        outstanding=outstanding,
-        cadence=cadence,
-        until=warmup_end,
-        target_rate=open_loop_rate,
-        properties_builder=_properties_builder(cfg, adapter),
-        force_header=bool(cfg.get("force_header", False)),
-        sequence_start=1 << 40,
-        memory_guard=memory_guard,
-        sequence_exact_limit=sequence_exact_limit,
-        track_sequences=track_sequences,
-    )
+    if submit_count is None:
+        warmup_end = time.perf_counter() + warmup_s
+        driver.run_loop(
+            state,
+            topic=topic,
+            qos=qos,
+            body=body,
+            corpus=corpus,
+            run_id=run_id,
+            outstanding=outstanding,
+            cadence=cadence,
+            until=warmup_end,
+            target_rate=open_loop_rate,
+            properties_builder=_properties_builder(cfg, adapter),
+            force_header=bool(cfg.get("force_header", False)),
+            sequence_start=1 << 40,
+            memory_guard=memory_guard,
+            sequence_exact_limit=sequence_exact_limit,
+            track_sequences=track_sequences,
+        )
+    else:
+        # Do not fill the queue during warmup: the measurement is a single burst.
+        driver.sleep(warmup_s)
 
     # Drain warmup outstanding; fail closed if still active when the deadline hits.
     drain_warmup = time.perf_counter() + min(drain_s, 5.0)
@@ -281,26 +306,42 @@ def main(argv=None) -> int:
     cpu_ns_start = time.process_time_ns()
     t0 = time.perf_counter()
     measure_end = t0 + duration_s
-    measure_sequences = driver.run_loop(
-        state,
-        topic=topic,
-        qos=qos,
-        body=body,
-        corpus=corpus,
-        run_id=run_id,
-        outstanding=outstanding,
-        cadence=cadence,
-        until=measure_end,
-        target_rate=open_loop_rate,
-        properties_builder=_properties_builder(cfg, adapter),
-        batch_size=int(cfg.get("batch_size", 64)) if cadence == "batch64" else 1,
-        reset_sequence=True,
-        force_header=bool(cfg.get("force_header", False)),
-        memory_guard=memory_guard,
-        sequence_exact_limit=sequence_exact_limit,
-        track_sequences=track_sequences,
-    )
-    t1 = min(time.perf_counter(), measure_end)
+    if submit_count is not None:
+        measure_sequences = driver.submit_burst(
+            state,
+            topic=topic,
+            qos=qos,
+            body=body,
+            corpus=corpus,
+            run_id=run_id,
+            submit_count=submit_count,
+            properties_builder=_properties_builder(cfg, adapter),
+            force_header=bool(cfg.get("force_header", False)),
+            sequence_exact_limit=sequence_exact_limit,
+            track_sequences=track_sequences,
+        )
+        t1 = time.perf_counter()
+    else:
+        measure_sequences = driver.run_loop(
+            state,
+            topic=topic,
+            qos=qos,
+            body=body,
+            corpus=corpus,
+            run_id=run_id,
+            outstanding=outstanding,
+            cadence=cadence,
+            until=measure_end,
+            target_rate=open_loop_rate,
+            properties_builder=_properties_builder(cfg, adapter),
+            batch_size=int(cfg.get("batch_size", 64)) if cadence == "batch64" else 1,
+            reset_sequence=True,
+            force_header=bool(cfg.get("force_header", False)),
+            memory_guard=memory_guard,
+            sequence_exact_limit=sequence_exact_limit,
+            track_sequences=track_sequences,
+        )
+        t1 = min(time.perf_counter(), measure_end)
     cpu_ns_in_window = time.process_time_ns() - cpu_ns_start
     # One index is all the phase partition needs: everything logged after this
     # arrived during the drain. More accurate than the old test, too, which read
@@ -409,6 +450,15 @@ def main(argv=None) -> int:
         **identity,
         **counters,
     }
+    if submit_count is not None:
+        result["queue_accounting"] = {
+            "submit_count": submit_count,
+            "offered": counters["offered"],
+            "accepted": counters["publish_accepted"],
+            "rejected": counters["sync_rejected"],
+            "expected_accepts": cfg.get("expected_accepts"),
+            "expected_rejects": cfg.get("expected_rejects"),
+        }
     write_json(cfg["result_path"], result)
     return 0
 
@@ -589,6 +639,9 @@ class _SyncDriver:
     def run_loop(self, state, **kwargs):
         return _run_publish_loop(self.adapter, state, **kwargs)
 
+    def submit_burst(self, state, **kwargs):
+        return _run_submit_burst(self.adapter, state, **kwargs)
+
     def close(self):
         self.adapter.disconnect()
         self.adapter.loop_stop()
@@ -627,6 +680,11 @@ class _AsyncDriver:
     def run_loop(self, state, **kwargs):
         return self.loop.run_until_complete(
             _run_publish_loop_async(self.adapter, state, **kwargs)
+        )
+
+    def submit_burst(self, state, **kwargs):
+        return self.loop.run_until_complete(
+            _run_submit_burst_on_loop(self.adapter, state, **kwargs)
         )
 
     def close(self):
@@ -677,6 +735,161 @@ def _count_completion_live(state, qos, value) -> None:
         state["overflow_during_drain"] += 1
     else:
         state["overflow_in_window"] += 1
+
+
+def _run_submit_burst(
+    adapter,
+    state,
+    *,
+    topic,
+    qos,
+    body,
+    corpus,
+    run_id,
+    submit_count,
+    properties_builder,
+    force_header=False,
+    sequence_exact_limit=DEFAULT_SEQUENCE_EXACT_LIMIT,
+    track_sequences=True,
+):
+    """Fire ``submit_count`` publishes without waiting for completions.
+
+    This is the queue-rejection protocol: the outstanding gate would hide the
+    queue, so every call is issued immediately and accept/reject is the score.
+    """
+    stamp = _make_stamper(body, corpus, run_id, force_header)
+    sent_sequences = sequence_tracker(sequence_exact_limit, enabled=track_sequences)
+    lock = state["lock"]
+    n_offered = n_calls = n_submitted = 0
+    n_sync_rejected = n_accepted = n_rejected = 0
+    for sequence in range(1, int(submit_count) + 1):
+        send_ns = time.perf_counter_ns()
+        payload = stamp(sequence, send_ns)
+        props = properties_builder()
+        n_offered += 1
+        n_calls += 1
+        info = adapter.publish(topic, payload=payload, qos=qos, retain=False, properties=props)
+        if info.rc == 0 and (qos == 0 or info.mid is not None):
+            with lock:
+                mid = info.mid
+                if mid is not None:
+                    if mid in state["seen_mids_inflight"]:
+                        state["completed_failed"] += 1
+                        state["protocol_failed"] += 1
+                    early = state["early_acks"].pop(mid, None)
+                    n_submitted += 1
+                    n_accepted += 1
+                    state["inflight_local"] += 1
+                    state["seen_mids_inflight"].add(mid)
+                    if early is not None:
+                        early_now, early_failed = early
+                        state["mid_send_ns"].pop(mid, None)
+                        _consume_completion_locked(
+                            state, qos, send_ns, early_now, early_failed, mid=mid
+                        )
+                    else:
+                        state["mid_send_ns"][mid] = send_ns
+                else:
+                    n_submitted += 1
+                    n_accepted += 1
+                sent_sequences.add(sequence)
+        else:
+            n_sync_rejected += 1
+            n_rejected += 1
+    state["offered"] += n_offered
+    state["publish_calls"] += n_calls
+    state["submitted"] += n_submitted
+    state["sync_rejected"] += n_sync_rejected
+    state["publish_accepted"] += n_accepted
+    state["publish_rejected"] += n_rejected
+    return sent_sequences
+
+
+async def _run_submit_burst_on_loop(
+    adapter,
+    state,
+    *,
+    topic,
+    qos,
+    body,
+    corpus,
+    run_id,
+    submit_count,
+    properties_builder,
+    force_header=False,
+    sequence_exact_limit=DEFAULT_SEQUENCE_EXACT_LIMIT,
+    track_sequences=True,
+):
+    """The queue-rejection protocol for a client that admits a publish on the loop.
+
+    The facade cannot answer this question for such a client. Its engine lives
+    on another thread, so the only way to learn whether a publish was admitted
+    is to reach that thread and come back - and paying that round trip per
+    submission is self-defeating here: measured at 417 us a call, the loop
+    drained 118 of 150 publishes *between* submissions, the queue never reached
+    its bound, and the run scored 150 accepts against an expected 100.
+
+    On the loop there is no crossing at all. ``publish_nowait`` is called
+    directly, refusal comes back inline as ``mid is None`` (the async adapter
+    maps ``FlowControlError`` onto it), and 150 submissions cost what paho's
+    150 cost.
+
+    Deliberately no ``await`` anywhere in the loop, not even ``sleep(0)``. The
+    streaming loop yields after a refusal so the write pump can drain, which is
+    right when the aim is throughput and wrong here: draining is what the queue
+    bound is being measured against, and a yield would turn refusals back into
+    accepts.
+    """
+    stamp = _make_stamper(body, corpus, run_id, force_header)
+    sent_sequences = sequence_tracker(sequence_exact_limit, enabled=track_sequences)
+    publish_nowait = adapter.publish_nowait
+    mid_send_ns = state["mid_send_ns"]
+    early_acks = state["early_acks"]
+    seen_inflight = state["seen_mids_inflight"]
+    n_offered = n_calls = n_submitted = 0
+    n_sync_rejected = n_accepted = n_rejected = 0
+
+    for sequence in range(1, int(submit_count) + 1):
+        send_ns = time.perf_counter_ns()
+        payload = stamp(sequence, send_ns)
+        props = properties_builder()
+        n_offered += 1
+        n_calls += 1
+        state["pending_send_ns"] = send_ns
+        mid = publish_nowait(topic, payload, qos, False, props)
+        state["pending_send_ns"] = None
+        if mid is None:
+            n_sync_rejected += 1
+            n_rejected += 1
+            continue
+        n_submitted += 1
+        n_accepted += 1
+        if mid in seen_inflight:
+            state["completed_failed"] += 1
+            state["protocol_failed"] += 1
+        state["inflight_local"] += 1
+        seen_inflight.add(mid)
+        if state["completed_inline"] == mid:
+            state["completed_inline"] = None
+        else:
+            early = early_acks.pop(mid, None)
+            if early is not None:
+                early_now, early_failed = early
+                mid_send_ns.pop(mid, None)
+                _consume_completion_locked(
+                    state, qos, send_ns, early_now, early_failed, mid=mid
+                )
+            else:
+                mid_send_ns[mid] = send_ns
+        sent_sequences.add(sequence)
+
+    state["offered"] += n_offered
+    state["publish_calls"] += n_calls
+    state["submitted"] += n_submitted
+    state["sync_rejected"] += n_sync_rejected
+    state["publish_accepted"] += n_accepted
+    state["publish_rejected"] += n_rejected
+    return sent_sequences
 
 
 def _properties_builder(cfg, adapter):

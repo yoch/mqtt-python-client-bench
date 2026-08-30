@@ -27,12 +27,14 @@ from mqtt_client_bench.broker import (
     DEFAULT_PORT,
     DEFAULT_TLS_PORT,
     EMQTT_BENCH_IMAGE,
+    apply_receive_maximum,
     broker_container_name,
     broker_down,
     broker_up,
     ensure_certs,
     image_digest,
     parse_broker_endpoint,
+    restore_receive_maximum,
     wait_for_broker,
 )
 from mqtt_client_bench.control import BarrierServer, read_json, wait_for_file, write_json
@@ -88,6 +90,7 @@ from mqtt_client_bench.telemetry import (
     process_memory_peaks,
     temporarily_pinned,
 )
+from mqtt_client_bench.retained import clear_retained_snapshot, seed_retained_snapshot
 from mqtt_client_bench.workloads import (
     PAYLOAD_SPECS,
     callback_match_loadgen_topic,
@@ -371,6 +374,8 @@ def reconcile_ingress_loadgen(
     }
     if point.get("topology") not in ("subscriber_ingress", "broker_ceiling"):
         return result
+    if point.get("retained_count") is not None:
+        return result
     if point.get("cadence") in ("burst", "microburst"):
         return result
     if not loadgen_stats or loadgen_stats.get("mode") == "sub":
@@ -477,12 +482,6 @@ def unsupported_features(point: dict, client: str = "paho") -> List[str]:
     something else than what the point claims.
     """
     missing = []
-    if point.get("receive_maximum") is not None:
-        missing.append("receive_maximum")
-    if point.get("retained_count") is not None:
-        missing.append("retained_count")
-    if point.get("submit_count") is not None:
-        missing.append("queue_rejection_protocol")
     outage_s = point.get("outage_s")
     if outage_s is not None:
         # The outage has to sit *inside* the measure window with traffic on both
@@ -552,6 +551,32 @@ def _integrity_failed(integ: dict) -> bool:
     return int(integ.get("missing") or 0) > 0 or int(integ.get("unexpected") or 0) > 0
 
 
+def queue_accounting_reasons(point: dict, worker_results: List[dict]) -> List[str]:
+    """Fail closed when a submit_count point never exercises the outbound queue."""
+    submit_count = point.get("submit_count")
+    if submit_count is None:
+        return []
+    pub = next((w for w in worker_results if w.get("role") == "publisher"), None)
+    if pub is None:
+        return ["queue_rejection_missing_publisher"]
+    accepted = int(pub.get("publish_accepted") or pub.get("submitted") or 0)
+    rejected = int(pub.get("sync_rejected") or pub.get("publish_rejected") or 0)
+    offered = int(pub.get("offered") or pub.get("publish_calls") or 0)
+    reasons: List[str] = []
+    if offered != int(submit_count):
+        reasons.append(f"queue_submit_count_mismatch:{offered}/{int(submit_count)}")
+    if rejected == 0 or accepted == int(submit_count):
+        reasons.append("queue_never_rejected")
+    expected_a = point.get("expected_accepts")
+    expected_r = point.get("expected_rejects")
+    # ±1 slack: some libraries count the in-flight slot inside max_queued.
+    if expected_a is not None and abs(accepted - int(expected_a)) > 1:
+        reasons.append(f"queue_accepts_mismatch:{accepted}/{int(expected_a)}")
+    if expected_r is not None and abs(rejected - int(expected_r)) > 1:
+        reasons.append(f"queue_rejects_mismatch:{rejected}/{int(expected_r)}")
+    return reasons
+
+
 def validate_run(
     point: dict,
     worker_results: List[dict],
@@ -573,7 +598,9 @@ def validate_run(
             # measure window is truncated: the number means nothing.
             reasons.append(f"memory_guard_tripped:{int(tripped) // 1024}MB")
         failed = int(result.get("completed_failed") or result.get("protocol_failed") or 0)
-        if failed:
+        # Queue-rejection treats a full outbound queue as the measurement, not a
+        # protocol failure; some adapters surface QUEUE_FULL via on_publish too.
+        if failed and point.get("submit_count") is None:
             reasons.append("protocol_failed")
         timed_out = int(result.get("timed_out") or 0)
         completed = int(result.get("completed_in_window") or 0)
@@ -633,9 +660,17 @@ def validate_run(
         if offer is None:
             offer = loadgen_stats.get("nominal_rate")
 
+    reasons.extend(queue_accounting_reasons(point, worker_results))
+
     # An ingress run where the loadgen emitted traffic but nothing was delivered
     # indicates a topic/filter mismatch or a broken subscriber, not a client score.
-    if topology == "subscriber_ingress":
+    if topology == "subscriber_ingress" and point.get("retained_count") is not None:
+        delivered = sum(
+            int(r.get("subscriber_delivered") or 0) for r in worker_results if r.get("role") == "subscriber"
+        )
+        if delivered == 0:
+            reasons.append("retained_snapshot_empty")
+    elif topology == "subscriber_ingress":
         parsed = ((loadgen_stats or {}).get("parsed") or {})
         emitted = parsed.get("last_total")
         delivered = sum(int(r.get("subscriber_delivered") or 0) for r in worker_results if r.get("role") == "subscriber")
@@ -957,6 +992,8 @@ def run_point(
                 "overlapping_callbacks", "subscription", "topic_topology", "subscription_count",
                 "keepalive", "batch_size", "metric_sample_limit", "integrity_sequence_limit",
                 "max_harness_payload_bytes",
+                "submit_count", "expected_accepts", "expected_rejects",
+                "receive_maximum", "retained_count", "defer_subscribe",
             ) if k in point or point.get(k) is not None},
         }
         # Fill defaults from point always.
@@ -983,6 +1020,13 @@ def run_point(
             cfg.setdefault(key, point.get(key, default))
         if "force_header" in point:
             cfg["force_header"] = point["force_header"]
+        # The accounting protocol needs an admission verdict at the call site,
+        # and nothing awaited between submissions - an awaited native publish
+        # drains the queue instead of filling it. Which path delivers that is
+        # the worker's call, not this one: for a library that admits a publish
+        # on its loop the native path answers inline and the facade is the one
+        # that cannot, because its engine is on another thread and every call
+        # would pay a round trip. See `publisher.native_burst_ok`.
         return cfg
 
     loadgen = None
@@ -997,8 +1041,47 @@ def run_point(
     barrier_error = None
     requested_mqtt_v: Optional[int] = None
     loadgen_mqtt_v: Optional[int] = None
+    receive_maximum_applied = False
+    retained_seeded = 0
 
     try:
+        receive_maximum = point.get("receive_maximum")
+        if receive_maximum is not None:
+            if not managed_broker:
+                return {
+                    "schema_version": 1,
+                    "harness_fingerprint": HARNESS_FINGERPRINT,
+                    "run_id": run_id,
+                    "started_at": started_at,
+                    "finished_at": _utc_now(),
+                    "host_state": host_state,
+                    "point": point,
+                    "client": client,
+                    "client_path": client_path,
+                    "status": "inconclusive",
+                    "reasons": ["not_implemented:receive_maximum_requires_managed_broker"],
+                    "workers": [],
+                }
+            receive_maximum_applied = True
+            try:
+                overlay = apply_receive_maximum(int(receive_maximum))
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "schema_version": 1,
+                    "harness_fingerprint": HARNESS_FINGERPRINT,
+                    "run_id": run_id,
+                    "started_at": started_at,
+                    "finished_at": _utc_now(),
+                    "host_state": host_state,
+                    "point": point,
+                    "client": client,
+                    "client_path": client_path,
+                    "status": "inconclusive",
+                    "reasons": [f"receive_maximum_overlay_failed:{exc}"],
+                    "workers": [],
+                }
+            receive_maximum_applied = True
+            point["broker_receive_maximum"] = overlay["receive_maximum"]
         if topology == "publisher_only":
             cfg = base_cfg("publisher", "publisher")
             # Nobody will read the published sequences back: integrity is
@@ -1031,13 +1114,41 @@ def run_point(
             expected_workers = 1 + n_sub
 
         elif topology == "subscriber_ingress":
+            retained_count = point.get("retained_count")
+            if retained_count is not None:
+                payload_name = point.get("payload", "telemetry256")
+                payload_size = int(PAYLOAD_SPECS.get(payload_name, {"size": 256})["size"])
+                try:
+                    seed_retained_snapshot(
+                        host,
+                        endpoint_port,
+                        run_id,
+                        int(retained_count),
+                        payload_size=payload_size,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return {
+                        "schema_version": 1,
+                        "harness_fingerprint": HARNESS_FINGERPRINT,
+                        "run_id": run_id,
+                        "started_at": started_at,
+                        "finished_at": _utc_now(),
+                        "host_state": host_state,
+                        "point": point,
+                        "client": client,
+                        "client_path": client_path,
+                        "status": "inconclusive",
+                        "reasons": [f"retained_seed_failed:{exc}"],
+                        "workers": [],
+                    }
+                retained_seeded = int(retained_count)
             sub_cfg = base_cfg("subscriber", "subscriber")
             sub_path = work_dir / f"subscriber-{run_id}.cfg.json"
             write_json(str(sub_path), sub_cfg)
             workers.append(_spawn_role("subscriber.py", str(sub_path), cpusets.get("sut")))
             configs.append(sub_cfg)
             expected_workers = 1
-            # Start loadgen after subscriber ready.
+            # Start loadgen after subscriber ready (skipped for retained snapshot).
 
         elif topology == "broker_ceiling":
             # emqtt-bench pub + emqtt-bench sub only — no Python SUT.
@@ -1141,7 +1252,7 @@ def run_point(
         cadence = str(point.get("cadence", "capacity"))
         burst_ingress = topology == "subscriber_ingress" and cadence in ("burst", "microburst")
 
-        if topology in ("subscriber_ingress", "broker_ceiling"):
+        if topology in ("subscriber_ingress", "broker_ceiling") and not point.get("retained_count"):
             clients = int(point.get("loadgen_clients", 32) or 32)
             payload = point.get("payload", "telemetry256")
             size = PAYLOAD_SPECS.get(payload, {"size": 256})["size"]
@@ -1561,6 +1672,16 @@ def run_point(
                 pass
         if network != "localhost":
             clear_profile()
+        if receive_maximum_applied:
+            try:
+                restore_receive_maximum()
+            except Exception:  # noqa: BLE001
+                pass
+        if retained_seeded:
+            try:
+                clear_retained_snapshot(host, endpoint_port, run_id, retained_seeded)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _run_connect_churn(point, client_name, client_path, host, port, tls, certs) -> dict:

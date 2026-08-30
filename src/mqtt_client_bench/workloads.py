@@ -250,6 +250,21 @@ def wildcard_hash(run_id: str) -> str:
     return f"bench/{run_id}/org/acme/#"
 
 
+def retained_topic(run_id: str, index: int) -> str:
+    """Per-message topic for a retained-bootstrap snapshot."""
+    return f"bench/{run_id}/retained/{int(index):06d}"
+
+
+def retained_topics(run_id: str, count: int) -> List[str]:
+    if count < 1:
+        raise ValueError("retained count must be >= 1")
+    return [retained_topic(run_id, i) for i in range(count)]
+
+
+def retained_wildcard(run_id: str) -> str:
+    return f"bench/{run_id}/retained/#"
+
+
 def deep_topic(run_id: str, depth: int = 32) -> str:
     parts = [f"bench/{run_id}/deep"]
     for i in range(depth - 2):
