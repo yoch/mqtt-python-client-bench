@@ -160,6 +160,18 @@ def create_adapter(
     )
 
 
+def get_async_adapter_class(name: str) -> Type:
+    """The native adapter class, for callers that need its capabilities.
+
+    Reading a capability must not require building an adapter: the publisher
+    decides which drive path to take *before* it has one.
+    """
+    key = name.strip().lower()
+    if key not in _ASYNC_ADAPTERS:
+        raise KeyError(f"no native async adapter for {name!r}")
+    return _ASYNC_ADAPTERS[key]
+
+
 def has_async_adapter(client: str) -> bool:
     """True when this client can be driven without a bridge."""
     cls = _ASYNC_ADAPTERS.get(client)

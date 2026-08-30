@@ -1020,10 +1020,13 @@ def run_point(
             cfg.setdefault(key, point.get(key, default))
         if "force_header" in point:
             cfg["force_header"] = point["force_header"]
-        # Awaited native publish never fills an outbound queue; the accounting
-        # protocol needs the sync publish() return code.
-        if point.get("submit_count") is not None:
-            cfg["native_async"] = False
+        # The accounting protocol needs an admission verdict at the call site,
+        # and nothing awaited between submissions - an awaited native publish
+        # drains the queue instead of filling it. Which path delivers that is
+        # the worker's call, not this one: for a library that admits a publish
+        # on its loop the native path answers inline and the facade is the one
+        # that cannot, because its engine is on another thread and every call
+        # would pay a round trip. See `publisher.native_burst_ok`.
         return cfg
 
     loadgen = None

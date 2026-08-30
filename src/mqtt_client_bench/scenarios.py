@@ -514,7 +514,14 @@ SCENARIOS: List[Scenario] = [
         description=(
             "Outbound queue accounting: submit 150 QoS1 publishes against "
             "inflight=1 and max_queued=100, and record accept vs reject. "
-            "Forced onto the sync facade so publish() can return QUEUE_FULL."
+            "Submissions never wait for completions - the point is to reach the "
+            "queue bound, and anything awaited between calls drains it. A "
+            "client that admits a publish on its loop (mqttium, gmqtt) is "
+            "driven natively, where refusal comes back inline; everything else "
+            "runs the sync facade, where publish() returns QUEUE_FULL. "
+            "mqttium-compat may return rc=0 and only later set the handle to "
+            "QUEUE_SIZE (documented Paho-facade contract), so it stays "
+            "inconclusive."
         ),
         qos_publish=1,
         payload="telemetry256",

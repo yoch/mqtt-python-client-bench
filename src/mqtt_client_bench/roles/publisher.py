@@ -27,6 +27,7 @@ from mqtt_client_bench.adapters.registry import (
     adapter_identity,
     create_adapter,
     create_async_adapter,
+    get_async_adapter_class,
     has_async_adapter,
 )
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
@@ -146,12 +147,22 @@ def main(argv=None) -> int:
     # A client with a native path is driven on its own loop unless the point
     # explicitly asks otherwise. Which path ran is recorded in the result: a run
     # through the bridge and a native run are not comparable with each other.
-    # Queue-rejection fires publish() without waiting: an awaited native path
-    # would never fill the outbound queue, so that protocol stays on the facade.
+    #
+    # Queue-rejection fires publish() without waiting for completions, and an
+    # *awaited* native path would drain the outbound queue between submissions
+    # and never fill it. That is true of await-only libraries and false of the
+    # ones that admit a publish on the loop: for those, submitting without
+    # awaiting *is* the native shape, and it is the facade that cannot answer -
+    # its engine is on another thread, so admission costs a round trip per call
+    # that drains the queue far more thoroughly than any await would.
+    native_burst_ok = submit_count is None or (
+        has_async_adapter(client_name)
+        and get_async_adapter_class(client_name).capabilities().publish_sync_on_loop
+    )
     native = (
         bool(cfg.get("native_async", True))
         and has_async_adapter(client_name)
-        and submit_count is None
+        and native_burst_ok
     )
     build = create_async_adapter if native else create_adapter
     adapter = build(
@@ -296,8 +307,7 @@ def main(argv=None) -> int:
     t0 = time.perf_counter()
     measure_end = t0 + duration_s
     if submit_count is not None:
-        measure_sequences = _run_submit_burst(
-            adapter,
+        measure_sequences = driver.submit_burst(
             state,
             topic=topic,
             qos=qos,
@@ -629,6 +639,9 @@ class _SyncDriver:
     def run_loop(self, state, **kwargs):
         return _run_publish_loop(self.adapter, state, **kwargs)
 
+    def submit_burst(self, state, **kwargs):
+        return _run_submit_burst(self.adapter, state, **kwargs)
+
     def close(self):
         self.adapter.disconnect()
         self.adapter.loop_stop()
@@ -667,6 +680,11 @@ class _AsyncDriver:
     def run_loop(self, state, **kwargs):
         return self.loop.run_until_complete(
             _run_publish_loop_async(self.adapter, state, **kwargs)
+        )
+
+    def submit_burst(self, state, **kwargs):
+        return self.loop.run_until_complete(
+            _run_submit_burst_on_loop(self.adapter, state, **kwargs)
         )
 
     def close(self):
@@ -778,6 +796,93 @@ def _run_submit_burst(
         else:
             n_sync_rejected += 1
             n_rejected += 1
+    state["offered"] += n_offered
+    state["publish_calls"] += n_calls
+    state["submitted"] += n_submitted
+    state["sync_rejected"] += n_sync_rejected
+    state["publish_accepted"] += n_accepted
+    state["publish_rejected"] += n_rejected
+    return sent_sequences
+
+
+async def _run_submit_burst_on_loop(
+    adapter,
+    state,
+    *,
+    topic,
+    qos,
+    body,
+    corpus,
+    run_id,
+    submit_count,
+    properties_builder,
+    force_header=False,
+    sequence_exact_limit=DEFAULT_SEQUENCE_EXACT_LIMIT,
+    track_sequences=True,
+):
+    """The queue-rejection protocol for a client that admits a publish on the loop.
+
+    The facade cannot answer this question for such a client. Its engine lives
+    on another thread, so the only way to learn whether a publish was admitted
+    is to reach that thread and come back - and paying that round trip per
+    submission is self-defeating here: measured at 417 us a call, the loop
+    drained 118 of 150 publishes *between* submissions, the queue never reached
+    its bound, and the run scored 150 accepts against an expected 100.
+
+    On the loop there is no crossing at all. ``publish_nowait`` is called
+    directly, refusal comes back inline as ``mid is None`` (the async adapter
+    maps ``FlowControlError`` onto it), and 150 submissions cost what paho's
+    150 cost.
+
+    Deliberately no ``await`` anywhere in the loop, not even ``sleep(0)``. The
+    streaming loop yields after a refusal so the write pump can drain, which is
+    right when the aim is throughput and wrong here: draining is what the queue
+    bound is being measured against, and a yield would turn refusals back into
+    accepts.
+    """
+    stamp = _make_stamper(body, corpus, run_id, force_header)
+    sent_sequences = sequence_tracker(sequence_exact_limit, enabled=track_sequences)
+    publish_nowait = adapter.publish_nowait
+    mid_send_ns = state["mid_send_ns"]
+    early_acks = state["early_acks"]
+    seen_inflight = state["seen_mids_inflight"]
+    n_offered = n_calls = n_submitted = 0
+    n_sync_rejected = n_accepted = n_rejected = 0
+
+    for sequence in range(1, int(submit_count) + 1):
+        send_ns = time.perf_counter_ns()
+        payload = stamp(sequence, send_ns)
+        props = properties_builder()
+        n_offered += 1
+        n_calls += 1
+        state["pending_send_ns"] = send_ns
+        mid = publish_nowait(topic, payload, qos, False, props)
+        state["pending_send_ns"] = None
+        if mid is None:
+            n_sync_rejected += 1
+            n_rejected += 1
+            continue
+        n_submitted += 1
+        n_accepted += 1
+        if mid in seen_inflight:
+            state["completed_failed"] += 1
+            state["protocol_failed"] += 1
+        state["inflight_local"] += 1
+        seen_inflight.add(mid)
+        if state["completed_inline"] == mid:
+            state["completed_inline"] = None
+        else:
+            early = early_acks.pop(mid, None)
+            if early is not None:
+                early_now, early_failed = early
+                mid_send_ns.pop(mid, None)
+                _consume_completion_locked(
+                    state, qos, send_ns, early_now, early_failed, mid=mid
+                )
+            else:
+                mid_send_ns[mid] = send_ns
+        sent_sequences.add(sequence)
+
     state["offered"] += n_offered
     state["publish_calls"] += n_calls
     state["submitted"] += n_submitted
