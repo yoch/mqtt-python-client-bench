@@ -455,7 +455,38 @@ class HostNotIdle(RuntimeError):
 
 
 HAMMER_THREAD_GRID = (1, 2, 4, 8)
-CEILING_PROBE_S = 5
+
+# Total wall-clock budget for one calibration, in seconds.
+#
+# Generous on purpose. A host is calibrated once and the profile is then
+# committed and read by every campaign that follows, so a few minutes spent
+# here is bought back many times over — and short probes were visibly not
+# enough. At five seconds per step the thread sweep read 131k / 326k / 637k /
+# 217k on one run and 174k / 232k / 222k / 226k on the next: the ceiling was in
+# the right band both times, but the *best thread count* moved from 4 to 2,
+# which is not a number worth recording if it changes between two consecutive
+# measurements of the same machine.
+CALIBRATION_BUDGET_S = 300.0
+
+# How the budget is split. The thread sweep gets the bulk because it is the
+# noisiest measurement and the one whose answer is a choice, not a magnitude.
+_BUDGET_HARNESS_SHARE = 0.10
+_BUDGET_FANOUT_SHARE = 0.10
+_BUDGET_LOADGEN_SHARE = 0.80
+
+
+def probe_durations(budget_s: float = CALIBRATION_BUDGET_S) -> Dict[str, Any]:
+    """Split a calibration budget across the probes."""
+    budget = max(30.0, float(budget_s))
+    harness_total = budget * _BUDGET_HARNESS_SHARE
+    passes = max(5, int(harness_total / HARNESS_COST_WINDOW_S))
+    per_step = budget * _BUDGET_LOADGEN_SHARE / max(1, len(HAMMER_THREAD_GRID))
+    return {
+        "budget_s": budget,
+        "harness_passes": passes,
+        "loadgen_step_s": max(2, int(per_step)),
+        "fanout_s": max(2, int(budget * _BUDGET_FANOUT_SHARE)),
+    }
 
 
 def _run_hammer(mode: str, *, cpuset: Optional[str], clients: int, seconds: int,
@@ -483,7 +514,7 @@ def _run_hammer(mode: str, *, cpuset: Optional[str], clients: int, seconds: int,
     return None
 
 
-def measure_loadgen_ceiling(*, cpuset: Optional[str], seconds: int = CEILING_PROBE_S) -> Dict[str, Any]:
+def measure_loadgen_ceiling(*, cpuset: Optional[str], seconds: int) -> Dict[str, Any]:
     """What this host's loadgen can put on the wire, with nothing consuming it.
 
     No subscriber. That is the whole point of this probe: attach one and
@@ -517,7 +548,7 @@ def measure_loadgen_ceiling(*, cpuset: Optional[str], seconds: int = CEILING_PRO
 
 
 def measure_broker_fanout_ceiling(
-    *, pub_cpuset: Optional[str], sub_cpuset: Optional[str], seconds: int = CEILING_PROBE_S
+    *, pub_cpuset: Optional[str], sub_cpuset: Optional[str], seconds: int
 ) -> Dict[str, Any]:
     """What the broker forwards with one subscriber attached.
 
@@ -555,7 +586,7 @@ def calibrate_host(
     *,
     profile: str = "standard",
     role: str = "runner",
-    passes: int = HARNESS_COST_PASSES,
+    budget_s: float = CALIBRATION_BUDGET_S,
     skip_ceilings: bool = False,
     allow_busy: bool = False,
 ) -> Dict[str, Any]:
@@ -576,12 +607,13 @@ def calibrate_host(
             "--allow-busy to write a profile that can never be the reference."
         )
 
+    plan = probe_durations(budget_s)
     env = environment_metadata()
     identity = host_identity(env)
-    harness = measure_harness_cost_ns(passes=passes)
+    harness = measure_harness_cost_ns(passes=plan["harness_passes"])
 
     ceilings: Dict[str, Any] = {"harness_cost_ns_per_message": harness["ns_per_message"]}
-    probes: Dict[str, Any] = {"harness_cost": harness}
+    probes: Dict[str, Any] = {"harness_cost": harness, "budget": plan}
     if not skip_ceilings:
         from mqtt_client_bench.telemetry import allocate_cpuset
 
@@ -589,9 +621,13 @@ def calibrate_host(
             cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile=profile)
         except RuntimeError:
             cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile="smoke")
-        loadgen = measure_loadgen_ceiling(cpuset=cpusets.get("loadgen"))
+        loadgen = measure_loadgen_ceiling(
+            cpuset=cpusets.get("loadgen"), seconds=plan["loadgen_step_s"]
+        )
         fanout = measure_broker_fanout_ceiling(
-            pub_cpuset=cpusets.get("loadgen"), sub_cpuset=cpusets.get("orch")
+            pub_cpuset=cpusets.get("loadgen"),
+            sub_cpuset=cpusets.get("orch"),
+            seconds=plan["fanout_s"],
         )
         probes["loadgen"] = loadgen
         probes["broker_fanout"] = fanout
