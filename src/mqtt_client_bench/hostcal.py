@@ -305,42 +305,99 @@ def _ceiling_from_steps(steps: List[Dict[str, Any]]) -> Optional[float]:
 # directly rather than merely sharing the machine.
 IDLE_LOADAVG_PER_CPU_MAX = 0.2
 
-# Seconds of loadavg observation before probing. A machine that has just
-# finished something reports a decaying 1-minute average that looks worse than
-# it is, and one that is about to start something looks better; sampling both
-# ends catches the second case, which is the dangerous one.
+# Seconds of observation before probing. A machine that has just finished
+# something reports a decaying 1-minute average that looks worse than it is, and
+# one that is about to start something looks better; sampling both ends catches
+# the second case, which is the dangerous one.
 IDLE_SETTLE_S = 3.0
+
+# Busy share of all CPUs over the settle window, from /proc/stat.
+#
+# This is the check that matters, and loadavg alone does not do it: measured on
+# this workstation with an editor, a browser and a chat client running — better
+# than 50% of eight CPUs between them — loadavg read 1.38 against a 1.60 gate
+# and sailed through. Load average counts tasks in the run queue; interactive
+# applications burn CPU in short bursts that are rarely queued at the instant
+# it is sampled. Utilisation sees them.
+IDLE_MAX_BUSY_PCT = 10.0
 
 # Spread of the harness-cost passes above which the machine was evidently not
 # quiet *during* the probe, whatever loadavg claimed before it.
 IDLE_MAX_PROBE_SPREAD_PCT = 35.0
 
 
+def _cpu_totals() -> Optional[tuple]:
+    """(idle_jiffies, total_jiffies) from /proc/stat, or None off Linux."""
+    try:
+        with open("/proc/stat", "r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("cpu "):
+                    fields = [int(x) for x in line.split()[1:]]
+                    break
+            else:
+                return None
+    except OSError:
+        return None
+    if len(fields) < 5:
+        return None
+    # user nice system idle iowait irq softirq steal ...
+    idle = fields[3] + fields[4]
+    return idle, sum(fields)
+
+
+def busy_pct_over(window_s: float) -> Optional[float]:
+    """Share of all CPUs actually busy over ``window_s``."""
+    first = _cpu_totals()
+    if first is None:
+        time.sleep(window_s)
+        return None
+    time.sleep(window_s)
+    second = _cpu_totals()
+    if second is None:
+        return None
+    d_idle = second[0] - first[0]
+    d_total = second[1] - first[1]
+    if d_total <= 0:
+        return None
+    return 100.0 * (1.0 - d_idle / d_total)
+
+
 def check_host_idle(*, strict: bool = True) -> Dict[str, Any]:
     """Is this machine quiet enough to be measured?
 
-    Returns the observation and a list of reasons it is not. The caller decides
-    what to do with them; nothing here writes anything.
+    Two signals, because neither is sufficient alone: CPU utilisation over the
+    settle window catches the bursty interactive load that loadavg misses, and
+    loadavg catches a long run queue of tasks that are waiting rather than
+    burning cycles.
+
+    Returns the observation and a list of reasons it is not idle. The caller
+    decides what to do with them; nothing here writes anything.
     """
     import os as _os
 
     cpus = _os.cpu_count() or 1
-    threshold = IDLE_LOADAVG_PER_CPU_MAX if strict else 1.0
+    load_threshold = IDLE_LOADAVG_PER_CPU_MAX if strict else 1.0
+    busy_threshold = IDLE_MAX_BUSY_PCT if strict else 60.0
     before = _os.getloadavg()[0]
-    time.sleep(IDLE_SETTLE_S)
+    busy = busy_pct_over(IDLE_SETTLE_S)
     after = _os.getloadavg()[0]
     observed = max(before, after)
+
     reasons: List[str] = []
-    if observed > threshold * cpus:
+    if busy is not None and busy > busy_threshold:
+        reasons.append(f"host_busy:cpu={busy:.1f}% over {busy_threshold:.0f}%")
+    if observed > load_threshold * cpus:
         reasons.append(
-            f"host_busy:loadavg={observed:.2f} over {threshold * cpus:.2f} "
-            f"({threshold} x {cpus} cpus)"
+            f"host_busy:loadavg={observed:.2f} over {load_threshold * cpus:.2f} "
+            f"({load_threshold} x {cpus} cpus)"
         )
     return {
         "loadavg_before": round(before, 2),
         "loadavg_after": round(after, 2),
+        "busy_pct": round(busy, 1) if busy is not None else None,
         "cpu_count": cpus,
-        "threshold": round(threshold * cpus, 2),
+        "loadavg_threshold": round(load_threshold * cpus, 2),
+        "busy_pct_threshold": busy_threshold,
         "idle": not reasons,
         "reasons": reasons,
     }
