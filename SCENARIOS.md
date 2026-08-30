@@ -370,7 +370,7 @@ Two stronger outages were considered and are **not** implemented:
 - **Goal**: accept/reject accounting when the outbound queue is the gate.
 - **Suite**: `full` · tags `functional` · topology `publisher_only` · QoS 1.
 - **Variant**: `submit_count=150`, `inflight=1`, `max_queued=100`, `expected_accepts=100`, `expected_rejects=50`.
-- **Wiring**: the publisher skips warmup traffic, then at `T_MEASURE` fires 150 `publish()` calls **without** the outstanding gate. Driven on the sync facade so `publish()` can return `QUEUE_FULL` (an awaited native path would never fill the queue).
+- **Wiring**: the publisher skips warmup traffic, then at `T_MEASURE` fires 150 `publish()` calls **without** the outstanding gate. Driven on the sync facade so `publish()` can return `QUEUE_FULL` (an awaited native path would never fill the queue). The native mqttium facade invokes `publish_nowait` before returning: `FlowControlError` is `rc=15` / `mid is None`, and `on_publish` is not fired (the engine never allocated a MID). `mqttium-compat` is a different contract: off-thread `publish()` may return `rc=0` and only later set the handle to `MQTT_ERR_QUEUE_SIZE` once the network loop admits or refuses — that cell stays inconclusive by design.
 - **Requires**: `max_inflight` and `max_queued`.
 - **Validation**: fail closed if the client never rejects, if the submit count drifts, or if accept/reject miss the expected counts by more than 1 (some libraries fold the in-flight slot into `max_queued`).
 - **Primary**: the `queue_accounting` block — not a throughput ranking.
