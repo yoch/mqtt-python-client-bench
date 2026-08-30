@@ -26,6 +26,8 @@ import hashlib
 import json
 import os
 import platform
+import shutil
+import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
@@ -217,8 +219,7 @@ _FINGERPRINT_IDENTITY = (
 _FINGERPRINT_CEILINGS = (
     "harness_cost_ns_per_message",
     "loadgen_ceiling_msgs_per_s",
-    "broker_ceiling_msgs_per_s",
-    "emqtt_ceiling_msgs_per_s",
+    "broker_fanout_msgs_per_s",
 )
 
 
@@ -453,82 +454,101 @@ class HostNotIdle(RuntimeError):
     """
 
 
-def _ceiling_steps(
-    *,
-    profile: str,
-    engine: Optional[str],
-    grid: tuple,
-    with_sut_subscriber: bool = False,
-) -> List[Dict[str, Any]]:
-    """Walk `broker_ceiling_ingress` up ``grid`` and record offer vs delivered."""
-    from mqtt_client_bench.harness import run_scenario
+HAMMER_THREAD_GRID = (1, 2, 4, 8)
+CEILING_PROBE_S = 5
 
-    def transform(points: List[dict]) -> List[dict]:
-        template = points[0]
-        out = []
-        for target in grid:
-            step = dict(template)
-            step["ingress_target_msgs_per_s"] = float(target)
-            # emqtt-bench needs one client per 1000 msgs/s to hold I=1; the
-            # hammer ignores this and paces itself.
-            step["loadgen_clients"] = max(1, int(target // 1000))
-            # A ceiling probe is a host measurement, never a client ranking.
-            step["non_comparable"] = True
-            out.append(step)
-        return out
 
-    # MQTT_BENCH_LOADGEN is how the engine is chosen; `run_point` builds its
-    # LoadgenSpec with engine="auto" and never reads a per-point key, so setting
-    # one would be a knob that silently does nothing.
-    previous = os.environ.get("MQTT_BENCH_LOADGEN")
-    if engine:
-        os.environ["MQTT_BENCH_LOADGEN"] = engine
-    try:
-        doc = run_scenario(
-            "broker_ceiling_ingress",
-            profile=profile,
-            runs=1,
-            point_transform=transform,
+def _run_hammer(mode: str, *, cpuset: Optional[str], clients: int, seconds: int,
+                topic: str, rate: int = 0, host: str = "127.0.0.1", port: int = 11883):
+    """One direct hammer run; returns its own JSON line."""
+    from mqtt_client_bench.loadgen import ensure_mqtt_hammer
+
+    cmd: List[str] = []
+    if cpuset and shutil.which("taskset"):
+        cmd += ["taskset", "-c", cpuset]
+    cmd += [
+        str(ensure_mqtt_hammer()), mode, "--host", host, "--port", str(port),
+        "--topic", topic, "--clients", str(clients), "--duration", str(seconds),
+    ]
+    if mode == "pub":
+        cmd += ["--payload", "256", "--rate", str(rate)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    for line in reversed((proc.stdout or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+    return None
+
+
+def measure_loadgen_ceiling(*, cpuset: Optional[str], seconds: int = CEILING_PROBE_S) -> Dict[str, Any]:
+    """What this host's loadgen can put on the wire, with nothing consuming it.
+
+    No subscriber. That is the whole point of this probe: attach one and
+    Mosquitto has to fan out as well as decode, which roughly triples its
+    per-message cost and back-pressures the publisher to the broker's rate.
+    Measured here, the same hammer went from 198,842 msgs/s to 73,120 the
+    moment a single subscriber connected. That number is real and worth having,
+    but it is the broker's, not the loadgen's, and reading it as the loadgen's
+    is what made the first version of this probe report 64k on a host that
+    emits ten times that.
+
+    The thread count is swept rather than assumed: `HAMMER_PUB_CLIENTS = 2` is a
+    hand-tuned constant, and on this machine 4 threads emit 637k against 326k
+    for 2 and 217k for 8 -- the peak is a property of the core group, so it has
+    to be found on each host, not inherited from this one.
+    """
+    steps = []
+    for clients in HAMMER_THREAD_GRID:
+        parsed = _run_hammer(
+            "pub", cpuset=cpuset, clients=clients, seconds=seconds,
+            topic="hostcal/loadgen", rate=0,
         )
-    finally:
-        if previous is None:
-            os.environ.pop("MQTT_BENCH_LOADGEN", None)
-        else:
-            os.environ["MQTT_BENCH_LOADGEN"] = previous
-    steps: List[Dict[str, Any]] = []
-    for entry in doc.get("results") or []:
-        point = entry.get("point") or {}
-        duration = float(point.get("duration_s") or 0.0) or None
-        for run in entry.get("runs") or []:
-            loadgen = run.get("loadgen") or {}
-            sys_counters = run.get("sys_counters") or {}
-            received = sys_counters.get("publish_received_delta")
-            steps.append(
-                {
-                    "offer_requested_msgs_per_s": point.get("ingress_target_msgs_per_s"),
-                    "loadgen_clients": point.get("loadgen_clients"),
-                    "effective_offer_msgs_per_s": run.get("effective_offer_msgs_per_s"),
-                    # What the loadgen actually put on the wire. This is the
-                    # loadgen's own ceiling; the subscriber's delivery is not.
-                    "emitted_msgs_per_s": loadgen.get("observed_pub_rate"),
-                    # What the broker decoded. $SYS is refreshed about once a
-                    # second, so this carries a second of quantisation at each
-                    # end - fine for locating a knee, not for a ranking.
-                    "broker_received_msgs_per_s": (
-                        round(received / duration, 1)
-                        if received is not None and duration
-                        else None
-                    ),
-                    # Kept as a diagnostic only: in this topology the reference
-                    # subscriber shares the loadgen core group with the
-                    # publisher, so it is the weakest link of a shape no ranking
-                    # scenario uses.
-                    "delivered_msgs_per_s": run.get("primary_msgs_per_s"),
-                    "status": run.get("status"),
-                    "bottleneck": run.get("bottleneck"),
-                }
-            )
-    return steps
+        if parsed:
+            steps.append({"clients": clients, "msgs_per_s": parsed.get("msgs_per_s")})
+    best = max(steps, key=lambda s: s.get("msgs_per_s") or 0.0, default=None)
+    return {
+        "msgs_per_s": (best or {}).get("msgs_per_s"),
+        "best_thread_count": (best or {}).get("clients"),
+        "steps": steps,
+    }
+
+
+def measure_broker_fanout_ceiling(
+    *, pub_cpuset: Optional[str], sub_cpuset: Optional[str], seconds: int = CEILING_PROBE_S
+) -> Dict[str, Any]:
+    """What the broker forwards with one subscriber attached.
+
+    Diagnostic, deliberately: this is *not* where the ingress offer comes from.
+    The core `sub_*` offer is an over-offer whose job is to make the SUT client
+    the bottleneck, and deriving it from a sustainable rate would collapse it to
+    this number and make the fastest clients neighbours of the constraint
+    instead of its subject.
+    """
+    import threading
+
+    result: Dict[str, Any] = {}
+
+    def _sub():
+        result["sub"] = _run_hammer(
+            "sub", cpuset=sub_cpuset, clients=1, seconds=seconds + 3,
+            topic="hostcal/fanout",
+        )
+
+    thread = threading.Thread(target=_sub, daemon=True)
+    thread.start()
+    time.sleep(1.0)
+    pub = _run_hammer(
+        "pub", cpuset=pub_cpuset, clients=2, seconds=seconds,
+        topic="hostcal/fanout", rate=0,
+    )
+    thread.join(timeout=seconds + 15)
+    return {
+        "msgs_per_s": (pub or {}).get("msgs_per_s"),
+        "subscriber_msgs_per_s": (result.get("sub") or {}).get("msgs_per_s"),
+    }
 
 
 def calibrate_host(
@@ -563,28 +583,22 @@ def calibrate_host(
     ceilings: Dict[str, Any] = {"harness_cost_ns_per_message": harness["ns_per_message"]}
     probes: Dict[str, Any] = {"harness_cost": harness}
     if not skip_ceilings:
-        hammer = _ceiling_steps(profile=profile, engine="hammer", grid=CEILING_GRID)
-        emqtt = _ceiling_steps(profile=profile, engine="emqtt", grid=CEILING_GRID)
-        probes["hammer_steps"] = hammer
-        probes["emqtt_steps"] = emqtt
-        # Each ceiling comes off the counter that belongs to it.
-        ceilings["loadgen_ceiling_msgs_per_s"] = _ceiling_from_steps(
-            hammer, "emitted_msgs_per_s"
+        from mqtt_client_bench.telemetry import allocate_cpuset
+
+        try:
+            cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile=profile)
+        except RuntimeError:
+            cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile="smoke")
+        loadgen = measure_loadgen_ceiling(cpuset=cpusets.get("loadgen"))
+        fanout = measure_broker_fanout_ceiling(
+            pub_cpuset=cpusets.get("loadgen"), sub_cpuset=cpusets.get("orch")
         )
-        ceilings["emqtt_ceiling_msgs_per_s"] = _ceiling_from_steps(
-            emqtt, "emitted_msgs_per_s"
-        )
-        # The broker is the common element of both walks: whichever engine
-        # pushed hardest, what the broker decoded is the broker's number.
-        broker = [
-            v
-            for v in (
-                _ceiling_from_steps(hammer, "broker_received_msgs_per_s"),
-                _ceiling_from_steps(emqtt, "broker_received_msgs_per_s"),
-            )
-            if v
-        ]
-        ceilings["broker_ceiling_msgs_per_s"] = max(broker) if broker else None
+        probes["loadgen"] = loadgen
+        probes["broker_fanout"] = fanout
+        ceilings["loadgen_ceiling_msgs_per_s"] = loadgen["msgs_per_s"]
+        ceilings["loadgen_best_thread_count"] = loadgen["best_thread_count"]
+        # Diagnostic. Named for what it is so nobody derives an offer from it.
+        ceilings["broker_fanout_msgs_per_s"] = fanout["msgs_per_s"]
 
     # The probes just saturated a core group by design. Checking idleness the
     # instant they stop measures their own tail — the loadgen winding down, the
