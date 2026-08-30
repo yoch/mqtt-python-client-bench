@@ -2228,6 +2228,168 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(inside, {int(c) for c in cpusets["sut"].split(",")})
 
 
+class HostCalibrationTests(unittest.TestCase):
+    """The host profile is what makes a number readable on another machine."""
+
+    def test_harness_cost_probe_returns_a_floor_and_its_spread(self):
+        from mqtt_client_bench.hostcal import measure_harness_cost_ns
+
+        # Two passes keep the test fast; the statistic is what is under test,
+        # not the value. The floor must be the smallest sample, and the spread
+        # must describe the samples rather than being assumed quiet.
+        result = measure_harness_cost_ns(passes=2)
+        self.assertGreater(result["ns_per_message"], 0.0)
+        self.assertLessEqual(result["ns_per_message"], result["median_ns_per_message"])
+        self.assertLessEqual(result["median_ns_per_message"], result["max_ns_per_message"])
+        self.assertEqual(result["passes"], 2)
+        self.assertGreaterEqual(result["spread_pct"], 0.0)
+
+    def test_frequency_policy_names_an_unreadable_governor(self):
+        from mqtt_client_bench.hostcal import frequency_policy
+
+        # A container reports None. It must get a name of its own, not inherit
+        # the reference host's posture by silence — that silence is exactly what
+        # let a container campaign come back valid.
+        self.assertEqual(frequency_policy({"scaling_governor": None}), "unpinned")
+        self.assertEqual(frequency_policy({"scaling_governor": "performance"}), "performance")
+        self.assertEqual(frequency_policy({"scaling_governor": "powersave"}), "governed:powersave")
+
+    def test_fingerprint_tracks_identity_and_ceilings_only(self):
+        from mqtt_client_bench.hostcal import host_fingerprint
+
+        base = {
+            "host": {
+                "cpu_model": "Test CPU",
+                "cpu_count": 8,
+                "physical_groups": 4,
+                "threads_per_group": 2,
+                "frequency_policy": "performance",
+                "hostname": "a",
+            },
+            "ceilings": {
+                "harness_cost_ns_per_message": 3500.0,
+                "loadgen_ceiling_msgs_per_s": 637000.0,
+                "broker_fanout_msgs_per_s": 73000.0,
+            },
+        }
+        fp = host_fingerprint(base)
+
+        # Hostname is identity for a human, not for a measurement.
+        renamed = json.loads(json.dumps(base))
+        renamed["host"]["hostname"] = "b"
+        self.assertEqual(host_fingerprint(renamed), fp)
+
+        # Measurement noise must not churn the digest.
+        jittered = json.loads(json.dumps(base))
+        jittered["ceilings"]["harness_cost_ns_per_message"] = 3512.0
+        self.assertEqual(host_fingerprint(jittered), fp)
+
+        # A different machine, or a real change in what it can do, must.
+        for mutation in (
+            ("host", "threads_per_group", 1),
+            ("host", "frequency_policy", "unpinned"),
+            ("ceilings", "loadgen_ceiling_msgs_per_s", 60000.0),
+        ):
+            section, key, value = mutation
+            changed = json.loads(json.dumps(base))
+            changed[section][key] = value
+            self.assertNotEqual(host_fingerprint(changed), fp, f"{key} did not move the fingerprint")
+
+    def test_cpu_utilisation_decides_when_loadavg_looks_fine(self):
+        from mqtt_client_bench import hostcal
+
+        # The case that motivated the second signal: on this workstation with an
+        # editor, a browser and a chat client running, loadavg read 0.92 against
+        # a 1.60 gate and passed, while the CPUs were 22% busy. Load average
+        # counts queued tasks; interactive load burns cycles in bursts that are
+        # rarely queued at the instant it is sampled.
+        # cpu_count is pinned: the loadavg threshold scales with it, so on a
+        # 2-core CI runner 0.92 would trip the loadavg reason this case is
+        # asserting stays silent.
+        with patch.object(hostcal, "busy_pct_over", return_value=22.2):
+            with patch("os.getloadavg", return_value=(0.92, 0.9, 0.9)):
+                with patch("os.cpu_count", return_value=8):
+                    state = hostcal.check_host_idle()
+        self.assertFalse(state["idle"])
+        self.assertTrue(any("cpu=" in r for r in state["reasons"]))
+        self.assertFalse(any("loadavg=" in r for r in state["reasons"]))
+
+        # And a genuinely quiet machine passes on both.
+        with patch.object(hostcal, "busy_pct_over", return_value=1.5):
+            with patch("os.getloadavg", return_value=(0.1, 0.1, 0.1)):
+                with patch("os.cpu_count", return_value=8):
+                    state = hostcal.check_host_idle()
+        self.assertTrue(state["idle"], state["reasons"])
+
+    def test_loadgen_ceiling_takes_the_best_thread_count(self):
+        from mqtt_client_bench import hostcal
+
+        # HAMMER_PUB_CLIENTS = 2 is a hand-tuned constant; on this machine 4
+        # threads emit roughly twice what 2 do, and 8 collapse. The peak is a
+        # property of the core group, so it is found per host.
+        runs = {1: 131299.0, 2: 326202.0, 4: 636761.0, 8: 216900.0}
+        with patch.object(
+            hostcal, "_run_hammer",
+            side_effect=lambda mode, *, clients, **kw: {"msgs_per_s": runs[clients]},
+        ):
+            result = hostcal.measure_loadgen_ceiling(cpuset=None, seconds=1)
+        self.assertEqual(result["msgs_per_s"], 636761.0)
+        self.assertEqual(result["best_thread_count"], 4)
+        self.assertEqual(len(result["steps"]), 4)
+
+    def test_fanout_ceiling_is_named_as_a_diagnostic_not_an_offer(self):
+        from mqtt_client_bench.hostcal import _FINGERPRINT_CEILINGS
+
+        # The core sub_* offer is an over-offer: its job is to make the SUT
+        # client the bottleneck. Deriving it from what the broker can sustain
+        # would collapse it to the fan-out rate - measured here at 73k against
+        # a loadgen that emits 637k - and make the fastest clients neighbours
+        # of the constraint instead of its subject.
+        self.assertIn("broker_fanout_msgs_per_s", _FINGERPRINT_CEILINGS)
+        self.assertNotIn("broker_ceiling_msgs_per_s", _FINGERPRINT_CEILINGS)
+
+    def test_budget_splits_across_the_probes(self):
+        from mqtt_client_bench.hostcal import probe_durations
+
+        # One knob, because a host is calibrated once: the operator should set
+        # how long they are willing to wait, not four durations.
+        plan = probe_durations(300.0)
+        self.assertEqual(plan["budget_s"], 300.0)
+        self.assertGreaterEqual(plan["harness_passes"], 30)
+        self.assertGreaterEqual(plan["loadgen_step_s"], 30)
+        # The floor keeps a mistyped budget from producing a meaningless probe.
+        tiny = probe_durations(1.0)
+        self.assertGreaterEqual(tiny["budget_s"], 30.0)
+        self.assertGreaterEqual(tiny["harness_passes"], 5)
+
+    def test_calibration_refuses_a_busy_machine(self):
+        from mqtt_client_bench import hostcal
+
+        # A contended run is re-run; a contended calibration is committed and
+        # then governs every campaign after it. So this one refuses rather
+        # than annotating.
+        busy = {"idle": False, "reasons": ["host_busy:loadavg=9.0 over 1.6"], "loadavg_before": 9.0}
+        with patch.object(hostcal, "check_host_idle", return_value=busy):
+            with self.assertRaises(hostcal.HostNotIdle):
+                hostcal.calibrate_host(skip_ceilings=True, budget_s=30.0)
+
+    def test_host_profile_must_match_the_machine_it_runs_on(self):
+        from mqtt_client_bench.harness import _validate_host_profile
+        from mqtt_client_bench.hostcal import host_identity
+
+        _validate_host_profile({"host": host_identity(), "role": "runner"})
+
+        foreign = {"host": dict(host_identity(), cpu_model="Some Other CPU"), "role": "runner"}
+        with self.assertRaises(ValueError):
+            _validate_host_profile(foreign)
+
+        # The reference host is the one that gets published, so its profile
+        # carries the stricter requirement.
+        unverified = {"host": host_identity(), "role": "reference", "idle": {"verified": False}}
+        with self.assertRaises(ValueError):
+            _validate_host_profile(unverified)
+
+
 class SchemaTests(unittest.TestCase):
     def test_schema_file_exists_and_parses(self):
         import json
@@ -3580,44 +3742,34 @@ class NativeAsyncPathTests(unittest.TestCase):
         clients equally: it inflates a fast client's period by a larger fraction
         than a slow one's, which compresses - and can reorder - a ranking.
 
-        Where it stands, measured on this loop with no library in the way:
-        about 3.2 us, against 18.5 us through the bridge this path replaced.
-        The completion counters left the window (CompletionLog), the reservoir
-        left the hot path with them, and the header stamper resolves the payload
-        shape once per run instead of once per message. What is left is the loop
-        itself: the stamp (~0.51 us), the publish call (~0.24), three clock
-        reads (~0.22) and the interpreter.
+        Measured on this loop with no library in the way, the floor sits near
+        3.3 us against 18.5 us through the bridge this path replaced. The
+        completion counters left the window (CompletionLog), the reservoir left
+        the hot path with them, and the header stamper resolves the payload
+        shape once per run instead of once per message.
 
-        The target is 5% of the fastest measured client's period - 2 us at
-        46,000 msgs/s - and it is not met. At 3.2 us the distortion between a
-        46,000 msgs/s client and a 6,000 msgs/s one is about 13%, down from 66%
-        through the bridge.
+        The bound is deliberately loose. It catches a gross regression on any
+        machine CI happens to run on; it does not certify the target, which is
+        5% of the fastest measured client's period - on the reference host,
+        gmqtt at 37,014 msgs/s, so 1.35 us, and the floor is about 2.5x that.
+        The real invariant needs both terms measured on the same machine, which
+        is what the host profile is for; asserting it here against a constant
+        is what let this test drift into 3.3x the rule it stood for.
 
-        The bound below is set to catch a regression, not to certify the target.
-        Tighten it as the remaining cost comes out.
+        The statistic is the *minimum* over several passes, not one wall-clock
+        shot. A single shot ranged 3700-7650 ns on this host depending on what
+        else was running, and failed roughly one run in four while the code had
+        not moved at all - verified by measuring the commit that set the bound
+        and finding it identical. The floor over N is stable to about 2%.
         """
-        adapter = _FakeSyncOnLoopAdapter(complete_after=1)
-        state = self._state(
-            log_limit=DEFAULT_COMPLETION_LOG_LIMIT, sample_limit=DEFAULT_METRIC_SAMPLE_LIMIT
-        )
-        adapter.on_publish = publisher._make_on_publish(state, 0, lock=None)
+        from mqtt_client_bench.hostcal import measure_harness_cost_ns
 
-        async def drive():
-            started = time.perf_counter()
-            await publisher._run_publish_loop_async(
-                adapter, state,
-                **self._loop_kwargs(qos=0, until=started + 0.5, outstanding=64)
-            )
-            return time.perf_counter() - started
-
-        elapsed = asyncio.new_event_loop().run_until_complete(drive())
-        sent = state["offered"]
-        self.assertGreater(sent, 1000, "null-client loop did not run enough messages")
-        ns_per_message = (elapsed * 1e9) / sent
+        result = measure_harness_cost_ns(passes=7)
         self.assertLess(
-            ns_per_message, 4500.0,
-            f"harness costs {ns_per_message:.0f} ns/message; the bridged path it "
-            "replaced cost 18500 ns, so this is a regression toward it",
+            result["ns_per_message"], 8000.0,
+            f"harness floor is {result['ns_per_message']:.0f} ns/message over "
+            f"{result['passes']} passes; the bridged path it replaced cost "
+            "18500 ns, so this is a regression toward it",
         )
 
     def test_closed_loop_nowait_refusal_is_backpressure_not_protocol_failed(self):
