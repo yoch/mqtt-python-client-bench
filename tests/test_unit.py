@@ -2311,6 +2311,27 @@ class HostCalibrationTests(unittest.TestCase):
         self.assertEqual(_ceiling_from_steps(steps), 63800)
         self.assertIsNone(_ceiling_from_steps([]))
 
+    def test_cpu_utilisation_decides_when_loadavg_looks_fine(self):
+        from mqtt_client_bench import hostcal
+
+        # The case that motivated the second signal: on this workstation with an
+        # editor, a browser and a chat client running, loadavg read 0.92 against
+        # a 1.60 gate and passed, while the CPUs were 22% busy. Load average
+        # counts queued tasks; interactive load burns cycles in bursts that are
+        # rarely queued at the instant it is sampled.
+        with patch.object(hostcal, "busy_pct_over", return_value=22.2):
+            with patch("os.getloadavg", return_value=(0.92, 0.9, 0.9)):
+                state = hostcal.check_host_idle()
+        self.assertFalse(state["idle"])
+        self.assertTrue(any("cpu=" in r for r in state["reasons"]))
+        self.assertFalse(any("loadavg=" in r for r in state["reasons"]))
+
+        # And a genuinely quiet machine passes on both.
+        with patch.object(hostcal, "busy_pct_over", return_value=1.5):
+            with patch("os.getloadavg", return_value=(0.1, 0.1, 0.1)):
+                state = hostcal.check_host_idle()
+        self.assertTrue(state["idle"], state["reasons"])
+
     def test_calibration_refuses_a_busy_machine(self):
         from mqtt_client_bench import hostcal
 
