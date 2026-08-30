@@ -74,6 +74,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             network=args.network,
             output=None,
             load_profile_path=args.load_profile,
+            host_profile_path=getattr(args, "host_profile", None),
             seed=args.seed,
         )
         if args.output:
@@ -99,6 +100,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         network=args.network,
         output=args.output,
         load_profile_path=args.load_profile,
+        host_profile_path=getattr(args, "host_profile", None),
         seed=args.seed,
         publish_path=getattr(args, "publish_path", "native"),
     )
@@ -152,6 +154,7 @@ def cmd_matrix(args: argparse.Namespace) -> int:
             network=args.network,
             output_dir=args.output_dir,
             load_profiles=load_profiles,
+            host_profile_path=getattr(args, "host_profile", None),
             seed=args.seed,
             variant_index=args.variant_index,
         )
@@ -254,6 +257,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         profile=args.profile,
         output=args.output,
         load_profile_path=args.load_profile,
+        host_profile_path=getattr(args, "host_profile", None),
         variant_index=args.variant_index,
     )
     print(json.dumps({"verdict": payload.get("verdict"), "order": payload.get("order"), "points": len(payload.get("points") or [])}, indent=2))
@@ -319,6 +323,10 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--broker", help="External broker host:port")
     run_p.add_argument("--network", choices=sorted(PROFILES.keys()))
     run_p.add_argument("--load-profile", help="JSON from calibrate")
+    run_p.add_argument(
+        "--host-profile",
+        help="JSON from calibrate-host (default: the hosts/ profile matching this machine)",
+    )
     run_p.add_argument("--output")
     run_p.add_argument("--seed", type=int, default=42)
     run_p.add_argument(
@@ -343,6 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
     matrix_p.add_argument(
         "--load-profile-dir",
         help="Directory of <client>-load.json calibrations (needed by load_fraction scenarios)",
+    )
+    matrix_p.add_argument(
+        "--host-profile",
+        help="JSON from calibrate-host (default: the hosts/ profile matching this machine)",
     )
     matrix_p.add_argument("--output-dir", default="results", help="Where to write <client>-<scenario>.json")
     matrix_p.add_argument("--seed", type=int, default=42)
@@ -403,6 +415,7 @@ def build_parser() -> argparse.ArgumentParser:
     cmp_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
     cmp_p.add_argument("--variant-index", type=int, default=None, help="Compare a single variant index (default: all)")
     cmp_p.add_argument("--load-profile")
+    cmp_p.add_argument("--host-profile")
     cmp_p.add_argument("--output")
     cmp_p.set_defaults(func=cmd_compare)
 

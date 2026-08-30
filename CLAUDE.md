@@ -178,6 +178,13 @@ results.
   Mosquitto CPU from a 200k offer are expected and do not invalidate the
   delivery count (diagnostic / `broker_ceiling` still fail those gates). Only
   `valid` runs enter medians.
+- **One host per published site**: every result carries `host_profile`
+  (fingerprint, role, ceilings) when the machine it ran on is calibrated.
+  `report build` publishes only the profile marked `role: reference` and
+  *names* what it skipped; runners validate locally and are never published.
+  Results predating host profiles carry no fingerprint and are identified from
+  their `environment` block instead — only *positive* evidence of a different
+  machine excludes a document, so a corpus with no provenance still publishes.
 - **Host constants are measured, not assumed**: `hostcal.calibrate_host()` writes
   a fingerprinted profile under `hosts/` — harness cost per message, the
   loadgen's emission ceiling and the broker's fan-out rate — so a number can be
