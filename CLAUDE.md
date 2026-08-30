@@ -37,6 +37,10 @@ python -m mqtt_client_bench.run broker up        # docker compose eclipse-mosqui
 python -m mqtt_client_bench.run clients -v       # adapter capability matrix
 python -m mqtt_client_bench.run list --suite core
 
+# Calibrate the host once (~300 s, machine must be quiet). Writes hosts/<host>-<fp>.json:
+# harness cost per message, loadgen emission ceiling, broker fan-out rate.
+python -m mqtt_client_bench.run calibrate-host --role reference
+
 # Calibrate first: open-loop scenarios (load_fraction) are refused without it
 python -m mqtt_client_bench.run calibrate --client paho --profile standard \
     --output calibrations/paho-load.json
@@ -174,6 +178,23 @@ results.
   Mosquitto CPU from a 200k offer are expected and do not invalidate the
   delivery count (diagnostic / `broker_ceiling` still fail those gates). Only
   `valid` runs enter medians.
+- **Host constants are measured, not assumed**: `hostcal.calibrate_host()` writes
+  a fingerprinted profile under `hosts/` — harness cost per message, the
+  loadgen's emission ceiling and the broker's fan-out rate — so a number can be
+  read back against the ceilings that produced it. Idleness is a precondition
+  and the bar is stricter than a run's (0.2 loadavg per CPU, 15 % CPU busy over
+  the median of five windows, checked before *and* after): a contended run is
+  re-run, a contended calibration is committed and then governs every campaign
+  after it. Nothing reads the profile yet.
+- **The core ingress offer is an over-offer, not a sustainable rate**: on the
+  reference host `mqtt_hammer` emits ~230k msgs/s alone, but **one** subscriber
+  drops the whole pipeline to ~76k — Mosquitto must fan out as well as decode,
+  which roughly triples its per-message cost and back-pressures the publisher.
+  The 200k default exists to make the SUT client the bottleneck, which is the
+  same fact `8a95f0c` states from the other side (a pegged Mosquitto does not
+  invalidate ranking subscribe). Never derive that offer from a sustainable
+  ceiling: it would collapse to the fan-out rate and make the fastest clients
+  neighbours of the constraint instead of its subject.
 - **No unequal harness tax**: fairness is *not* holding every client to the
   slowest common shape — each library must be driven the fastest way its own API
   allows. What must be equal is the harness's own cost, because that cost is

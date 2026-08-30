@@ -10,6 +10,40 @@ on one loadgen core. For *why* the broker sits where it does — the per-byte
 header `read(2)` in 2.0.x and what 2.1 replaced it with — see
 `MOSQUITTO_PROFILING.md`.
 
+## One subscriber is worth two thirds of the pipeline
+
+Measured on the reference host (i7-3770, loadgen cpuset = one physical group,
+256-byte QoS0, `scripts/mqtt_hammer`):
+
+| shape | msgs/s |
+|---|---:|
+| hammer alone, 2 threads, `--rate 200000` | 198,842 |
+| hammer alone, 2 threads, unpaced | 220,738 |
+| hammer alone, 4 threads, unpaced | 636,761 |
+| hammer alone, 8 threads, unpaced | 216,900 (oversubscribed) |
+| **hammer 2 threads `--rate 200000`, one subscriber attached** | **73,120** |
+
+With no subscriber Mosquitto only decodes. With one it must also fan out, and
+that roughly triples its per-message cost; the publisher is then back-pressured
+to whatever the broker can forward. The loadgen's own capability is therefore
+irrelevant to any `sub_*` scenario — the broker's fan-out is the binding
+constraint.
+
+Two consequences worth stating plainly, because both are easy to get backwards:
+
+- A ceiling probe that reads the **subscriber's** delivery is measuring the
+  broker, not the loadgen. `broker_ceiling_ingress` attaches a reference
+  subscriber, so `primary_msgs_per_s` from it is a fan-out number. Measuring the
+  loadgen means running it with nothing consuming, which is what
+  `hostcal.measure_loadgen_ceiling()` does.
+- `DEFAULT_INGRESS_OFFER_MSGS_PER_S = 200000` is **not** a sustainable rate and
+  was never meant to be. It is an over-offer whose job is to make the SUT client
+  the bottleneck. Deriving it from a sustainable ceiling would set it near 76k
+  here and turn the fastest clients into neighbours of the constraint.
+
+`HAMMER_PUB_CLIENTS = 2` is a hand-tuned constant; the peak thread count is a
+property of the core group and is swept per host by `calibrate-host`.
+
 ## The 64k trap (emqtt-bench QoS0 double counting)
 
 **That was never a real 64k offer** — it is a counting artefact.

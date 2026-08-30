@@ -1867,7 +1867,6 @@ def run_scenario(
     load_profile_path: Optional[str] = None,
     seed: int = 42,
     point_filter: Optional[Callable[[dict], bool]] = None,
-    point_transform: Optional[Callable[[List[dict]], List[dict]]] = None,
     publish_path: str = "native",
 ) -> dict:
     scenario = SCENARIO_BY_NAME[name]
@@ -1876,13 +1875,6 @@ def run_scenario(
     points = expand_scenario(scenario, profile)
     if point_filter is not None:
         points = [p for p in points if point_filter(p)]
-    if point_transform is not None:
-        # Host calibration drives the ceiling topology at its own escalating
-        # grid. The hook keeps that out of the catalogue: the published
-        # `broker_ceiling_ingress` grid stays 32k/64k/128k for everyone else,
-        # and a probe that needs to walk past it does not have to fork the
-        # ingress path and risk drifting from what campaigns actually run.
-        points = list(point_transform(points))
     if network:
         for p in points:
             p["network"] = network
