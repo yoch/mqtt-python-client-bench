@@ -319,7 +319,15 @@ IDLE_SETTLE_S = 3.0
 # and sailed through. Load average counts tasks in the run queue; interactive
 # applications burn CPU in short bursts that are rarely queued at the instant
 # it is sampled. Utilisation sees them.
-IDLE_MAX_BUSY_PCT = 10.0
+#
+# The median matters as much as the signal. On this machine with everything
+# closed, five consecutive windows read 2.7 / 11.7 / 2.8 / 2.5 / 2.4 %: a
+# desktop session bursts even at rest, so a single window refuses a free
+# machine about one time in five. Taking the middle sample keeps the check
+# honest about the burst without mistaking it for the state of the host - the
+# same reason the harness-cost probe takes a floor over N passes.
+IDLE_BUSY_SAMPLES = 5
+IDLE_MAX_BUSY_PCT = 15.0
 
 # Spread of the harness-cost passes above which the machine was evidently not
 # quiet *during* the probe, whatever loadavg claimed before it.
@@ -345,8 +353,8 @@ def _cpu_totals() -> Optional[tuple]:
     return idle, sum(fields)
 
 
-def busy_pct_over(window_s: float) -> Optional[float]:
-    """Share of all CPUs actually busy over ``window_s``."""
+def _busy_pct_window(window_s: float) -> Optional[float]:
+    """Share of all CPUs busy over one window."""
     first = _cpu_totals()
     if first is None:
         time.sleep(window_s)
@@ -360,6 +368,20 @@ def busy_pct_over(window_s: float) -> Optional[float]:
     if d_total <= 0:
         return None
     return 100.0 * (1.0 - d_idle / d_total)
+
+
+def busy_pct_over(total_s: float, *, samples: int = IDLE_BUSY_SAMPLES) -> Optional[float]:
+    """Median busy share across ``samples`` windows spanning ``total_s``."""
+    n = max(1, int(samples))
+    window = max(0.2, float(total_s) / n)
+    values = [v for v in (_busy_pct_window(window) for _ in range(n)) if v is not None]
+    if not values:
+        return None
+    values.sort()
+    mid = len(values) // 2
+    if len(values) % 2:
+        return values[mid]
+    return 0.5 * (values[mid - 1] + values[mid])
 
 
 def check_host_idle(*, strict: bool = True) -> Dict[str, Any]:
