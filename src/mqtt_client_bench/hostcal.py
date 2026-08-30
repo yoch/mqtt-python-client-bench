@@ -180,6 +180,24 @@ def frequency_policy(env: Dict[str, Any]) -> str:
     return f"governed:{governor}"
 
 
+def broker_identity() -> Dict[str, Any]:
+    """The broker these ceilings were measured against.
+
+    The fan-out rate is a property of *this* Mosquitto: a different version, a
+    different build of the image, or a changed config makes the number mean
+    something else. Recording the image without its digest would not be enough
+    - a tag moves - so both travel, alongside the config hash the harness
+    already computes for its own broker checks.
+    """
+    from mqtt_client_bench.broker import MOSQUITTO_IMAGE, config_hash, image_digest
+
+    return {
+        "image": MOSQUITTO_IMAGE,
+        "image_digest": image_digest(MOSQUITTO_IMAGE),
+        "config_hash": config_hash(),
+    }
+
+
 def host_identity(env: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The machine facts a ceiling depends on.
 
@@ -215,7 +233,17 @@ _FINGERPRINT_IDENTITY = (
     "physical_groups",
     "threads_per_group",
     "frequency_policy",
+    # The harness cost is an interpreter cost before it is anything else, so a
+    # different Python makes it a different number. The kernel is deliberately
+    # left out: a point release moves it without moving any measurement, and a
+    # fingerprint that churns for reasons nobody can act on gets ignored.
+    "python",
 )
+
+# The broker is measured, not merely present: the fan-out ceiling is a property
+# of this Mosquitto build and this config, and both belong in the digest for the
+# same reason the CPU does.
+_FINGERPRINT_BROKER = ("image", "image_digest", "config_hash")
 _FINGERPRINT_CEILINGS = (
     "harness_cost_ns_per_message",
     "loadgen_ceiling_msgs_per_s",
@@ -228,9 +256,12 @@ def host_fingerprint(profile: Dict[str, Any]) -> str:
     ``provenance.harness_fingerprint``."""
     identity = profile.get("host") or {}
     ceilings = profile.get("ceilings") or {}
+    broker = profile.get("broker") or {}
     digest = hashlib.sha256()
     for key in _FINGERPRINT_IDENTITY:
         digest.update(f"{key}={identity.get(key)!r}\0".encode("utf-8"))
+    for key in _FINGERPRINT_BROKER:
+        digest.update(f"broker.{key}={broker.get(key)!r}\0".encode("utf-8"))
     for key in _FINGERPRINT_CEILINGS:
         value = ceilings.get(key)
         # Quantise so re-probing the same machine does not churn the digest on
@@ -392,6 +423,19 @@ def check_host_idle(*, strict: bool = True, use_loadavg: bool = True) -> Dict[st
     }
 
 
+class CalibrationFailed(RuntimeError):
+    """A probe could not measure what it was asked to.
+
+    Distinct from a low number. Zero msgs/s is not a slow host, it is a probe
+    that reached nothing — measured here when the loadgen ran with no broker
+    listening and every thread step returned 0.0. The profile was still written,
+    marked idle-verified and signed, and would have become the committed
+    reference whose ceilings drive every campaign offer. A probe that reports a
+    number where it should refuse is the failure mode this whole module exists
+    to remove; it does not get an exemption for being the module itself.
+    """
+
+
 class HostNotIdle(RuntimeError):
     """Raised when a calibration is asked for on a machine that is working.
 
@@ -487,6 +531,26 @@ def measure_loadgen_ceiling(*, cpuset: Optional[str], seconds: int) -> Dict[str,
         if parsed:
             steps.append({"clients": clients, "msgs_per_s": parsed.get("msgs_per_s")})
     best = max(steps, key=lambda s: s.get("msgs_per_s") or 0.0, default=None)
+    # A single thread cannot beat several by a wide margin on the same cores.
+    # When it does, the probe raced something rather than measured it: observed
+    # here as 535,097 msgs/s at one thread against ~235,000 at two, four and
+    # eight in the same run, and 168,905 at one thread in the run before. The
+    # ceiling drives every campaign offer, so an internally inconsistent sweep
+    # is refused rather than averaged into something plausible-looking.
+    if best and len(steps) > 1 and best["clients"] == min(s["clients"] for s in steps):
+        # Only when the *fewest* threads win by a wide margin. More threads
+        # beating fewer is parallelism and is expected (measured here: four
+        # threads at 636,761 against two at 326,202). One thread beating eight
+        # is not a measurement.
+        others = [s.get("msgs_per_s") or 0.0 for s in steps if s is not best]
+        if others and (best.get("msgs_per_s") or 0.0) > 1.5 * max(others):
+            raise CalibrationFailed(
+                "loadgen thread sweep is internally inconsistent: "
+                f"{best['clients']} thread(s) at {best['msgs_per_s']:.0f} msgs/s "
+                f"against {max(others):.0f} for the rest. Re-run on a quiet "
+                "machine; a ceiling this sweep cannot agree on must not drive "
+                "campaign offers."
+            )
     return {
         "msgs_per_s": (best or {}).get("msgs_per_s"),
         "best_thread_count": (best or {}).get("clients"),
@@ -562,22 +626,46 @@ def calibrate_host(
     ceilings: Dict[str, Any] = {"harness_cost_ns_per_message": harness["ns_per_message"]}
     probes: Dict[str, Any] = {"harness_cost": harness, "budget": plan}
     if not skip_ceilings:
+        from mqtt_client_bench.broker import broker_down, broker_up, broker_running
         from mqtt_client_bench.telemetry import allocate_cpuset
 
         try:
             cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile=profile)
         except RuntimeError:
             cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile="smoke")
-        loadgen = measure_loadgen_ceiling(
-            cpuset=cpusets.get("loadgen"), seconds=plan["loadgen_step_s"]
-        )
-        fanout = measure_broker_fanout_ceiling(
-            pub_cpuset=cpusets.get("loadgen"),
-            sub_cpuset=cpusets.get("orch"),
-            seconds=plan["fanout_s"],
-        )
+
+        # Establish the broker rather than hope for one. Every ceiling here is
+        # measured *through* it, and the probes have no way to tell "this host
+        # is slow" from "nothing was listening" — they both come back as a
+        # number. Leave the machine as it was found.
+        was_running = broker_running()
+        if not was_running:
+            broker_up(wait=True, cpuset=cpusets.get("broker"))
+        try:
+            loadgen = measure_loadgen_ceiling(
+                cpuset=cpusets.get("loadgen"), seconds=plan["loadgen_step_s"]
+            )
+            fanout = measure_broker_fanout_ceiling(
+                pub_cpuset=cpusets.get("loadgen"),
+                sub_cpuset=cpusets.get("orch"),
+                seconds=plan["fanout_s"],
+            )
+        finally:
+            if not was_running:
+                broker_down()
+
         probes["loadgen"] = loadgen
         probes["broker_fanout"] = fanout
+        for label, value in (
+            ("loadgen_ceiling_msgs_per_s", loadgen["msgs_per_s"]),
+            ("broker_fanout_msgs_per_s", fanout["msgs_per_s"]),
+        ):
+            if not value:
+                raise CalibrationFailed(
+                    f"{label} came back {value!r}: the probe reached nothing. "
+                    "Check that the broker is reachable and that mqtt_hammer "
+                    "builds; a zero ceiling is not a slow host."
+                )
         ceilings["loadgen_ceiling_msgs_per_s"] = loadgen["msgs_per_s"]
         ceilings["loadgen_best_thread_count"] = loadgen["best_thread_count"]
         # Diagnostic. Named for what it is so nobody derives an offer from it.
@@ -610,6 +698,9 @@ def calibrate_host(
         "schema_version": 1,
         "role": role,
         "host": identity,
+        # Absent when --skip-ceilings ran: no broker was measured, so claiming
+        # one would put a digest in the fingerprint that nothing stood behind.
+        "broker": None if skip_ceilings else broker_identity(),
         "ceilings": ceilings,
         "probes": probes,
         "idle": {
@@ -723,6 +814,32 @@ def matches_reference(host_key: Dict[str, Any], profile: Optional[Dict[str, Any]
         host_key.get("hostname") == host.get("hostname")
         and host_key.get("cpu_model") == host.get("cpu_model")
     )
+
+
+def results_dir_for(
+    profile: Optional[Dict[str, Any]], base: str = "results"
+) -> str:
+    """Where a campaign on this host should write.
+
+    The reference host owns `results/` because that is what the site publishes.
+    A runner writes under `results/<hostname>-<fingerprint>/`, and the reason is
+    not tidiness: campaign output is named `<client>-<scenario>.json`, so a
+    runner writing to the same directory would silently overwrite the published
+    corpus file by file. `report build` only globs the top level, so a runner's
+    directory is invisible to the default build and readable on its own with
+    `--reference none`.
+
+    An uncalibrated host also gets a subdirectory. It has no business writing
+    into the published corpus either, and it cannot even say which machine it
+    is.
+    """
+    if profile and profile.get("role") == "reference":
+        return base
+    if not profile:
+        return f"{base}/uncalibrated"
+    host = (profile.get("host") or {}).get("hostname") or "unknown"
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in str(host))
+    return f"{base}/{safe}-{profile.get('host_fingerprint')}"
 
 
 def resolve_host_profile(
