@@ -2303,9 +2303,13 @@ class HostCalibrationTests(unittest.TestCase):
         # a 1.60 gate and passed, while the CPUs were 22% busy. Load average
         # counts queued tasks; interactive load burns cycles in bursts that are
         # rarely queued at the instant it is sampled.
+        # cpu_count is pinned: the loadavg threshold scales with it, so on a
+        # 2-core CI runner 0.92 would trip the loadavg reason this case is
+        # asserting stays silent.
         with patch.object(hostcal, "busy_pct_over", return_value=22.2):
             with patch("os.getloadavg", return_value=(0.92, 0.9, 0.9)):
-                state = hostcal.check_host_idle()
+                with patch("os.cpu_count", return_value=8):
+                    state = hostcal.check_host_idle()
         self.assertFalse(state["idle"])
         self.assertTrue(any("cpu=" in r for r in state["reasons"]))
         self.assertFalse(any("loadavg=" in r for r in state["reasons"]))
@@ -2313,7 +2317,8 @@ class HostCalibrationTests(unittest.TestCase):
         # And a genuinely quiet machine passes on both.
         with patch.object(hostcal, "busy_pct_over", return_value=1.5):
             with patch("os.getloadavg", return_value=(0.1, 0.1, 0.1)):
-                state = hostcal.check_host_idle()
+                with patch("os.cpu_count", return_value=8):
+                    state = hostcal.check_host_idle()
         self.assertTrue(state["idle"], state["reasons"])
 
     def test_loadgen_ceiling_takes_the_best_thread_count(self):
