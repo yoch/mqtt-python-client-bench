@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import platform
 import shutil
 import subprocess
@@ -252,59 +251,6 @@ def profile_path_name(profile: Dict[str, Any]) -> str:
 def load_host_profile(path: str) -> Dict[str, Any]:
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)
-
-
-# --- Ceiling probes ---------------------------------------------------------
-#
-# The three ceilings are found by escalation, not asserted: raise the offer
-# until what comes out stops tracking what went in. The knee is the ceiling.
-# `broker_ceiling_ingress` already provides the topology — emqtt/hammer publish,
-# emqtt subscribe, no Python SUT — so the probe reuses it rather than building a
-# second ingress path that could drift from the one campaigns run.
-
-# Escalation grid, in msgs/s. Starts below the current constants so a smaller
-# host finds its knee early and stops, and reaches past them so this host can
-# show whether 200k was the ceiling or merely the last value anyone tried.
-CEILING_GRID = (32_000, 64_000, 100_000, 150_000, 200_000, 260_000, 320_000)
-
-# A step counts as sustained when delivery holds this share of the offer.
-# Below it, the offer is no longer what is being measured.
-CEILING_HOLD_RATIO = 0.95
-
-
-def _ceiling_from_steps(
-    steps: List[Dict[str, Any]], field: str = "delivered_msgs_per_s"
-) -> Optional[float]:
-    """Highest sustained value of ``field`` before the knee.
-
-    Not the highest offer that was *attempted*: an offer the host cannot hold is
-    something falling behind, and recording it as a ceiling is exactly the
-    mistake the 200k constant made on smaller machines.
-
-    ``field`` decides *which* ceiling: the loadgen's is what it emitted, the
-    broker's is what it decoded, and the subscriber's delivery is neither. The
-    first version of this probe read delivery for all three and reported a
-    loadgen ceiling of 64k on a host whose loadgen holds 200k — it had measured
-    an emqtt-bench subscriber sharing a core group with the publisher.
-    """
-    best: Optional[float] = None
-    # `run_scenario` does not promise to return points in the order they were
-    # given, and this walk stops at the first step the host cannot hold: read
-    # out of order it would stop at the wrong one. Sort by what was offered.
-    steps = sorted(
-        steps, key=lambda s: float(s.get("effective_offer_msgs_per_s") or 0.0)
-    )
-    for step in steps:
-        offer = step.get("effective_offer_msgs_per_s")
-        value = step.get(field)
-        if not offer or not value:
-            continue
-        if value >= CEILING_HOLD_RATIO * offer:
-            best = max(best or 0.0, float(value))
-        else:
-            # First step the host cannot hold: everything above it is noise.
-            break
-    return best
 
 
 # --- Idleness: the precondition, not a footnote --------------------------------
