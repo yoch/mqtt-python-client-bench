@@ -514,7 +514,10 @@ SCENARIOS: List[Scenario] = [
         description=(
             "Outbound queue accounting: submit 150 QoS1 publishes against "
             "inflight=1 and max_queued=100, and record accept vs reject. "
-            "Forced onto the sync facade so publish() can return QUEUE_FULL."
+            "Forced onto the sync facade so publish() can return QUEUE_FULL. "
+            "Native mqttium maps FlowControlError at that call site; "
+            "mqttium-compat may still return rc=0 and only later set the "
+            "handle to QUEUE_SIZE (documented Paho-façade contract)."
         ),
         qos_publish=1,
         payload="telemetry256",

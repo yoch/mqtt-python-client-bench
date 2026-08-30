@@ -22,7 +22,12 @@ if str(SRC) not in sys.path:
 from mqtt_client_bench.adapters import registry  # noqa: E402
 from mqtt_client_bench.adapters.base import AdapterCapabilities  # noqa: E402
 from mqtt_client_bench.adapters.native import NativeAsyncAdapter  # noqa: E402
-from mqtt_client_bench.adapters.mqttium_async import FlowControlError, MqttiumAsyncAdapter  # noqa: E402
+from mqtt_client_bench.adapters.mqttium import (  # noqa: E402
+    MQTT_ERR_QUEUE_SIZE,
+    FlowControlError,
+    MqttiumAdapter,
+)
+from mqtt_client_bench.adapters.mqttium_async import MqttiumAsyncAdapter  # noqa: E402
 from mqtt_client_bench.roles import publisher  # noqa: E402
 from mqtt_client_bench.adapters.registry import (  # noqa: E402
     EXPERIMENTAL_CLIENTS,
@@ -523,8 +528,6 @@ class AdapterRegistryTests(unittest.TestCase):
         fixed per measurement point, so the callback is installed by the first
         QoS>=1 publish and a QoS0 point must never arm it. Asserted rather than
         inferred from a rate, which run-to-run noise would hide."""
-        from mqtt_client_bench.adapters.mqttium import MqttiumAdapter
-
         class StubReceipt:
             mid = 7
 
@@ -3803,6 +3806,77 @@ class MqttiumNativeNowaitTests(unittest.TestCase):
         adapter._client = _Client()
         with self.assertRaises(RuntimeError):
             adapter.publish_nowait("t", b"x", qos=0)
+
+
+class MqttiumFacadeAdmissionTests(unittest.TestCase):
+    """The sync facade must not report success before publish_nowait runs."""
+
+    def _adapter(self, client):
+        adapter = MqttiumAdapter()
+        adapter._client = client
+        adapter._connected = True
+        adapter._on_publish_cb = lambda mid, reason=None: None
+        adapter.schedule_call = lambda fn: fn()
+        return adapter
+
+    def test_qos1_flow_control_is_sync_reject_without_on_publish(self):
+        fired = []
+
+        class _Client:
+            on_publish = None
+
+            def publish_nowait(self, *args, **kwargs):
+                raise FlowControlError("Pending outbound message limit reached")
+
+        adapter = self._adapter(_Client())
+        adapter.on_publish = lambda *args: fired.append(args)
+        result = adapter.publish("t", b"x", qos=1)
+        self.assertEqual(result.rc, MQTT_ERR_QUEUE_SIZE)
+        self.assertIsNone(result.mid)
+        self.assertEqual(fired, [])
+
+    def test_qos1_burst_matches_pending_limit(self):
+        class _Client:
+            on_publish = None
+
+            def __init__(self):
+                self.n = 0
+
+            def publish_nowait(self, *args, **kwargs):
+                self.n += 1
+                if self.n > 100:
+                    raise FlowControlError("Pending outbound message limit reached")
+                return type("Receipt", (), {"mid": self.n})()
+
+        adapter = self._adapter(_Client())
+        fired = []
+        adapter.on_publish = lambda *args: fired.append(args)
+        accepted = rejected = 0
+        for _ in range(150):
+            info = adapter.publish("t", b"x", qos=1)
+            if info.rc == 0 and info.mid is not None:
+                accepted += 1
+            else:
+                rejected += 1
+        self.assertEqual(accepted, 100)
+        self.assertEqual(rejected, 50)
+        self.assertEqual(fired, [])
+
+    def test_qos1_other_errors_are_not_completions(self):
+        fired = []
+
+        class _Client:
+            on_publish = None
+
+            def publish_nowait(self, *args, **kwargs):
+                raise RuntimeError("not on the owning loop")
+
+        adapter = self._adapter(_Client())
+        adapter.on_publish = lambda *args: fired.append(args)
+        result = adapter.publish("t", b"x", qos=1)
+        self.assertEqual(result.rc, 1)
+        self.assertIsNone(result.mid)
+        self.assertEqual(fired, [])
 
 
 if __name__ == "__main__":

@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 import ssl
+import threading
 from collections import deque
 from pathlib import Path
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from mqtt_client_bench.adapters.async_bridge import BridgedAdapterBase, IncomingMessage
 from mqtt_client_bench.adapters.base import AdapterCapabilities, PublishResult, SubscribeResult
+
+try:
+    from mqttium.errors import FlowControlError
+except ImportError:  # mqttium extra not installed; the adapter is still importable
+
+    class FlowControlError(Exception):
+        """Stand-in so the module imports without the mqttium extra."""
+
+
+# Paho MQTT_ERR_QUEUE_SIZE. Native mqttium raises FlowControlError instead;
+# the facade maps that to this rc so queue_rejection scores admission, not
+# a later on_publish(128) (which would be a completion the engine never made).
+MQTT_ERR_QUEUE_SIZE = 15
 
 
 class MqttiumAdapter(BridgedAdapterBase):
@@ -16,9 +30,9 @@ class MqttiumAdapter(BridgedAdapterBase):
 
     Publishes go through ``publish_nowait()``: loop-bound, non-suspending
     admission + coalesced effect flush. Completions report via synthetic mid +
-    ``on_publish`` after ``receipt.wait()``, which returns immediately for QoS0
-    and raises whatever the admission path recorded, so a refused publish is
-    counted as a failure rather than as a completion.
+    ``on_publish`` after a real PUBACK/PUBCOMP — never for an admission refusal.
+    ``FlowControlError`` is a synchronous reject (``rc=MQTT_ERR_QUEUE_SIZE``,
+    no mid, no ``on_publish``).
 
     This adapter sets no ``AsyncClient.on_publish``: it fires the bench callback
     itself. That is deliberate — mqttium's direct QoS0 transport write is only
@@ -283,7 +297,19 @@ class MqttiumAdapter(BridgedAdapterBase):
         # awscrt use, and measured 11-34% cheaper than awaiting the receipt,
         # growing with load. Registering after submission is race-free: both run
         # on the loop thread.
+        #
+        # Admission itself must be visible at this call site. Returning rc=0
+        # before publish_nowait ran made queue_rejection score 150 accepts
+        # while the engine refused 50 with FlowControlError; the facade then
+        # invented on_publish(128) and the harness booked protocol_failed for
+        # publishes that never got a MID. Wait for the loop callback — the
+        # native path is what ranks mqttium, so this wait is not a harness tax
+        # on capacity. FlowControlError is QUEUE_SIZE, not a completion.
+        admitted: List[PublishResult] = []
+        done = threading.Event()
+
         def _publish_qosn() -> None:
+            result = PublishResult(rc=1, mid=None)
             try:
                 if client.on_publish is None:
                     # Same loop thread that will later deliver the ack, so the
@@ -294,13 +320,21 @@ class MqttiumAdapter(BridgedAdapterBase):
                 )
                 if receipt.mid is None:
                     self._fire_on_publish(mid, reason_code=0)
-                    return
-                self._real_to_synth.setdefault(int(receipt.mid), deque()).append(mid)
+                    result = PublishResult(rc=0, mid=mid)
+                else:
+                    self._real_to_synth.setdefault(int(receipt.mid), deque()).append(mid)
+                    result = PublishResult(rc=0, mid=mid)
+            except FlowControlError:
+                result = PublishResult(rc=MQTT_ERR_QUEUE_SIZE, mid=None)
             except Exception:  # noqa: BLE001
-                self._fire_on_publish(mid, reason_code=128)
+                result = PublishResult(rc=1, mid=None)
+            admitted.append(result)
+            done.set()
 
         self.schedule_call(_publish_qosn)
-        return PublishResult(rc=0, mid=mid)
+        if not done.wait(timeout=5.0):
+            return PublishResult(rc=1, mid=None)
+        return admitted[0]
 
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
         mid = self.alloc_mid()

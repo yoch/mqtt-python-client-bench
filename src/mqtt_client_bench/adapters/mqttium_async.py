@@ -6,8 +6,9 @@ message: a fixed cost, so it taxed this client (56 us per message natively) far
 harder than a slow one, which is enough to reorder a ranking.
 
 ``FlowControlError`` from ``publish_nowait`` is mapped to ``mid is None`` (Paho
-queue-full), not to ``on_publish`` reason 128. The facade in ``mqttium.py`` still
-returns a mid before the bridge call and cannot do that.
+queue-full), not to ``on_publish`` reason 128. The sync facade does the same
+at ``publish()``: it waits for the loop-thread ``publish_nowait`` and returns
+``MQTT_ERR_QUEUE_SIZE`` without firing ``on_publish``.
 """
 
 from __future__ import annotations
@@ -18,14 +19,7 @@ from pathlib import Path
 from typing import Any, Deque, Dict, Optional
 
 from mqtt_client_bench.adapters.base import AdapterCapabilities, SubscribeResult
-from mqtt_client_bench.adapters.mqttium import MqttiumAdapter
-
-try:
-    from mqttium.errors import FlowControlError
-except ImportError:  # mqttium extra not installed; the adapter is still importable
-
-    class FlowControlError(Exception):
-        """Stand-in so the module imports without the mqttium extra."""
+from mqtt_client_bench.adapters.mqttium import FlowControlError, MqttiumAdapter
 
 
 class MqttiumAsyncAdapter:
