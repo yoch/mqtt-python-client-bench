@@ -200,6 +200,15 @@ results.
   the median of five windows, checked before *and* after): a contended run is
   re-run, a contended calibration is committed and then governs every campaign
   after it. Nothing reads the profile yet.
+- **A subscribe point at the host's fan-out ceiling scores the broker**: with
+  one subscriber Mosquitto forwards ~76k msgs/s here, and mqttium came back at
+  76,796 — a Python client landing on the rate a C subscriber sustains is the
+  broker's number wearing the client's name. Such a point keeps its value and
+  its `valid` status (the delivery is real) but is attributed `broker_limited`
+  with `broker_fanout_limited:<delivered>/<ceiling>`, so the top of a ranking
+  cannot be read as a library difference. Only for one-subscriber points: the
+  broker reads once and writes once per subscriber, so a ceiling measured at one
+  says nothing about `fanout_scaling` at 8 or 32.
 - **The core ingress offer is an over-offer, not a sustainable rate**: on the
   reference host `mqtt_hammer` emits ~230k msgs/s alone, but **one** subscriber
   drops the whole pipeline to ~76k — Mosquitto must fan out as well as decode,

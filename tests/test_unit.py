@@ -2818,6 +2818,61 @@ class ReceiveMaximumOverlayTests(unittest.TestCase):
         self.assertIn("advertised=10", result["reasons"][0])
 
 
+class BrokerFanoutLimitTests(unittest.TestCase):
+    """A subscribe point at the host's fan-out ceiling measures the broker."""
+
+    @staticmethod
+    def _run(delivered, *, subscribers=1, ceiling=76000.0):
+        from mqtt_client_bench.harness import validate_run
+
+        point = {
+            "topology": "subscriber_ingress", "subscribers": subscribers,
+            "duration_s": 12.0, "qos_publish": 0,
+        }
+        workers = [{"role": "subscriber", "ok": True, "msgs_per_s": delivered,
+                    "subscriber_delivered": int(delivered * 12), "duration_s": 12.0}]
+        offer = 200000.0
+        loadgen = {
+            "mode": "pub", "effective_offer_msgs_per_s": offer,
+            "observed_pub_rate": offer, "emitted_msgs": int(offer * 12),
+            "parsed": {"last_total": int(offer * 12)}, "paced": True,
+        }
+        sys_counters = {"publish_received_delta": int(offer * 12), "dropped_delta": 0}
+        return validate_run(point, workers, loadgen, [], sys_counters=sys_counters,
+                            fanout_ceiling_msgs_per_s=ceiling)
+
+    def test_delivery_at_the_fanout_ceiling_is_attributed_to_the_broker(self):
+        # mqttium came back at 76,796 msgs/s against a measured one-subscriber
+        # fan-out ceiling of 75-77k. A Python client landing exactly on the rate
+        # a C subscriber sustains is the broker's number wearing the client's
+        # name, and the reader had no way to tell.
+        v = self._run(76796.0)
+        self.assertEqual(v["bottleneck"], "broker_limited")
+        self.assertTrue(any(r.startswith("broker_fanout_limited:") for r in v["reasons"]),
+                        v["reasons"])
+        # The delivery is real and core subscribe does not invalidate on a
+        # pegged broker, so the run keeps its number.
+        self.assertEqual(v["status"], "valid")
+
+    def test_a_client_below_the_ceiling_keeps_its_own_score(self):
+        # paho at 25k against the same ceiling is measuring paho.
+        v = self._run(25304.0)
+        self.assertNotEqual(v["bottleneck"], "broker_limited")
+        self.assertFalse(any(r.startswith("broker_fanout_limited") for r in v["reasons"]))
+
+    def test_the_mark_does_not_generalise_past_one_subscriber(self):
+        # The broker reads once and writes once per subscriber, so a ceiling
+        # measured at one says nothing about fanout_scaling at 8 or 32.
+        v = self._run(76796.0, subscribers=8)
+        self.assertFalse(any(r.startswith("broker_fanout_limited") for r in v["reasons"]))
+
+    def test_no_profile_means_no_mark(self):
+        # A host nobody calibrated has no ceiling to compare against, and
+        # inventing one would be worse than staying quiet.
+        v = self._run(76796.0, ceiling=None)
+        self.assertFalse(any(r.startswith("broker_fanout_limited") for r in v["reasons"]))
+
+
 class QueueRejectionPathTests(unittest.TestCase):
     """Which path answers the queue-rejection question, and why."""
 
