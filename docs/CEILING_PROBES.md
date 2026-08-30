@@ -52,6 +52,55 @@ committed profile declares `frequency_policy: "unpinned"`. The declaration is
 what permits it — never the absence of the sysfs file — and such runs carry
 `clock_unpinned` and are never published.
 
+## The unpaced ingress rate is bimodal, and the broker is read-bound
+
+Repeated identical hammer runs against a subscriber-less broker land near either
+230k or 700k msgs/s, at every thread count, on a quiet machine. Not noise: two
+stable regimes.
+
+Counting the broker's own syscalls (`/proc/1/io` inside a container given
+`--cap-add SYS_PTRACE`) explains it completely. Eight consecutive 5 s runs,
+2 publisher threads, 256-byte QoS0:
+
+| msgs/s | µs/msg | broker reads/s | msgs per read | bytes per read |
+|---:|---:|---:|---:|---:|
+| 734,257 | 1.36 | 92,865 | 7.9 | 2076 |
+| 235,584 | 4.24 | 96,692 | 2.4 | 639 |
+| 233,886 | 4.28 | 97,899 | 2.4 | 626 |
+| 595,624 | 1.68 | 94,897 | 6.3 | 1645 |
+| 702,899 | 1.42 | 91,077 | 7.7 | 2023 |
+| 233,626 | 4.28 | 100,959 | 2.3 | 607 |
+| 332,861 | 3.00 | 94,021 | 3.5 | 929 |
+| 559,437 | 1.79 | 80,992 | 6.9 | 1811 |
+
+**The read rate is the invariant.** It spans 25% across runs whose throughput
+spans 214%. `reads/s × msgs-per-read` predicts the measured rate to within 1.5%
+on every row.
+
+So Mosquitto is **read-syscall-bound, not message-bound**: it sustains roughly
+95k reads per second and the message rate is whatever batching hands it. What
+varies is how much has accumulated in the socket receive queue when it calls
+`read()` — 2.3 packets in the slow regime, 7.9 in the fast one. Note that even
+the fast regime reads ~2 KB, well under `packet_buffer_size` (4096), so the
+buffer is not the constraint; arrival timing is.
+
+Both states are self-sustaining, which is why it is bimodal rather than noisy.
+If the broker falls momentarily behind, data piles up, reads get fatter,
+per-message cost falls and it catches up — and stays efficient. If it keeps up
+perfectly, each read returns only what trickled in since the last one, which is
+expensive per message and keeps it exactly where it was.
+
+### What follows from it
+
+- **An unpaced ingress rate is not a ceiling.** It is a property of how the
+  writer and the broker's read loop happen to couple, and it moves 3x between
+  runs of the same command. Do not derive a campaign offer from it.
+- **A paced offer does not have this problem**: `--rate` fixes arrivals, so the
+  batching is set by the rate rather than by the coupling. That is the shape the
+  ranking uses, and it is one more reason to keep it.
+- The quantity worth recording about a host, if one is wanted, is the broker's
+  **read rate** (~95k/s here), not a message rate.
+
 ## One subscriber is worth two thirds of the pipeline
 
 Measured on the reference host (i7-3770, loadgen cpuset = one physical group,
