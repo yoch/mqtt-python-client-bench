@@ -505,55 +505,78 @@ def _run_hammer(mode: str, *, cpuset: Optional[str], clients: int, seconds: int,
     return None
 
 
+LOADGEN_REPEATS = 5
+
+# Spread across repeats of one thread count, above which the sweep is not
+# measuring a ceiling. Wide on purpose: this signal is genuinely bimodal on the
+# reference host and the median handles that; what this catches is a step whose
+# samples share no regime at all.
+LOADGEN_MAX_STEP_SPREAD = 4.0
+
+
 def measure_loadgen_ceiling(*, cpuset: Optional[str], seconds: int) -> Dict[str, Any]:
     """What this host's loadgen can put on the wire, with nothing consuming it.
 
-    No subscriber. That is the whole point of this probe: attach one and
-    Mosquitto has to fan out as well as decode, which roughly triples its
-    per-message cost and back-pressures the publisher to the broker's rate.
-    Measured here, the same hammer went from 198,842 msgs/s to 73,120 the
-    moment a single subscriber connected. That number is real and worth having,
-    but it is the broker's, not the loadgen's, and reading it as the loadgen's
-    is what made the first version of this probe report 64k on a host that
-    emits ten times that.
+    No subscriber. Attach one and Mosquitto has to fan out as well as decode,
+    which roughly triples its per-message cost and back-pressures the publisher:
+    the same hammer went from 198,842 msgs/s to 73,120 the moment a single
+    subscriber connected. That number is real and worth having, but it is the
+    broker's, not the loadgen's.
 
-    The thread count is swept rather than assumed: `HAMMER_PUB_CLIENTS = 2` is a
-    hand-tuned constant, and on this machine 4 threads emit 637k against 326k
-    for 2 and 217k for 8 -- the peak is a property of the core group, so it has
-    to be found on each host, not inherited from this one.
+    **Every thread count is measured several times and reduced by median**, and
+    the reason is not general caution. Unpaced against a broker that reads and
+    drops, this signal is *bimodal* on the reference host: repeated identical
+    runs land near either 230k or 500k msgs/s, at every thread count. Measured
+    back to back at two threads: 234844, 234626, 497245, 523924, 230867.
+
+    One sample per step therefore tells you nothing, and taking the maximum
+    across steps — which is what this did — systematically crowns whichever step
+    happened to land in the high regime. That turned a coin flip into a reported
+    "best thread count": two consecutive 300 s calibrations disagreed by 139%
+    because one drew 168,905 at a single thread and the other drew 535,097 at
+    the same one. The machine was not unstable; the estimator was.
+
+    The thread count is still swept rather than assumed, because
+    `HAMMER_PUB_CLIENTS = 2` is hand-tuned and the peak belongs to the core
+    group. But it is now decided on medians, and every sample is kept so a
+    reader can see the two regimes instead of taking the summary on faith.
     """
     steps = []
     for clients in HAMMER_THREAD_GRID:
-        parsed = _run_hammer(
-            "pub", cpuset=cpuset, clients=clients, seconds=seconds,
-            topic="hostcal/loadgen", rate=0,
-        )
-        if parsed:
-            steps.append({"clients": clients, "msgs_per_s": parsed.get("msgs_per_s")})
-    best = max(steps, key=lambda s: s.get("msgs_per_s") or 0.0, default=None)
-    # A single thread cannot beat several by a wide margin on the same cores.
-    # When it does, the probe raced something rather than measured it: observed
-    # here as 535,097 msgs/s at one thread against ~235,000 at two, four and
-    # eight in the same run, and 168,905 at one thread in the run before. The
-    # ceiling drives every campaign offer, so an internally inconsistent sweep
-    # is refused rather than averaged into something plausible-looking.
-    if best and len(steps) > 1 and best["clients"] == min(s["clients"] for s in steps):
-        # Only when the *fewest* threads win by a wide margin. More threads
-        # beating fewer is parallelism and is expected (measured here: four
-        # threads at 636,761 against two at 326,202). One thread beating eight
-        # is not a measurement.
-        others = [s.get("msgs_per_s") or 0.0 for s in steps if s is not best]
-        if others and (best.get("msgs_per_s") or 0.0) > 1.5 * max(others):
-            raise CalibrationFailed(
-                "loadgen thread sweep is internally inconsistent: "
-                f"{best['clients']} thread(s) at {best['msgs_per_s']:.0f} msgs/s "
-                f"against {max(others):.0f} for the rest. Re-run on a quiet "
-                "machine; a ceiling this sweep cannot agree on must not drive "
-                "campaign offers."
+        samples: List[float] = []
+        for _ in range(LOADGEN_REPEATS):
+            parsed = _run_hammer(
+                "pub", cpuset=cpuset, clients=clients, seconds=seconds,
+                topic="hostcal/loadgen", rate=0,
             )
+            value = (parsed or {}).get("msgs_per_s")
+            if value:
+                samples.append(float(value))
+        if not samples:
+            continue
+        samples.sort()
+        mid = len(samples) // 2
+        median = samples[mid] if len(samples) % 2 else 0.5 * (samples[mid - 1] + samples[mid])
+        spread = samples[-1] / samples[0] if samples[0] else float("inf")
+        if spread > LOADGEN_MAX_STEP_SPREAD:
+            raise CalibrationFailed(
+                f"loadgen sweep at {clients} thread(s) spans {samples[0]:.0f}"
+                f"-{samples[-1]:.0f} msgs/s ({spread:.1f}x). That is not a "
+                "ceiling. Re-run on a quiet machine."
+            )
+        steps.append(
+            {
+                "clients": clients,
+                "msgs_per_s": round(median, 1),
+                # Kept, not summarised away: the two regimes are the finding.
+                "samples": [round(v, 1) for v in samples],
+            }
+        )
+    best = max(steps, key=lambda s: s["msgs_per_s"], default=None)
     return {
         "msgs_per_s": (best or {}).get("msgs_per_s"),
         "best_thread_count": (best or {}).get("clients"),
+        "repeats": LOADGEN_REPEATS,
         "steps": steps,
     }
 
