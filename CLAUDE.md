@@ -160,8 +160,10 @@ results.
   just ingress.
 - **Fail closed in `validate_run()`**: worker errors, open-loop rate drift > 2 %,
   `$SYS` publish drops, broker CPU ≥ 85 % (or ≥ 70 % headroom gate), a non-
-  `performance` CPU governor, a busy host at T0, or a loadgen the broker cannot
-  confirm make a run `inconclusive` and set a `bottleneck` (`sut_limited` /
+  `performance` CPU governor — including one that cannot be read at all
+  (`cpu_governor_unknown`: a container or a VM is not the reference host), a busy
+  host at T0, or a loadgen the broker cannot confirm make a run `inconclusive`
+  and set a `bottleneck` (`sut_limited` /
   `broker_limited` / `broker_unconfirmed` / `loadgen_limited` / `offer_limited`).
   Core subscribe capacity does **not** fail `delivery_below_half_offer` — a slow
   client at 15k of a 200k offer is the ranking. Ingress `$SYS` drops and a pegged
