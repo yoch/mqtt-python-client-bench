@@ -36,6 +36,7 @@ from mqtt_client_bench.broker import (
     wait_for_broker,
 )
 from mqtt_client_bench.control import BarrierServer, read_json, wait_for_file, write_json
+from mqtt_client_bench.hostcal import host_profile_summary, resolve_host_profile
 from mqtt_client_bench.loadgen import (
     EMQTT_MAX_OFFER_MSGS_PER_S,
     LoadgenSpec,
@@ -833,6 +834,7 @@ def run_point(
     work_dir: Path,
     cpusets: Dict[str, str],
     load_profile: Optional[dict] = None,
+    host_profile: Optional[dict] = None,
     managed_broker: bool = True,
 ) -> dict:
     run_id = make_run_id()
@@ -1534,6 +1536,10 @@ def run_point(
             "qdisc": qdisc_stats() if network != "localhost" else None,
             "managed_broker": managed_broker,
             "environment": environment_metadata(),
+            # Which machine's ceilings this number was taken against. Absent on
+            # a host nobody calibrated, which is the honest answer rather than
+            # a default borrowed from the reference host.
+            "host_profile": host_profile_summary(host_profile),
             "cpusets": cpusets,
             "non_comparable": bool(point.get("non_comparable")) or forced_facade,
             "protocol_effective": point.get("protocol", "MQTTv311"),
@@ -1686,6 +1692,7 @@ def run_matrix(
     output_dir: Optional[str] = None,
     client_paths: Optional[Dict[str, str]] = None,
     load_profiles: Optional[Dict[str, str]] = None,
+    host_profile_path: Optional[str] = None,
     seed: int = 42,
     variant_index: Optional[int] = None,
 ) -> dict:
@@ -1733,6 +1740,10 @@ def run_matrix(
         wait_for_broker(host, port, timeout_s=10)
         meta = {"managed_broker": False, "host": host, "port": port, "tls_port": tls_port}
 
+    host_profile = resolve_host_profile(host_profile_path)
+    if host_profile is not None:
+        _validate_host_profile(host_profile)
+
     profiles: Dict[str, Optional[dict]] = {}
     for client in clients:
         path = (load_profiles or {}).get(client)
@@ -1767,6 +1778,7 @@ def run_matrix(
                         work_dir=work_dir,
                         cpusets=cpusets,
                         load_profile=profiles.get(client),
+                        host_profile=host_profile,
                         managed_broker=managed,
                     )
                     result["run_index"] = run_idx
@@ -1865,6 +1877,7 @@ def run_scenario(
     network: Optional[str] = None,
     output: Optional[str] = None,
     load_profile_path: Optional[str] = None,
+    host_profile_path: Optional[str] = None,
     seed: int = 42,
     point_filter: Optional[Callable[[dict], bool]] = None,
     publish_path: str = "native",
@@ -1902,6 +1915,11 @@ def run_scenario(
         wait_for_broker(host, port, timeout_s=10)
         meta = {"managed_broker": False, "host": host, "port": port, "tls_port": tls_port}
 
+    # Resolved once per campaign, not per point: the machine does not change
+    # under a run, and validating it here fails before any measuring starts.
+    host_profile = resolve_host_profile(host_profile_path)
+    if host_profile is not None:
+        _validate_host_profile(host_profile)
     load_profile = read_json(load_profile_path) if load_profile_path else None
     if load_profile is not None:
         _validate_load_profile(load_profile, client=client, client_path=client_path, broker=meta)
@@ -1927,6 +1945,7 @@ def run_scenario(
                     work_dir=work_dir,
                     cpusets=cpusets,
                     load_profile=load_profile,
+                    host_profile=host_profile,
                     managed_broker=managed,
                 )
                 result["run_index"] = run_idx
@@ -2214,6 +2233,7 @@ def compare_clients(
     profile: str = "standard",
     output: Optional[str] = None,
     load_profile_path: Optional[str] = None,
+    host_profile_path: Optional[str] = None,
     client_paths: Optional[Dict[str, str]] = None,
     variant_index: Optional[int] = None,
 ) -> dict:
@@ -2237,6 +2257,10 @@ def compare_clients(
     points = expand_scenario(scenario_obj, profile)
     if variant_index is not None:
         points = [points[variant_index]]
+
+    host_profile = resolve_host_profile(host_profile_path)
+    if host_profile is not None:
+        _validate_host_profile(host_profile)
 
     shared_load_profile = read_json(load_profile_path) if load_profile_path else None
     point_results = []
@@ -2279,6 +2303,7 @@ def compare_clients(
                     work_dir=work_dir,
                     cpusets=cpusets,
                     load_profile=calibrations.get(name),
+                    host_profile=host_profile,
                     managed_broker=True,
                 )
                 result["ab_label"] = label

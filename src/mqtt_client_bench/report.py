@@ -10,7 +10,7 @@ import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 ASSETS_DIR = Path(__file__).resolve().parent / "report_assets"
 
@@ -1343,8 +1343,42 @@ def classify_payload(data: Dict[str, Any], source_name: str) -> ResultDoc:
     )
 
 
-def load_results(input_dir: Path) -> List[ResultDoc]:
+# Sentinel: "look the reference host up in hosts/". Distinct from None, which
+# means "publish everything", so a caller can turn the filter off explicitly
+# instead of by arranging for the lookup to fail.
+_AUTO_REFERENCE = object()
+
+
+def load_results(input_dir: Path, *, reference: Any = _AUTO_REFERENCE) -> List[ResultDoc]:
+    docs, _ = load_results_with_skips(input_dir, reference=reference)
+    return docs
+
+
+def load_results_with_skips(
+    input_dir: Path, *, reference: Any = _AUTO_REFERENCE
+) -> Tuple[List[ResultDoc], Dict[str, int]]:
+    """Documents for the published host, plus a count of what was left out.
+
+    The site publishes exactly one machine. Numbers from another host are not
+    wrong, they are answers to a different question — its harness cost, its
+    broker's fan-out rate, its core topology — and pooling them into one median
+    is the failure this whole mechanism exists to prevent. So a run from a
+    `runner` host is skipped and *counted*, never silently dropped.
+
+    Anything measured before host profiles existed carries no fingerprint. It is
+    identified from its `environment` block instead and attached to the
+    reference host when the machine facts match, because that corpus did come
+    off that machine — it simply has no record of the ceilings it ran against.
+    """
+    from mqtt_client_bench.hostcal import matches_reference, reference_profile, result_host_key
+
     docs: List[ResultDoc] = []
+    skipped: Dict[str, int] = {}
+    if reference is _AUTO_REFERENCE:
+        # Raises on two reference profiles: that is a repository error, not a
+        # runtime choice, and picking one at random would publish half a corpus
+        # without saying so.
+        reference = reference_profile()
     # Skip ephemeral local artefacts (gitignored ``_*.json`` / smoke probes).
     paths = sorted(
         path
@@ -1355,6 +1389,11 @@ def load_results(input_dir: Path) -> List[ResultDoc]:
         data = _load_json(path)
         if data is None:
             continue
+        key = result_host_key(data)
+        if not matches_reference(key, reference):
+            label = key.get("fingerprint") or key.get("hostname") or "unknown"
+            skipped[str(label)] = skipped.get(str(label), 0) + 1
+            continue
         docs.append(classify_payload(data, path.name))
     # Ensure unique slugs.
     seen: Dict[str, int] = {}
@@ -1364,7 +1403,7 @@ def load_results(input_dir: Path) -> List[ResultDoc]:
         seen[base] = count + 1
         if count:
             doc.slug = f"{base}-{count + 1}"
-    return docs
+    return docs, skipped
 
 
 def _page_shell(title: str, body: str, *, relative_root: str = ".") -> str:
@@ -2061,11 +2100,18 @@ def render_methodology(docs: Sequence[ResultDoc], generated_at: str) -> str:
     return _page_shell("Methodology — MQTT Python client bench", body)
 
 
-def build_site(input_dir: Path | str, output_dir: Path | str) -> Dict[str, Any]:
-    """Generate the static site under output_dir from JSON files in input_dir."""
+def build_site(
+    input_dir: Path | str, output_dir: Path | str, *, reference: Any = _AUTO_REFERENCE
+) -> Dict[str, Any]:
+    """Generate the static site under output_dir from JSON files in input_dir.
+
+    ``reference=None`` publishes every document regardless of which machine it
+    came from. That is for callers that are exercising rendering rather than
+    provenance; a published site always passes the default.
+    """
     input_path = Path(input_dir)
     output_path = Path(output_dir)
-    docs = load_results(input_path)
+    docs, skipped_hosts = load_results_with_skips(input_path, reference=reference)
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     if output_path.exists():
@@ -2099,5 +2145,8 @@ def build_site(input_dir: Path | str, output_dir: Path | str) -> Dict[str, Any]:
         "input": str(input_path),
         "output": str(output_path),
         "results": len(docs),
+        # Named, not just counted: a reader who expected a document and does not
+        # find it needs to know which machine it came from.
+        "skipped_by_host": skipped_hosts,
         "generated_at": generated_at,
     }
