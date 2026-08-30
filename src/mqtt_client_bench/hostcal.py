@@ -510,7 +510,9 @@ def _run_hammer(mode: str, *, cpuset: Optional[str], clients: int, seconds: int,
 # Paced offers to walk, in msgs/s. Below the knee a paced hammer delivers what
 # it was asked for to within a fraction of a percent; above it, delivery flattens
 # at the broker's rate.
-PACED_GRID = (50_000, 100_000, 150_000, 200_000, 250_000, 300_000, 400_000)
+PACED_GRID = (
+    100_000, 200_000, 300_000, 400_000, 500_000, 600_000, 700_000, 800_000
+)
 
 # Repeats per step. Two would do below the knee, where the spread is 0.3%; the
 # plateau is the noisier part and three keeps it honest without tripling the
@@ -524,6 +526,10 @@ PACED_HOLD_RATIO = 0.97
 # count is what the unpaced probe used to do — pointlessly, since the number it
 # was reading back was the broker's and not the loadgen's.
 PACED_PUB_THREADS = 2
+
+# Sized against the batched pacer, which delivers 600k from one core group at
+# 20% CPU. The old spin pacer saturated that group at every rate and could not
+# hold 200k, which is why the grid used to stop at 400k.
 
 # How far below the measured knee a campaign offer should sit.
 #

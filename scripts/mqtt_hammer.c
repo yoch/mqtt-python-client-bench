@@ -2,8 +2,8 @@
  * In-tree MQTT 3.1.1 QoS0 pub/sub load generator for this harness.
  *
  * Written for mqtt-python-client-bench (PR #4). Not emqtt-bench, not
- * mosquitto_pub: two publisher threads, TCP_NODELAY, and a busy-wait
- * aggregate --rate pacer (nanosleep cannot hold a 5 µs period).
+ * mosquitto_pub: TCP_NODELAY, and an aggregate --rate pacer that sleeps once
+ * per tick and sends what the tick owes, rather than spinning per message.
  *
  * Usage:
  *   mqtt_hammer sub  --host 127.0.0.1 --port 11883 --topic t --duration 12
@@ -230,33 +230,88 @@ static int mqtt_subscribe(int fd, const char *topic)
 static atomic_uint_fast64_t g_pub_ok;
 static atomic_uint_fast64_t g_sub_ok;
 
-/* Cap aggregate send rate. Busy-wait: nanosleep cannot hold a 5 µs period.
- * No catch-up burst: if a thread falls behind, the next slot is `now`, not
- * a pile of skipped periods. */
-static void throttle(void)
+/* Aggregate rate pacing, one sleep per tick instead of one spin per message.
+ *
+ * The original pacer busy-waited on a shared slot, once per message, because a
+ * 5 µs period is below what nanosleep can hold. The conclusion did not follow
+ * from the premise: nothing requires sleeping *per message*. Sleeping per tick
+ * and sending the messages the tick owes costs one syscall per tick, and a
+ * 250 µs tick is well within what clock_nanosleep holds.
+ *
+ * What the spin cost, measured on the reference host with the publisher pinned
+ * to one physical core: 200% CPU — both hyperthreads saturated — at every
+ * requested rate, including 100k msgs/s where it delivered exactly 100k. About
+ * nine tenths of the core group went into the wait loop rather than into
+ * publishing. The visible symptom was that asking for less delivered less than
+ * asking for more: 200k requested came back 186k while 300k requested came back
+ * 230k, because the slower the target, the more the pacer spun, on the very
+ * cores it was competing with.
+ *
+ * Each thread owns a share of the aggregate rate and its own absolute deadline
+ * schedule, so there is no shared atomic on the hot path at all.
+ *
+ * No catch-up burst, which the spin pacer was careful about and this keeps: a
+ * thread that wakes late owes one tick, never the pile it slept through.
+ * Otherwise a scheduling hiccup would be repaid as a burst, and a burst is
+ * precisely what an offer must not contain.
+ */
+static int g_tick_us = 250;
+
+/* Largest single write the pacer will issue. Sized to stay inside a normal
+ * socket buffer so a batch does not block half-written. */
+#define MAX_BATCH_BYTES (64 * 1024)
+
+struct pacer {
+	uint64_t next_ns;   /* absolute deadline of the current tick */
+	uint64_t tick_ns;
+	uint64_t per_tick;  /* whole messages this thread owes each tick */
+	uint64_t rem_num;   /* fractional remainder, carried exactly */
+	uint64_t rem_den;
+	uint64_t rem_acc;
+};
+
+static void pacer_init(struct pacer *p, uint64_t thread_rate)
 {
-	if (g_rate <= 0) {
-		return;
+	p->tick_ns = (uint64_t)g_tick_us * 1000ull;
+	p->rem_den = 1000000000ull / p->tick_ns; /* ticks per second */
+	if (p->rem_den == 0) {
+		p->rem_den = 1;
 	}
-	const uint64_t period = 1000000000ull / (uint64_t)g_rate;
-	for (;;) {
+	p->per_tick = thread_rate / p->rem_den;
+	p->rem_num = thread_rate % p->rem_den;
+	p->rem_acc = 0;
+	p->next_ns = nsec_now() + p->tick_ns;
+}
+
+/* Sleep until this thread's next tick; return how many messages it owes.
+ *
+ * The fractional part is carried rather than rounded, so a rate that is not a
+ * whole number of messages per tick still comes out exact over a second — at
+ * 200k msgs/s across 3 threads that is 16.67 per tick, and rounding either way
+ * would miss the target by 2%. */
+static uint64_t pacer_wait(struct pacer *p)
+{
+	struct timespec ts;
+	ts.tv_sec = (time_t)(p->next_ns / 1000000000ull);
+	ts.tv_nsec = (long)(p->next_ns % 1000000000ull);
+	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {
 		if (g_stop) {
-			return;
-		}
-		uint64_t slot = atomic_load_explicit(&g_next_ns, memory_order_relaxed);
-		uint64_t now = nsec_now();
-		if (now < slot) {
-			continue;
-		}
-		uint64_t next = slot + period;
-		if (next < now) {
-			next = now;
-		}
-		if (atomic_compare_exchange_weak_explicit(
-			    &g_next_ns, &slot, next, memory_order_relaxed, memory_order_relaxed)) {
-			return;
+			return 0;
 		}
 	}
+	uint64_t now = nsec_now();
+	p->next_ns += p->tick_ns;
+	if (p->next_ns < now) {
+		/* Woke late. Resynchronise instead of owing the missed ticks. */
+		p->next_ns = now + p->tick_ns;
+	}
+	uint64_t due = p->per_tick;
+	p->rem_acc += p->rem_num;
+	if (p->rem_acc >= p->rem_den) {
+		p->rem_acc -= p->rem_den;
+		due++;
+	}
+	return due;
 }
 
 static void wait_interval(uint64_t *next_ns, uint64_t period_ns)
@@ -293,17 +348,69 @@ static void *pub_thread(void *raw)
 	size_t n = arg->pkt_len;
 	uint64_t period_ns = g_rate > 0 ? 0ull : (uint64_t)g_interval_us * 1000ull;
 	uint64_t next_ns = nsec_now();
-	while (!g_stop) {
-		throttle();
-		if (g_stop) {
-			break;
+
+	if (g_rate > 0) {
+		/* Split the aggregate rate across threads, giving the remainder to
+		 * the low-numbered ones so the total is exact rather than short. */
+		uint64_t rate = (uint64_t)g_rate;
+		uint64_t clients = (uint64_t)(g_clients > 0 ? g_clients : 1);
+		uint64_t share = rate / clients;
+		if ((uint64_t)arg->id < rate % clients) {
+			share++;
 		}
+		struct pacer pacer;
+		pacer_init(&pacer, share);
+
+		/* Coalesce a tick's packets into one write.
+		 *
+		 * Pacing per tick removed the spin; this removes the syscall that
+		 * replaced it as the limit. The packets a tick owes are identical
+		 * and consecutive, so they can go out in a single send() instead of
+		 * one per message — the broker reads the same bytes either way, and
+		 * TCP would have coalesced them in the socket buffer regardless.
+		 *
+		 * The buffer is capped rather than sized from the tick: a large rate
+		 * with a large tick would otherwise allocate megabytes, and a write
+		 * that large stops fitting the socket buffer and blocks mid-way,
+		 * which is the back-pressure this pacer exists to avoid. Anything
+		 * above the cap goes out as several full writes. */
+		size_t batch_max = MAX_BATCH_BYTES / n;
+		if (batch_max < 1) {
+			batch_max = 1;
+		}
+		uint8_t *batch = malloc(batch_max * n);
+		if (batch == NULL) {
+			fprintf(stderr, "pub %d: out of memory for batch buffer\n", arg->id);
+			goto done;
+		}
+		for (size_t i = 0; i < batch_max; i++) {
+			memcpy(batch + i * n, pkt, n);
+		}
+		while (!g_stop) {
+			uint64_t due = pacer_wait(&pacer);
+			while (due > 0 && !g_stop) {
+				size_t k = due > batch_max ? batch_max : (size_t)due;
+				if (write_all(fd, batch, k * n) < 0) {
+					free(batch);
+					goto done;
+				}
+				atomic_fetch_add_explicit(&g_pub_ok, (uint_fast64_t)k,
+							  memory_order_relaxed);
+				due -= k;
+			}
+		}
+		free(batch);
+		goto done;
+	}
+
+	while (!g_stop) {
 		if (write_all(fd, pkt, n) < 0) {
 			break;
 		}
 		atomic_fetch_add_explicit(&g_pub_ok, 1, memory_order_relaxed);
 		wait_interval(&next_ns, period_ns);
 	}
+done:;
 	close(fd);
 	return NULL;
 }
@@ -447,7 +554,9 @@ static void usage(const char *argv0)
 	fprintf(stderr,
 		"Usage: %s pub|sub [--host H] [--port P] [--topic T] [--clients N]\n"
 		"                 [--payload B] [--duration S] [--rate R] [--interval-us U]\n"
-		"  --rate R         aggregate QoS0 pubs/s cap (busy-wait; 0 = unlimited)\n"
+		"  --rate R         aggregate QoS0 pubs/s cap (0 = unlimited)\n"
+		"  --tick-us U      pacer tick in us (default 250); larger is cheaper,\n"
+		"                   smaller spreads arrivals more evenly\n"
 		"  --interval-us U  per-thread period when --rate is unset (busy-wait)\n",
 		argv0);
 }
@@ -468,6 +577,7 @@ int main(int argc, char **argv)
 		{"duration", required_argument, NULL, 'd'},
 		{"interval-us", required_argument, NULL, 'i'},
 		{"rate", required_argument, NULL, 'r'},
+		{"tick-us", required_argument, NULL, 'k'},
 		{0, 0, 0, 0},
 	};
 	optind = 2;
@@ -499,6 +609,14 @@ int main(int argc, char **argv)
 			g_rate = atoi(optarg);
 			if (g_rate < 0) {
 				g_rate = 0;
+			}
+			break;
+		case 'k':
+			g_tick_us = atoi(optarg);
+			if (g_tick_us < 10) {
+				/* Below this the sleep granularity dominates and the
+				 * pacer stops being cheaper than the spin it replaced. */
+				g_tick_us = 10;
 			}
 			break;
 		default:

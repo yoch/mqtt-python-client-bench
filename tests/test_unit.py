@@ -2732,24 +2732,25 @@ class HostCalibrationTests(unittest.TestCase):
         # delivery flattens at the broker's rate. Measured on the reference
         # host: 100k -> 99985, 200k -> 199099, 400k -> 230023.
         def _fake(mode, *, clients, rate, **kw):
-            return {"msgs_per_s": min(float(rate), 231000.0)}
+            return {"msgs_per_s": min(float(rate), 620000.0)}
 
         with patch.object(hostcal, "_run_hammer", side_effect=_fake):
             result = hostcal.measure_broker_paced_ceiling(cpuset=None, seconds=1)
 
-        # 200k held, 250k did not: the ceiling is the last delivered offer, and
-        # the walk stops rather than reading the plateau as a higher one.
-        self.assertEqual(result["msgs_per_s"], 200000.0)
+        # 600k held; 700k delivered 620k, which is 88% of what was asked and so
+        # below the 97% bar. The ceiling is the last *delivered* offer, and the
+        # walk stops there rather than reading the plateau as a higher one.
+        self.assertEqual(result["msgs_per_s"], 600000.0)
         self.assertEqual([s["offer_msgs_per_s"] for s in result["steps"]],
-                         [50000, 100000, 150000, 200000, 250000])
+                         [100000, 200000, 300000, 400000, 500000, 600000, 700000])
         self.assertEqual([s["held"] for s in result["steps"]],
-                         [True, True, True, True, False])
+                         [True, True, True, True, True, True, False])
 
         # An offer sits below the knee, not on it: at the knee it lands above on
         # about half the runs, and above it delivery flattens at whatever the
         # broker does rather than at what was asked for.
         self.assertLess(result["recommended_offer_msgs_per_s"], result["msgs_per_s"])
-        self.assertEqual(result["recommended_offer_msgs_per_s"], 170000.0)
+        self.assertEqual(result["recommended_offer_msgs_per_s"], 510000.0)
 
     def test_a_sweep_that_delivers_nothing_fails(self):
         from mqtt_client_bench import hostcal
