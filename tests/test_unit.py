@@ -1794,6 +1794,29 @@ class FairnessGateTests(unittest.TestCase):
             host_state_reasons({"scaling_governor": "performance", "loadavg": [20.0], "cpu_count": 64}), []
         )
 
+    def test_unreadable_governor_fails_closed(self):
+        # A host with no cpufreq sysfs (container, VM) reports None. Treating
+        # that as "fine" let a full campaign measured off the reference host
+        # come back `valid`; an unknown frequency policy is not a comparable one.
+        from mqtt_client_bench.harness import host_state_reasons
+
+        self.assertEqual(
+            host_state_reasons({"scaling_governor": None, "loadavg": [1.0], "cpu_count": 8}),
+            ["cpu_governor_unknown"],
+        )
+        # Key absent entirely is the same claim: no evidence of a pinned clock.
+        self.assertEqual(
+            host_state_reasons({"loadavg": [1.0], "cpu_count": 8}), ["cpu_governor_unknown"]
+        )
+
+    def test_host_state_reasons_reach_the_environment_banner(self):
+        # The gate is only useful if the report says why the run is unusable.
+        from mqtt_client_bench.report import _reason_kind
+
+        self.assertEqual(_reason_kind("cpu_governor_unknown"), "environment")
+        self.assertEqual(_reason_kind("cpu_governor_not_performance:powersave"), "environment")
+        self.assertEqual(_reason_kind("host_busy_at_start:20.0"), "environment")
+
     def test_inflight_window_is_equalised_except_in_the_sweep(self):
         # Clients that expose max_inflight must not run a narrower window than
         # clients that ignore it and are bounded only by `outstanding`.

@@ -187,7 +187,13 @@ def host_state_reasons(host_state: Optional[dict]) -> List[str]:
     if not host_state:
         return reasons
     governor = host_state.get("scaling_governor")
-    if governor and governor != "performance":
+    if governor is None:
+        # No cpufreq sysfs at all: a container or a VM, not the reference host.
+        # Skipping the check here let a whole campaign measured under an unknown
+        # frequency policy come back `valid`, which is the one thing this gate
+        # exists to prevent. Absent evidence is not evidence of a pinned clock.
+        reasons.append("cpu_governor_unknown")
+    elif governor != "performance":
         reasons.append(f"cpu_governor_not_performance:{governor}")
     load = host_state.get("loadavg") or []
     cpus = int(host_state.get("cpu_count") or os.cpu_count() or 1)

@@ -114,6 +114,12 @@ _ENVIRONMENT_REASON_PREFIXES = (
     "barrier_failed",
     "sys_publish_dropped",
     "delivery_below_half_offer",
+    # Host state at T0. Without these the governor and loadavg gates fired but
+    # the run only ever showed up as "other", so a machine-invalidated result
+    # never reached the environment banner.
+    "cpu_governor_unknown",
+    "cpu_governor_not_performance:",
+    "host_busy_at_start:",
 )
 
 # Values within this relative tolerance of the row/series maximum are treated
