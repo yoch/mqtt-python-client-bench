@@ -113,6 +113,17 @@ static int write_all(int fd, const uint8_t *buf, size_t n)
 	return 0;
 }
 
+/* Absolute deadline for the subscriber's read loop, or 0 for "no deadline".
+ *
+ * read_all retries EAGAIN internally, so a caller that owns a deadline cannot
+ * enforce it between calls: with the socket idle, the retry loop never returns
+ * and the outer `now < end` test is never reached again. Measured before this:
+ * `--duration 5` ran for 90 seconds, exiting only when the MQTT keepalive
+ * dropped the connection — and the reported `seconds` was that 90, which made
+ * the JSON's msgs_per_s meaningless (5191 for a stream that was arriving at
+ * 76k). The count was right the whole time; only the window was wrong. */
+static _Atomic uint64_t g_read_deadline_ns;
+
 static int read_all(int fd, uint8_t *buf, size_t n)
 {
 	size_t off = 0;
@@ -124,6 +135,12 @@ static int read_all(int fd, uint8_t *buf, size_t n)
 		ssize_t r = recv(fd, buf + off, n - off, 0);
 		if (r < 0) {
 			if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+				uint64_t deadline =
+					atomic_load_explicit(&g_read_deadline_ns, memory_order_relaxed);
+				if (deadline != 0 && nsec_now() >= deadline) {
+					errno = ETIMEDOUT;
+					return -1;
+				}
 				continue;
 			}
 			return -1;
@@ -447,11 +464,16 @@ static int run_sub(void)
 	uint64_t last = t0;
 	uint64_t last_count = 0;
 	uint64_t end = t0 + (uint64_t)g_duration_s * 1000000000ull;
+	/* So an idle socket cannot hold the loop past its window. */
+	atomic_store_explicit(&g_read_deadline_ns, end, memory_order_relaxed);
 	uint8_t scratch[65536];
 	while (!g_stop && nsec_now() < end) {
 		uint8_t hdr;
 		int rc = read_all(fd, &hdr, 1);
 		if (rc < 0) {
+			if (errno == ETIMEDOUT) {
+				break;
+			}
 			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
 				uint64_t now = nsec_now();
 				if (now - last >= 1000000000ull) {
