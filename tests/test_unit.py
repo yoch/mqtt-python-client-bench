@@ -2311,6 +2311,12 @@ class HostCalibrationTests(unittest.TestCase):
         self.assertEqual(_ceiling_from_steps(steps), 63800)
         self.assertIsNone(_ceiling_from_steps([]))
 
+        # run_scenario does not promise to return points in the order it was
+        # given - observed here as 64k, 32k, 128k - and a walk that stops at
+        # the first unsustained step reads the wrong knee out of order.
+        shuffled = [steps[1], steps[0], steps[3], steps[2]]
+        self.assertEqual(_ceiling_from_steps(shuffled), 63800)
+
     def test_cpu_utilisation_decides_when_loadavg_looks_fine(self):
         from mqtt_client_bench import hostcal
 

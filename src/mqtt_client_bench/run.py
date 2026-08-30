@@ -214,6 +214,7 @@ def cmd_calibrate_host(args: argparse.Namespace) -> int:
         print(f"host calibration refused: {exc}")
         return 2
 
+    refused = profile.get("reference_refused")
     output = args.output or str(Path("hosts") / profile_path_name(profile))
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     write_json(output, profile)
@@ -224,12 +225,19 @@ def cmd_calibrate_host(args: argparse.Namespace) -> int:
                 "host_fingerprint": profile["host_fingerprint"],
                 "role": profile["role"],
                 "idle_verified": profile["idle"]["verified"],
+                "reference_refused": refused,
                 "host": profile["host"],
                 "ceilings": profile["ceilings"],
             },
             indent=2,
         )
     )
+    if refused:
+        print(
+            "written as a runner profile: the machine was not quiet enough to "
+            "be the reference (" + "; ".join(refused) + ")"
+        )
+        return 2
     return 0
 
 
