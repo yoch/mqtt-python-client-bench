@@ -2343,6 +2343,20 @@ class HostCalibrationTests(unittest.TestCase):
         self.assertIn("broker_fanout_msgs_per_s", _FINGERPRINT_CEILINGS)
         self.assertNotIn("broker_ceiling_msgs_per_s", _FINGERPRINT_CEILINGS)
 
+    def test_budget_splits_across_the_probes(self):
+        from mqtt_client_bench.hostcal import probe_durations
+
+        # One knob, because a host is calibrated once: the operator should set
+        # how long they are willing to wait, not four durations.
+        plan = probe_durations(300.0)
+        self.assertEqual(plan["budget_s"], 300.0)
+        self.assertGreaterEqual(plan["harness_passes"], 30)
+        self.assertGreaterEqual(plan["loadgen_step_s"], 30)
+        # The floor keeps a mistyped budget from producing a meaningless probe.
+        tiny = probe_durations(1.0)
+        self.assertGreaterEqual(tiny["budget_s"], 30.0)
+        self.assertGreaterEqual(tiny["harness_passes"], 5)
+
     def test_calibration_refuses_a_busy_machine(self):
         from mqtt_client_bench import hostcal
 
@@ -2352,7 +2366,7 @@ class HostCalibrationTests(unittest.TestCase):
         busy = {"idle": False, "reasons": ["host_busy:loadavg=9.0 over 1.6"], "loadavg_before": 9.0}
         with patch.object(hostcal, "check_host_idle", return_value=busy):
             with self.assertRaises(hostcal.HostNotIdle):
-                hostcal.calibrate_host(skip_ceilings=True, passes=1)
+                hostcal.calibrate_host(skip_ceilings=True, budget_s=30.0)
 
     def test_host_profile_must_match_the_machine_it_runs_on(self):
         from mqtt_client_bench.harness import _validate_host_profile

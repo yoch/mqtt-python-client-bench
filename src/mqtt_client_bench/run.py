@@ -205,6 +205,7 @@ def cmd_calibrate_host(args: argparse.Namespace) -> int:
         profile = calibrate_host(
             profile=args.profile,
             role=args.role,
+            budget_s=args.budget_seconds,
             skip_ceilings=args.skip_ceilings,
             allow_busy=args.allow_busy,
         )
@@ -364,6 +365,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Default: hosts/<hostname>-<fingerprint>.json",
     )
     host_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
+    host_p.add_argument(
+        "--budget-seconds",
+        type=float,
+        default=300.0,
+        help=(
+            "Wall-clock budget for the whole calibration (default 300). A host "
+            "is calibrated once, so long probes are cheap; short ones were not "
+            "stable enough to pick a hammer thread count."
+        ),
+    )
     host_p.add_argument(
         "--role",
         choices=["reference", "runner"],
