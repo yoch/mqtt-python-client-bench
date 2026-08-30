@@ -476,11 +476,17 @@ SCENARIOS: List[Scenario] = [
     Scenario(
         name="mqttv5_flow_control",
         suite="full",
-        tags=("diagnostic", "planned"),
+        tags=("diagnostic",),
         topology="publisher_only",
-        description="Receive Maximum vs client inflight interaction (planned — not executable yet).",
+        description=(
+            "MQTT v5 broker Receive Maximum vs client inflight: the broker "
+            "advertises RM in CONNACK (Mosquitto max_inflight_messages overlay) "
+            "while the client window stays at 100."
+        ),
         protocol="MQTTv5",
         qos_publish=1,
+        payload="telemetry256",
+        cadence="capacity",
         variants=(
             {"receive_maximum": 10, "inflight": 100},
             {"receive_maximum": 100, "inflight": 100},
@@ -503,21 +509,48 @@ SCENARIOS: List[Scenario] = [
     Scenario(
         name="queue_rejection",
         suite="full",
-        tags=("functional", "planned"),
+        tags=("functional",),
         topology="publisher_only",
-        description="Queue rejection accounting under controlled pressure (planned — not executable yet).",
+        description=(
+            "Outbound queue accounting: submit 150 QoS1 publishes against "
+            "inflight=1 and max_queued=100, and record accept vs reject. "
+            "Submissions never wait for completions - the point is to reach the "
+            "queue bound, and anything awaited between calls drains it. A "
+            "client that admits a publish on its loop (mqttium, gmqtt) is "
+            "driven natively, where refusal comes back inline; everything else "
+            "runs the sync facade, where publish() returns QUEUE_FULL. "
+            "mqttium-compat may return rc=0 and only later set the handle to "
+            "QUEUE_SIZE (documented Paho-facade contract), so it stays "
+            "inconclusive."
+        ),
         qos_publish=1,
-        inflight=1,
-        max_queued=100,
+        payload="telemetry256",
         cadence="capacity",
-        variants=({"expected_accepts": 100, "expected_rejects": 50, "submit_count": 150},),
+        variants=(
+            {
+                "expected_accepts": 100,
+                "expected_rejects": 50,
+                "submit_count": 150,
+                "inflight": 1,
+                "max_queued": 100,
+            },
+        ),
     ),
     Scenario(
         name="retained_bootstrap",
         suite="full",
-        tags=("stress", "functional", "planned"),
+        tags=("stress", "functional"),
         topology="subscriber_ingress",
-        description="Retained message bootstrap snapshot (broker-sensitive; planned — not executable yet).",
+        description=(
+            "Retained snapshot ingest: the harness seeds N retained messages, "
+            "then the SUT subscriber subscribes at T_MEASURE and counts the dump. "
+            "Broker-sensitive; never ranked."
+        ),
+        qos_publish=0,
+        qos_subscribe=0,
+        payload="telemetry256",
+        cadence="capacity",
+        subscription="retained",
         subscribers=1,
         variants=tuple({"retained_count": n} for n in (10_000, 100_000)),
     ),
@@ -699,7 +732,8 @@ def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[
     points = []
     for variant in base_variants:
         resolved = scenario.resolved(variant)
-        if "inflight" in variant:
+        pin_queue = resolved.get("submit_count") is not None
+        if "inflight" in variant or pin_queue:
             resolved["require_max_inflight"] = True
         else:
             # Equalise the effective in-flight window. Clients that expose
@@ -709,11 +743,19 @@ def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[
             # showed up directly in the QoS>=1 rankings. Only `pub_qos1_inflight`
             # (which pins `inflight` in its variants) still sweeps the window.
             resolved["inflight"] = int(resolved.get("outstanding", 64))
-        if "max_queued" in variant:
+        if "max_queued" in variant or pin_queue:
             resolved["require_max_queued"] = True
-        # The queue sits behind the in-flight window; keep it clear of the gate so
-        # it is never the binding constraint for a client that honours both.
-        resolved["max_queued"] = max(int(resolved.get("max_queued", 200)), 10 * int(resolved["inflight"]))
+        if pin_queue:
+            # The queue *is* the measurement. Do not inflate it above the pin.
+            resolved["inflight"] = int(resolved.get("inflight", 1))
+            resolved["max_queued"] = int(resolved.get("max_queued", 100))
+        else:
+            # The queue sits behind the in-flight window; keep it clear of the
+            # gate so it is never the binding constraint for a client that
+            # honours both.
+            resolved["max_queued"] = max(
+                int(resolved.get("max_queued", 200)), 10 * int(resolved["inflight"])
+            )
         resolved["effective_inflight_window"] = int(resolved["inflight"])
         resolved["duration_s"] = float(spec["duration_s"])
         resolved["warmup_s"] = float(spec["warmup_s"])
@@ -726,9 +768,20 @@ def expand_scenario(scenario: Scenario, profile: str = "standard") -> List[Dict[
             if "diagnostic" not in tags:
                 tags.append("diagnostic")
             resolved["tags"] = tags
-        # Ceiling probes are diagnostic / non-ranking.
-        if scenario.name in ("broker_ceiling_ingress", "client_ceiling_ingress"):
+        # Ceiling probes and the retained snapshot are diagnostic / non-ranking.
+        if scenario.name in (
+            "broker_ceiling_ingress",
+            "client_ceiling_ingress",
+            "retained_bootstrap",
+        ):
             resolved["non_comparable"] = True
+        if scenario.name == "retained_bootstrap":
+            resolved["defer_subscribe"] = True
+            resolved["subscription"] = "retained"
+            # Smoke keeps the same contract but a smaller snapshot so a 3 s
+            # window is not spent seeding 100k retained messages.
+            if profile == "smoke":
+                resolved["retained_count"] = min(int(resolved.get("retained_count") or 0), 200)
         # Planned / incomplete scenarios stay in the catalogue but are non-executable.
         if "planned" in scenario.tags:
             resolved["non_comparable"] = True
