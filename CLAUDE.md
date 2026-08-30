@@ -21,8 +21,9 @@ suites are executed locally by the maintainer, only unit tests and the report bu
 run in Actions.
 
 Reference docs: `README.md` (catalogue, comparability matrix, limitations),
-`SCENARIOS.md` (per-scenario wiring — in French), `docs/CEILING_PROBES.md`
-(broker-vs-client ceiling runbook).
+`SCENARIOS.md` (per-scenario wiring), `docs/CEILING_PROBES.md`
+(broker-vs-client ceiling runbook), `docs/MOSQUITTO_PROFILING.md` (what limits
+the broker itself, and the optional patched-2.0.20 A/B image).
 
 ## Commands
 
