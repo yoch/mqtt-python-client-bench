@@ -2510,22 +2510,55 @@ class HostCalibrationTests(unittest.TestCase):
         self.assertEqual(result["best_thread_count"], 4)
         self.assertEqual(len(result["steps"]), 4)
 
-    def test_one_thread_beating_the_rest_is_refused(self):
+    def test_a_bimodal_step_is_reduced_by_median_not_by_its_luckiest_sample(self):
         from mqtt_client_bench import hostcal
 
-        # Observed on the reference host: 535,097 msgs/s at one thread against
-        # ~235,000 at two, four and eight in the same sweep, and 168,905 at one
-        # thread in the run before. A single thread cannot beat several on the
-        # same cores; the probe raced something. The ceiling drives every
-        # campaign offer, so the sweep is refused rather than averaged into
-        # something that looks plausible.
-        runs = {1: 535097.0, 2: 240376.0, 4: 233484.0, 8: 235209.0}
-        with patch.object(
-            hostcal, "_run_hammer",
-            side_effect=lambda mode, *, clients, **kw: {"msgs_per_s": runs[clients]},
-        ):
-            with self.assertRaises(hostcal.CalibrationFailed):
-                hostcal.measure_loadgen_ceiling(cpuset=None, seconds=1)
+        # Measured back to back on the reference host at two threads:
+        # 234844, 234626, 497245, 523924, 230867. Unpaced against a broker that
+        # reads and drops, this signal locks into one of two regimes. One sample
+        # per step tells you nothing, and taking the max across steps crowns
+        # whichever step drew the high one - which is how two 300 s
+        # calibrations came to disagree by 139% on a machine that was fine.
+        samples = {
+            1: [637337.0, 362473.0, 171035.0, 415107.0, 669672.0],
+            2: [234844.0, 234626.0, 497245.0, 523924.0, 230867.0],
+            4: [231477.0, 227778.0, 494733.0, 236544.0, 230913.0],
+            8: [224668.0, 226101.0, 222986.0, 235209.0, 233484.0],
+        }
+        counters = {k: 0 for k in samples}
+
+        def _fake(mode, *, clients, **kw):
+            i = counters[clients]
+            counters[clients] += 1
+            return {"msgs_per_s": samples[clients][i]}
+
+        with patch.object(hostcal, "_run_hammer", side_effect=_fake):
+            with patch.object(hostcal, "LOADGEN_REPEATS", 5):
+                result = hostcal.measure_loadgen_ceiling(cpuset=None, seconds=1)
+
+        # Medians: 1 -> 415107 (its spread is 3.9x, still under the bar),
+        # 2 -> 234844, 4 -> 231477, 8 -> 226101. The single-thread median wins
+        # here, and that is a claim about medians rather than about luck.
+        by_clients = {s["clients"]: s["msgs_per_s"] for s in result["steps"]}
+        self.assertEqual(by_clients[2], 234844.0)
+        self.assertEqual(by_clients[4], 231477.0)
+        # Every sample is kept: the two regimes are the finding, not noise to
+        # summarise away.
+        self.assertEqual(len(by_clients), 4)
+        self.assertEqual(result["repeats"], 5)
+        for step in result["steps"]:
+            self.assertEqual(len(step["samples"]), 5)
+
+    def test_a_step_whose_samples_share_no_regime_fails(self):
+        from mqtt_client_bench import hostcal
+
+        with patch.object(hostcal, "_run_hammer",
+                          side_effect=lambda mode, *, clients, **kw: {"msgs_per_s": 10.0 if clients == 1 else 200000.0}):
+            with patch.object(hostcal, "LOADGEN_REPEATS", 2):
+                with patch.object(hostcal, "_run_hammer",
+                                  side_effect=[{"msgs_per_s": 10.0}, {"msgs_per_s": 500000.0}]):
+                    with self.assertRaises(hostcal.CalibrationFailed):
+                        hostcal.measure_loadgen_ceiling(cpuset=None, seconds=1)
 
     def test_fanout_ceiling_is_named_as_a_diagnostic_not_an_offer(self):
         from mqtt_client_bench.hostcal import _FINGERPRINT_CEILINGS
