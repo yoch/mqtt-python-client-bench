@@ -6,7 +6,9 @@ from **SUT client ceiling**. These points are `suite=full`, tagged
 `diagnostic`, and **non_comparable** (not ranking core). The catalogue
 ceiling grid still uses `loadgen_clients` 32 / 64 / 128 (`I=1` nominal).
 QoS0 exact-topic steps ride paced mqtt_hammer; emqtt-bench cannot hold 128k
-on one loadgen core.
+on one loadgen core. For *why* the broker sits where it does — the per-byte
+header `read(2)` in 2.0.x and what 2.1 replaced it with — see
+`MOSQUITTO_PROFILING.md`.
 
 ## The 64k trap (emqtt-bench QoS0 double counting)
 

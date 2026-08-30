@@ -1,0 +1,136 @@
+diff --git a/lib/mosquitto_internal.h b/lib/mosquitto_internal.h
+index 3112025..d8a81fd 100644
+--- a/lib/mosquitto_internal.h
++++ b/lib/mosquitto_internal.h
+@@ -208,6 +208,12 @@ struct mosquitto_msg_data{
+ };
+ 
+ 
++#ifdef WITH_BROKER
++#  define MOSQ_SOCK_READ_PENDING(m) ((m)->sock_read_pos < (m)->sock_read_end)
++#else
++#  define MOSQ_SOCK_READ_PENDING(m) 0
++#endif
++
+ struct mosquitto {
+ #if defined(WITH_BROKER) && defined(WITH_EPOLL)
+ 	/* This *must* be the first element in the struct. */
+@@ -285,6 +291,12 @@ struct mosquitto {
+ 	bool in_by_id;
+ 	bool is_dropping;
+ 	bool is_bridge;
++	/* Userspace read-ahead: packet__read consumes the MQTT header one byte
++	 * at a time. Without this, each of those is a read(2). */
++	uint8_t *sock_read_buf;
++	uint32_t sock_read_size;
++	uint32_t sock_read_pos;
++	uint32_t sock_read_end;
+ 	struct mosquitto__bridge *bridge;
+ 	struct mosquitto_msg_data msgs_in;
+ 	struct mosquitto_msg_data msgs_out;
+diff --git a/lib/net_mosq.c b/lib/net_mosq.c
+index fb0c7ac..d84fdd9 100644
+--- a/lib/net_mosq.c
++++ b/lib/net_mosq.c
+@@ -966,6 +966,10 @@ static int net__handle_ssl(struct mosquitto* mosq, int ret)
+ }
+ #endif
+ 
++#ifdef WITH_BROKER
++#  define MOSQ_SOCK_READ_BUF 8192
++#endif
++
+ ssize_t net__read(struct mosquitto *mosq, void *buf, size_t count)
+ {
+ #ifdef WITH_TLS
+@@ -987,7 +991,48 @@ ssize_t net__read(struct mosquitto *mosq, void *buf, size_t count)
+ #endif
+ 
+ #ifndef WIN32
++#ifdef WITH_BROKER
++	{
++		uint8_t *dst = buf;
++		size_t copied = 0;
++		if(mosq->sock_read_pos < mosq->sock_read_end){
++			size_t avail = mosq->sock_read_end - mosq->sock_read_pos;
++			size_t take = avail < count ? avail : count;
++			memcpy(dst, mosq->sock_read_buf + mosq->sock_read_pos, take);
++			mosq->sock_read_pos += (uint32_t)take;
++			copied = take;
++			if(copied == count){
++				return (ssize_t)copied;
++			}
++			dst += take;
++			count -= take;
++		}
++		if(!mosq->sock_read_buf){
++			mosq->sock_read_buf = mosquitto__malloc(MOSQ_SOCK_READ_BUF);
++			if(!mosq->sock_read_buf){
++				if(copied){
++					return (ssize_t)copied;
++				}
++				return read(mosq->sock, dst, count);
++			}
++			mosq->sock_read_size = MOSQ_SOCK_READ_BUF;
++		}
++		{
++			ssize_t n = read(mosq->sock, mosq->sock_read_buf, mosq->sock_read_size);
++			if(n <= 0){
++				return copied ? (ssize_t)copied : n;
++			}
++			mosq->sock_read_pos = 0;
++			mosq->sock_read_end = (uint32_t)n;
++			size_t take = (size_t)n < count ? (size_t)n : count;
++			memcpy(dst, mosq->sock_read_buf, take);
++			mosq->sock_read_pos = (uint32_t)take;
++			return (ssize_t)(copied + take);
++		}
++	}
++#else
+ 	return read(mosq->sock, buf, count);
++#endif
+ #else
+ 	return recv(mosq->sock, buf, count, 0);
+ #endif
+diff --git a/src/context.c b/src/context.c
+index d838fc7..77aed78 100644
+--- a/src/context.c
++++ b/src/context.c
+@@ -166,6 +166,11 @@ void context__cleanup(struct mosquitto *context, bool force_free)
+ 		mosquitto__free(context->id);
+ 		context->id = NULL;
+ 	}
++	mosquitto__free(context->sock_read_buf);
++	context->sock_read_buf = NULL;
++	context->sock_read_size = 0;
++	context->sock_read_pos = 0;
++	context->sock_read_end = 0;
+ 	packet__cleanup(&(context->in_packet));
+ 	context__cleanup_out_packets(context);
+ #if defined(WITH_BROKER) && defined(__GLIBC__) && defined(WITH_ADNS)
+diff --git a/src/mux_epoll.c b/src/mux_epoll.c
+index 4532cf5..54e1922 100644
+--- a/src/mux_epoll.c
++++ b/src/mux_epoll.c
+@@ -296,7 +296,7 @@ static void loop_handle_reads_writes(struct mosquitto *context, uint32_t events)
+ 				do_disconnect(context, rc);
+ 				return;
+ 			}
+-		}while(SSL_DATA_PENDING(context));
++		}while(SSL_DATA_PENDING(context) || MOSQ_SOCK_READ_PENDING(context));
+ 	}else{
+ 		if(events & (EPOLLERR | EPOLLHUP)){
+ 			do_disconnect(context, MOSQ_ERR_CONN_LOST);
+diff --git a/src/mux_poll.c b/src/mux_poll.c
+index 496fcf8..31c4fea 100644
+--- a/src/mux_poll.c
++++ b/src/mux_poll.c
+@@ -337,7 +337,7 @@ static void loop_handle_reads_writes(void)
+ 					do_disconnect(context, rc);
+ 					continue;
+ 				}
+-			}while(SSL_DATA_PENDING(context));
++			}while(SSL_DATA_PENDING(context) || MOSQ_SOCK_READ_PENDING(context));
+ 		}else{
+ 			if(context->pollfd_index >= 0 && pollfds[context->pollfd_index].revents & (POLLERR | POLLNVAL | POLLHUP)){
+ 				do_disconnect(context, MOSQ_ERR_CONN_LOST);
