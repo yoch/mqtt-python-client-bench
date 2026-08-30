@@ -2631,6 +2631,73 @@ class HostCalibrationTests(unittest.TestCase):
             _validate_host_profile(unverified)
 
 
+class QueueRejectionPathTests(unittest.TestCase):
+    """Which path answers the queue-rejection question, and why."""
+
+    def test_sync_on_loop_clients_keep_their_native_path_for_a_burst(self):
+        from mqtt_client_bench.adapters.registry import get_async_adapter_class
+
+        # A burst used to force every client onto the sync facade, on the
+        # grounds that an awaited native path would drain the queue between
+        # submissions. That holds for await-only libraries and inverts for the
+        # ones that admit a publish on the loop: for those the facade is the
+        # expensive path, because its engine is on another thread and admission
+        # costs a round trip per call.
+        on_loop = {"mqttium", "gmqtt"}
+        awaited = {"aiomqtt", "aiomqtt3", "amqtt", "zmqtt"}
+        for name in on_loop:
+            self.assertTrue(
+                get_async_adapter_class(name).capabilities().publish_sync_on_loop,
+                f"{name} should submit on the loop",
+            )
+        for name in awaited:
+            self.assertFalse(
+                get_async_adapter_class(name).capabilities().publish_sync_on_loop,
+                f"{name} awaits, so a burst must stay on the facade",
+            )
+
+    def test_burst_on_loop_scores_admission_and_never_yields(self):
+        import asyncio as _asyncio
+        import inspect
+
+        from mqtt_client_bench.roles import publisher
+
+        # The streaming loop yields after a refusal so the write pump can
+        # drain. Here draining is the thing being measured against, so a yield
+        # would turn refusals back into accepts.
+        source = inspect.getsource(publisher._run_submit_burst_on_loop)
+        body = source.split('"""', 2)[-1]
+        self.assertNotIn("await ", body, "the burst must not yield to the loop")
+
+        class _BoundedQueue:
+            """Admits `bound` publishes, then refuses like FlowControlError."""
+
+            def __init__(self, bound):
+                self.bound = bound
+                self.admitted = 0
+                self.on_publish = None
+
+            def publish_nowait(self, topic, payload, qos, retain, props):
+                if self.admitted >= self.bound:
+                    return None
+                self.admitted += 1
+                return self.admitted
+
+        adapter = _BoundedQueue(100)
+        state = publisher.new_publisher_state()
+        state["phase"] = "measure"
+        _asyncio.new_event_loop().run_until_complete(
+            publisher._run_submit_burst_on_loop(
+                adapter, state, topic="t", qos=1, body=b"x" * 8, corpus=[],
+                run_id=b"testrun1", submit_count=150,
+                properties_builder=lambda: None, track_sequences=False,
+            )
+        )
+        self.assertEqual(state["publish_accepted"], 100)
+        self.assertEqual(state["publish_rejected"], 50)
+        self.assertEqual(state["offered"], 150)
+
+
 class SchemaTests(unittest.TestCase):
     def test_schema_file_exists_and_parses(self):
         import json
