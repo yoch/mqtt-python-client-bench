@@ -2441,7 +2441,7 @@ class HostCalibrationTests(unittest.TestCase):
             },
             "ceilings": {
                 "harness_cost_ns_per_message": 3500.0,
-                "loadgen_ceiling_msgs_per_s": 637000.0,
+                "broker_paced_ceiling_msgs_per_s": 231000.0,
                 "broker_fanout_msgs_per_s": 73000.0,
             },
         }
@@ -2461,7 +2461,7 @@ class HostCalibrationTests(unittest.TestCase):
         for mutation in (
             ("host", "threads_per_group", 1),
             ("host", "frequency_policy", "unpinned"),
-            ("ceilings", "loadgen_ceiling_msgs_per_s", 60000.0),
+            ("ceilings", "broker_paced_ceiling_msgs_per_s", 60000.0),
         ):
             section, key, value = mutation
             changed = json.loads(json.dumps(base))
@@ -2494,72 +2494,6 @@ class HostCalibrationTests(unittest.TestCase):
                     state = hostcal.check_host_idle()
         self.assertTrue(state["idle"], state["reasons"])
 
-    def test_loadgen_ceiling_takes_the_best_thread_count(self):
-        from mqtt_client_bench import hostcal
-
-        # HAMMER_PUB_CLIENTS = 2 is a hand-tuned constant; on this machine 4
-        # threads emit roughly twice what 2 do, and 8 collapse. The peak is a
-        # property of the core group, so it is found per host.
-        runs = {1: 131299.0, 2: 326202.0, 4: 636761.0, 8: 216900.0}
-        with patch.object(
-            hostcal, "_run_hammer",
-            side_effect=lambda mode, *, clients, **kw: {"msgs_per_s": runs[clients]},
-        ):
-            result = hostcal.measure_loadgen_ceiling(cpuset=None, seconds=1)
-        self.assertEqual(result["msgs_per_s"], 636761.0)
-        self.assertEqual(result["best_thread_count"], 4)
-        self.assertEqual(len(result["steps"]), 4)
-
-    def test_a_bimodal_step_is_reduced_by_median_not_by_its_luckiest_sample(self):
-        from mqtt_client_bench import hostcal
-
-        # Measured back to back on the reference host at two threads:
-        # 234844, 234626, 497245, 523924, 230867. Unpaced against a broker that
-        # reads and drops, this signal locks into one of two regimes. One sample
-        # per step tells you nothing, and taking the max across steps crowns
-        # whichever step drew the high one - which is how two 300 s
-        # calibrations came to disagree by 139% on a machine that was fine.
-        samples = {
-            1: [637337.0, 362473.0, 171035.0, 415107.0, 669672.0],
-            2: [234844.0, 234626.0, 497245.0, 523924.0, 230867.0],
-            4: [231477.0, 227778.0, 494733.0, 236544.0, 230913.0],
-            8: [224668.0, 226101.0, 222986.0, 235209.0, 233484.0],
-        }
-        counters = {k: 0 for k in samples}
-
-        def _fake(mode, *, clients, **kw):
-            i = counters[clients]
-            counters[clients] += 1
-            return {"msgs_per_s": samples[clients][i]}
-
-        with patch.object(hostcal, "_run_hammer", side_effect=_fake):
-            with patch.object(hostcal, "LOADGEN_REPEATS", 5):
-                result = hostcal.measure_loadgen_ceiling(cpuset=None, seconds=1)
-
-        # Medians: 1 -> 415107 (its spread is 3.9x, still under the bar),
-        # 2 -> 234844, 4 -> 231477, 8 -> 226101. The single-thread median wins
-        # here, and that is a claim about medians rather than about luck.
-        by_clients = {s["clients"]: s["msgs_per_s"] for s in result["steps"]}
-        self.assertEqual(by_clients[2], 234844.0)
-        self.assertEqual(by_clients[4], 231477.0)
-        # Every sample is kept: the two regimes are the finding, not noise to
-        # summarise away.
-        self.assertEqual(len(by_clients), 4)
-        self.assertEqual(result["repeats"], 5)
-        for step in result["steps"]:
-            self.assertEqual(len(step["samples"]), 5)
-
-    def test_a_step_whose_samples_share_no_regime_fails(self):
-        from mqtt_client_bench import hostcal
-
-        with patch.object(hostcal, "_run_hammer",
-                          side_effect=lambda mode, *, clients, **kw: {"msgs_per_s": 10.0 if clients == 1 else 200000.0}):
-            with patch.object(hostcal, "LOADGEN_REPEATS", 2):
-                with patch.object(hostcal, "_run_hammer",
-                                  side_effect=[{"msgs_per_s": 10.0}, {"msgs_per_s": 500000.0}]):
-                    with self.assertRaises(hostcal.CalibrationFailed):
-                        hostcal.measure_loadgen_ceiling(cpuset=None, seconds=1)
-
     def test_fanout_ceiling_is_named_as_a_diagnostic_not_an_offer(self):
         from mqtt_client_bench.hostcal import _FINGERPRINT_CEILINGS
 
@@ -2579,7 +2513,9 @@ class HostCalibrationTests(unittest.TestCase):
         plan = probe_durations(300.0)
         self.assertEqual(plan["budget_s"], 300.0)
         self.assertGreaterEqual(plan["harness_passes"], 30)
-        self.assertGreaterEqual(plan["loadgen_step_s"], 30)
+        # The paced sweep is 7 offers x 3 repeats, so each run is short; what
+        # matters is that the budget is spent on it rather than elsewhere.
+        self.assertGreaterEqual(plan["sweep_step_s"] * 21, 200)
         # The floor keeps a mistyped budget from producing a meaningless probe.
         tiny = probe_durations(1.0)
         self.assertGreaterEqual(tiny["budget_s"], 30.0)
@@ -2780,14 +2716,49 @@ class HostCalibrationTests(unittest.TestCase):
                               return_value={"ns_per_message": 3300.0, "spread_pct": 1.0,
                                             "median_ns_per_message": 3310.0,
                                             "max_ns_per_message": 3320.0, "passes": 5}):
-                with patch.object(hostcal, "measure_loadgen_ceiling",
-                                  return_value={"msgs_per_s": 0.0, "best_thread_count": 1, "steps": []}):
+                with patch.object(hostcal, "measure_broker_paced_ceiling",
+                                  return_value={"msgs_per_s": 0.0, "steps": []}):
                     with patch.object(hostcal, "measure_broker_fanout_ceiling",
                                       return_value={"msgs_per_s": 0.0, "subscriber_msgs_per_s": None}):
                         with patch("mqtt_client_bench.broker.broker_running", return_value=True):
                             with self.assertRaises(hostcal.CalibrationFailed) as caught:
                                 hostcal.calibrate_host(budget_s=30.0)
-        self.assertIn("loadgen_ceiling_msgs_per_s", str(caught.exception))
+        self.assertIn("broker_paced_ceiling_msgs_per_s", str(caught.exception))
+
+    def test_paced_sweep_stops_at_the_knee(self):
+        from mqtt_client_bench import hostcal
+
+        # Below the knee a paced hammer delivers what it was asked for; above it
+        # delivery flattens at the broker's rate. Measured on the reference
+        # host: 100k -> 99985, 200k -> 199099, 400k -> 230023.
+        def _fake(mode, *, clients, rate, **kw):
+            return {"msgs_per_s": min(float(rate), 231000.0)}
+
+        with patch.object(hostcal, "_run_hammer", side_effect=_fake):
+            result = hostcal.measure_broker_paced_ceiling(cpuset=None, seconds=1)
+
+        # 200k held, 250k did not: the ceiling is the last delivered offer, and
+        # the walk stops rather than reading the plateau as a higher one.
+        self.assertEqual(result["msgs_per_s"], 200000.0)
+        self.assertEqual([s["offer_msgs_per_s"] for s in result["steps"]],
+                         [50000, 100000, 150000, 200000, 250000])
+        self.assertEqual([s["held"] for s in result["steps"]],
+                         [True, True, True, True, False])
+
+        # An offer sits below the knee, not on it: at the knee it lands above on
+        # about half the runs, and above it delivery flattens at whatever the
+        # broker does rather than at what was asked for.
+        self.assertLess(result["recommended_offer_msgs_per_s"], result["msgs_per_s"])
+        self.assertEqual(result["recommended_offer_msgs_per_s"], 170000.0)
+
+    def test_a_sweep_that_delivers_nothing_fails(self):
+        from mqtt_client_bench import hostcal
+
+        # The unpaced probe once recorded 0.0 as a ceiling on a host with no
+        # broker listening. Zero is not a slow host.
+        with patch.object(hostcal, "_run_hammer", return_value={"msgs_per_s": 0.0}):
+            with self.assertRaises(hostcal.CalibrationFailed):
+                hostcal.measure_broker_paced_ceiling(cpuset=None, seconds=1)
 
     def test_calibration_refuses_a_busy_machine(self):
         from mqtt_client_bench import hostcal

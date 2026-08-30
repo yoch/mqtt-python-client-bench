@@ -246,7 +246,8 @@ _FINGERPRINT_IDENTITY = (
 _FINGERPRINT_BROKER = ("image", "image_digest", "config_hash")
 _FINGERPRINT_CEILINGS = (
     "harness_cost_ns_per_message",
-    "loadgen_ceiling_msgs_per_s",
+    "broker_paced_ceiling_msgs_per_s",
+    "recommended_offer_msgs_per_s",
     "broker_fanout_msgs_per_s",
 )
 
@@ -445,7 +446,6 @@ class HostNotIdle(RuntimeError):
     """
 
 
-HAMMER_THREAD_GRID = (1, 2, 4, 8)
 
 # Total wall-clock budget for one calibration, in seconds.
 #
@@ -463,7 +463,7 @@ CALIBRATION_BUDGET_S = 300.0
 # noisiest measurement and the one whose answer is a choice, not a magnitude.
 _BUDGET_HARNESS_SHARE = 0.10
 _BUDGET_FANOUT_SHARE = 0.10
-_BUDGET_LOADGEN_SHARE = 0.80
+_BUDGET_SWEEP_SHARE = 0.80
 
 
 def probe_durations(budget_s: float = CALIBRATION_BUDGET_S) -> Dict[str, Any]:
@@ -471,11 +471,13 @@ def probe_durations(budget_s: float = CALIBRATION_BUDGET_S) -> Dict[str, Any]:
     budget = max(30.0, float(budget_s))
     harness_total = budget * _BUDGET_HARNESS_SHARE
     passes = max(5, int(harness_total / HARNESS_COST_WINDOW_S))
-    per_step = budget * _BUDGET_LOADGEN_SHARE / max(1, len(HAMMER_THREAD_GRID))
+    # The paced sweep is the bulk: one run per grid point per repeat.
+    runs = max(1, len(PACED_GRID) * PACED_REPEATS)
+    per_step = budget * _BUDGET_SWEEP_SHARE / runs
     return {
         "budget_s": budget,
         "harness_passes": passes,
-        "loadgen_step_s": max(2, int(per_step)),
+        "sweep_step_s": max(2, int(per_step)),
         "fanout_s": max(2, int(budget * _BUDGET_FANOUT_SHARE)),
     }
 
@@ -505,49 +507,81 @@ def _run_hammer(mode: str, *, cpuset: Optional[str], clients: int, seconds: int,
     return None
 
 
-LOADGEN_REPEATS = 5
+# Paced offers to walk, in msgs/s. Below the knee a paced hammer delivers what
+# it was asked for to within a fraction of a percent; above it, delivery flattens
+# at the broker's rate.
+PACED_GRID = (50_000, 100_000, 150_000, 200_000, 250_000, 300_000, 400_000)
 
-# Spread across repeats of one thread count, above which the sweep is not
-# measuring a ceiling. Wide on purpose: this signal is genuinely bimodal on the
-# reference host and the median handles that; what this catches is a step whose
-# samples share no regime at all.
-LOADGEN_MAX_STEP_SPREAD = 4.0
+# Repeats per step. Two would do below the knee, where the spread is 0.3%; the
+# plateau is the noisier part and three keeps it honest without tripling the
+# whole sweep's cost.
+PACED_REPEATS = 3
+
+# A step counts as delivered when it holds this share of what was asked.
+PACED_HOLD_RATIO = 0.97
+
+# Publisher threads. Two hold well past this broker's ceiling, and sweeping the
+# count is what the unpaced probe used to do — pointlessly, since the number it
+# was reading back was the broker's and not the loadgen's.
+PACED_PUB_THREADS = 2
+
+# How far below the measured knee a campaign offer should sit.
+#
+# Not caution for its own sake: an offer *at* the knee lands above it on about
+# half the runs, and above the knee the offer stops being an offer — delivery
+# flattens at whatever the broker does, which is the degenerate regime this
+# probe exists to stay out of. A margin keeps every run in the part of the curve
+# where what was asked for is what arrives.
+#
+# 0.85 of the 231k measured here gives ~196k, which is where the hand-set
+# constant of 200k already sat. That the two agree is the useful part: the
+# constant was about right, and now there is a measurement behind it and a rule
+# that travels to another machine.
+OFFER_SAFETY_MARGIN = 0.85
 
 
-def measure_loadgen_ceiling(*, cpuset: Optional[str], seconds: int) -> Dict[str, Any]:
-    """What this host's loadgen can put on the wire, with nothing consuming it.
+def measure_broker_paced_ceiling(*, cpuset: Optional[str], seconds: int) -> Dict[str, Any]:
+    """The rate this broker sustains when arrivals are paced.
 
-    No subscriber. Attach one and Mosquitto has to fan out as well as decode,
-    which roughly triples its per-message cost and back-pressures the publisher:
-    the same hammer went from 198,842 msgs/s to 73,120 the moment a single
-    subscriber connected. That number is real and worth having, but it is the
-    broker's, not the loadgen's.
+    Named for what it measures. The probe this replaces was called a *loadgen*
+    ceiling and never measured one: it wrote into Mosquitto, which was the
+    limiting element in every configuration it could be run in. There is no
+    setting in which it would have measured the generator alone, because that
+    needs a sink that never limits and Mosquitto is not one.
 
-    **Every thread count is measured several times and reduced by median**, and
-    the reason is not general caution. Unpaced against a broker that reads and
-    drops, this signal is *bimodal* on the reference host: repeated identical
-    runs land near either 230k or 500k msgs/s, at every thread count. Measured
-    back to back at two threads: 234844, 234626, 497245, 523924, 230867.
+    It also measured in a regime the bench never operates in. Unpaced, this is a
+    closed loop — the writer blocks, so its rate is whatever the broker drains —
+    and the loop is *degenerate*: throughput is ``reads/s x packets-per-read``,
+    while packets-per-read is itself ``throughput x cycle-time``. Substituting
+    gives R = R. Every rate is a fixed point, so the system sits wherever it
+    landed and stays there. Measured across eight identical runs: 233k, 235k,
+    333k, 559k, 595k, 702k, 734k, with the broker at 98-100% CPU throughout and
+    its read rate varying by only 25%.
 
-    One sample per step therefore tells you nothing, and taking the maximum
-    across steps — which is what this did — systematically crowns whichever step
-    happened to land in the high regime. That turned a coin flip into a reported
-    "best thread count": two consecutive 300 s calibrations disagreed by 139%
-    because one drew 168,905 at a single thread and the other drew 535,097 at
-    the same one. The machine was not unstable; the estimator was.
+    Pacing breaks the degeneracy by fixing arrivals, and campaigns pace, so this
+    is also the regime they run in. Measured on the reference host:
 
-    The thread count is still swept rather than assumed, because
-    `HAMMER_PUB_CLIENTS = 2` is hand-tuned and the peak belongs to the core
-    group. But it is now decided on medians, and every sample is kept so a
-    reader can see the two regimes instead of taking the summary on faith.
+        --rate 100000 ->  99985  99984  99991   (0.007%)
+        --rate 200000 -> 199099 199728 199161   (0.3%)
+        --rate 400000 -> 230023 232483 231876   (plateau, 1%)
+
+    Saturating the receive queue instead - the other candidate fix - makes it
+    worse rather than better: at a 4096-byte payload the unpaced rate splits
+    48391 / 152124 / 49048 / 144648. Non-blocking writes would not have helped
+    either; the hammer already retries on EAGAIN, so it would spin instead of
+    sleeping on the same code path.
+
+    Returns the highest *delivered* rate that still tracked its offer. Steps past
+    the knee are kept for the record but never become the ceiling.
     """
-    steps = []
-    for clients in HAMMER_THREAD_GRID:
+    steps: List[Dict[str, Any]] = []
+    ceiling: Optional[float] = None
+    for target in PACED_GRID:
         samples: List[float] = []
-        for _ in range(LOADGEN_REPEATS):
+        for _ in range(PACED_REPEATS):
             parsed = _run_hammer(
-                "pub", cpuset=cpuset, clients=clients, seconds=seconds,
-                topic="hostcal/loadgen", rate=0,
+                "pub", cpuset=cpuset, clients=PACED_PUB_THREADS, seconds=seconds,
+                topic="hostcal/paced", rate=target,
             )
             value = (parsed or {}).get("msgs_per_s")
             if value:
@@ -557,26 +591,35 @@ def measure_loadgen_ceiling(*, cpuset: Optional[str], seconds: int) -> Dict[str,
         samples.sort()
         mid = len(samples) // 2
         median = samples[mid] if len(samples) % 2 else 0.5 * (samples[mid - 1] + samples[mid])
-        spread = samples[-1] / samples[0] if samples[0] else float("inf")
-        if spread > LOADGEN_MAX_STEP_SPREAD:
-            raise CalibrationFailed(
-                f"loadgen sweep at {clients} thread(s) spans {samples[0]:.0f}"
-                f"-{samples[-1]:.0f} msgs/s ({spread:.1f}x). That is not a "
-                "ceiling. Re-run on a quiet machine."
-            )
+        held = median >= PACED_HOLD_RATIO * target
         steps.append(
             {
-                "clients": clients,
-                "msgs_per_s": round(median, 1),
-                # Kept, not summarised away: the two regimes are the finding.
+                "offer_msgs_per_s": target,
+                "delivered_msgs_per_s": round(median, 1),
+                "held": held,
                 "samples": [round(v, 1) for v in samples],
             }
         )
-    best = max(steps, key=lambda s: s["msgs_per_s"], default=None)
+        if held:
+            ceiling = max(ceiling or 0.0, median)
+        else:
+            # First offer the broker cannot hold. Everything above it is the
+            # plateau, and one of those steps drifting high is the degenerate
+            # regime returning, not a higher ceiling.
+            break
+    if not ceiling:
+        raise CalibrationFailed(
+            "no paced offer was delivered: the probe reached nothing. Check that "
+            "the broker is reachable and that mqtt_hammer builds."
+        )
     return {
-        "msgs_per_s": (best or {}).get("msgs_per_s"),
-        "best_thread_count": (best or {}).get("clients"),
-        "repeats": LOADGEN_REPEATS,
+        "msgs_per_s": round(ceiling, 1),
+        # What a campaign should actually offer: the knee is where delivery
+        # stops tracking, not where it is safe to sit.
+        "recommended_offer_msgs_per_s": round(ceiling * OFFER_SAFETY_MARGIN, 1),
+        "safety_margin": OFFER_SAFETY_MARGIN,
+        "repeats": PACED_REPEATS,
+        "threads": PACED_PUB_THREADS,
         "steps": steps,
     }
 
@@ -665,8 +708,8 @@ def calibrate_host(
         if not was_running:
             broker_up(wait=True, cpuset=cpusets.get("broker"))
         try:
-            loadgen = measure_loadgen_ceiling(
-                cpuset=cpusets.get("loadgen"), seconds=plan["loadgen_step_s"]
+            paced = measure_broker_paced_ceiling(
+                cpuset=cpusets.get("loadgen"), seconds=plan["sweep_step_s"]
             )
             fanout = measure_broker_fanout_ceiling(
                 pub_cpuset=cpusets.get("loadgen"),
@@ -677,10 +720,10 @@ def calibrate_host(
             if not was_running:
                 broker_down()
 
-        probes["loadgen"] = loadgen
+        probes["paced_sweep"] = paced
         probes["broker_fanout"] = fanout
         for label, value in (
-            ("loadgen_ceiling_msgs_per_s", loadgen["msgs_per_s"]),
+            ("broker_paced_ceiling_msgs_per_s", paced["msgs_per_s"]),
             ("broker_fanout_msgs_per_s", fanout["msgs_per_s"]),
         ):
             if not value:
@@ -689,8 +732,10 @@ def calibrate_host(
                     "Check that the broker is reachable and that mqtt_hammer "
                     "builds; a zero ceiling is not a slow host."
                 )
-        ceilings["loadgen_ceiling_msgs_per_s"] = loadgen["msgs_per_s"]
-        ceilings["loadgen_best_thread_count"] = loadgen["best_thread_count"]
+        ceilings["broker_paced_ceiling_msgs_per_s"] = paced["msgs_per_s"]
+        # The number an offer is derived from. Recorded next to the ceiling so
+        # a reader sees both the measurement and the margin taken off it.
+        ceilings["recommended_offer_msgs_per_s"] = paced["recommended_offer_msgs_per_s"]
         # Diagnostic. Named for what it is so nobody derives an offer from it.
         ceilings["broker_fanout_msgs_per_s"] = fanout["msgs_per_s"]
 
