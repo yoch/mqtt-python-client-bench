@@ -2362,6 +2362,74 @@ class HostCalibrationTests(unittest.TestCase):
         self.assertGreaterEqual(tiny["budget_s"], 30.0)
         self.assertGreaterEqual(tiny["harness_passes"], 5)
 
+    def test_only_positive_evidence_of_another_host_excludes_a_result(self):
+        from mqtt_client_bench.hostcal import matches_reference, result_host_key
+
+        ref = {
+            "host_fingerprint": "abc123",
+            "host": {"hostname": "yoch-HP", "cpu_model": "i7-3770"},
+        }
+
+        # Fingerprinted, same machine.
+        mine = result_host_key({"host_profile": {"fingerprint": "abc123"}})
+        self.assertTrue(matches_reference(mine, ref))
+
+        # Fingerprinted, another machine: the case the mechanism exists for.
+        other = result_host_key({"host_profile": {"fingerprint": "def456"}})
+        self.assertFalse(matches_reference(other, ref))
+
+        # Legacy but identifiable as the reference host: the committed corpus.
+        legacy = result_host_key(
+            {"environment": {"hostname": "yoch-HP", "cpu_model": "i7-3770"}}
+        )
+        self.assertTrue(legacy["legacy"])
+        self.assertTrue(matches_reference(legacy, ref))
+
+        # Legacy and identifiable as something else.
+        foreign = result_host_key(
+            {"environment": {"hostname": "cursor", "cpu_model": "Xeon"}}
+        )
+        self.assertFalse(matches_reference(foreign, ref))
+
+        # No evidence either way. Dropping these would empty the site for any
+        # corpus predating the environment block, which is a worse failure than
+        # publishing a document whose provenance is merely unrecorded.
+        blank = result_host_key({})
+        self.assertTrue(matches_reference(blank, ref))
+
+        # And with no reference profile committed, nothing is filtered at all.
+        self.assertTrue(matches_reference(foreign, None))
+
+    def test_report_counts_what_it_skipped_by_host(self):
+        import json as _json
+        import tempfile
+        from pathlib import Path as _Path
+
+        from mqtt_client_bench.report import load_results_with_skips
+
+        def doc(hostname, cpu):
+            return {
+                "schema_version": 1,
+                "scenario": "pub_qos_sweep_telemetry",
+                "client": "paho",
+                "profile": "standard",
+                "runs": 1,
+                "environment": {"hostname": hostname, "cpu_model": cpu},
+                "results": [],
+            }
+
+        ref = {"host_fingerprint": "abc", "host": {"hostname": "keep", "cpu_model": "cpu-a"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _Path(tmp)
+            (root / "a.json").write_text(_json.dumps(doc("keep", "cpu-a")))
+            (root / "b.json").write_text(_json.dumps(doc("elsewhere", "cpu-b")))
+            (root / "c.json").write_text(_json.dumps(doc("elsewhere", "cpu-b")))
+            docs, skipped = load_results_with_skips(root, reference=ref)
+        self.assertEqual(len(docs), 1)
+        # Counted and named: a reader who expected a document and cannot find
+        # it needs to know which machine it came from.
+        self.assertEqual(skipped, {"elsewhere": 2})
+
     def test_calibration_refuses_a_busy_machine(self):
         from mqtt_client_bench import hostcal
 
@@ -2461,6 +2529,9 @@ class ReportTests(unittest.TestCase):
         self.assertIsNone(classify_payload(sample("queue", 1), "x.json").points[0].latency_boundary)
 
     def test_build_site_from_scenario_json(self):
+        # reference=None: this case is about rendering, and its fixture is a
+        # synthetic "bench-host". Left to the default it would depend on which
+        # host profile happens to be committed, which is not what it tests.
         import json
         import tempfile
 
@@ -2538,11 +2609,11 @@ class ReportTests(unittest.TestCase):
             # Ephemeral local artefacts must not be loaded into the site.
             (results / "_scratch.json").write_text(json.dumps(sample), encoding="utf-8")
             (results / "probe-smoke.json").write_text(json.dumps(sample), encoding="utf-8")
-            docs = load_results(results)
+            docs = load_results(results, reference=None)
             self.assertEqual(len(docs), 2)
             kinds = {d.kind for d in docs}
             self.assertEqual(kinds, {"scenario", "suite"})
-            summary = build_site(results, site)
+            summary = build_site(results, site, reference=None)
             self.assertEqual(summary["results"], 2)
             index = (site / "index.html").read_text(encoding="utf-8")
             self.assertIn("pub_qos_sweep_telemetry", index)
@@ -2632,7 +2703,7 @@ class ReportTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            build_site(results, site)
+            build_site(results, site, reference=None)
             index = (site / "index.html").read_text(encoding="utf-8")
             self.assertIn("Performance matrix", index)
             self.assertIn('class="matrix"', index)
@@ -2781,7 +2852,7 @@ class ReportTests(unittest.TestCase):
             results.mkdir()
             (results / "awscrt-puback.json").write_text(json.dumps(payload), encoding="utf-8")
             (results / "awscrt-rtt.json").write_text(json.dumps(refused), encoding="utf-8")
-            build_site(results, site)
+            build_site(results, site, reference=None)
             index = (site / "index.html").read_text(encoding="utf-8")
             self.assertIn("Client issues", index)
             self.assertIn("under load", index)
@@ -3252,7 +3323,7 @@ class DualProtocolTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            build_site(results, site)
+            build_site(results, site, reference=None)
             page = (site / "runs" / "compare-paho-awscrt.html").read_text(encoding="utf-8")
             self.assertIn("Per-point verdicts", page)
             # Both points are listed, with the statistics that only exist per point.
@@ -3311,7 +3382,7 @@ class DualProtocolTests(unittest.TestCase):
             site = root / "site"
             results.mkdir()
             (results / "paho-pub-dual.json").write_text(json.dumps(sample), encoding="utf-8")
-            build_site(results, site)
+            build_site(results, site, reference=None)
             index = (site / "index.html").read_text(encoding="utf-8")
             self.assertIn("pub_qos_sweep_telemetry · MQTTv311", index)
             self.assertIn("pub_qos_sweep_telemetry · MQTTv5", index)

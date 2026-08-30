@@ -28,6 +28,7 @@ import platform
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mqtt_client_bench.adapters.base import AdapterCapabilities
@@ -633,3 +634,136 @@ def calibrate_host(
         profile_doc["reference_refused"] = contention
     profile_doc["host_fingerprint"] = host_fingerprint(profile_doc)
     return profile_doc
+
+
+# --- Reading profiles back --------------------------------------------------
+
+HOSTS_DIR = Path(__file__).resolve().parents[2] / "hosts"
+
+
+def list_host_profiles(hosts_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Every committed host profile, newest name order."""
+    directory = Path(hosts_dir) if hosts_dir else HOSTS_DIR
+    if not directory.is_dir():
+        return []
+    out = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            out.append(load_host_profile(str(path)))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def reference_profile(hosts_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+    """The one profile marked ``reference``.
+
+    More than one is a repository error rather than a runtime choice: the site
+    publishes exactly one host, so two candidates means nobody can say which
+    numbers are the published ones.
+    """
+    candidates = [p for p in list_host_profiles(hosts_dir) if p.get("role") == "reference"]
+    if len(candidates) > 1:
+        names = ", ".join(str(p.get("host_fingerprint")) for p in candidates)
+        raise ValueError(f"more than one reference host profile: {names}")
+    return candidates[0] if candidates else None
+
+
+def result_host_key(document: Dict[str, Any]) -> Dict[str, Any]:
+    """Which machine produced this result document.
+
+    A fingerprinted run says so itself. Everything measured before host
+    profiles existed - the whole committed corpus - has to be identified from
+    its ``environment`` block instead, and is marked as such: those runs are
+    comparable with each other, because they came off one machine in one
+    posture, but they carry no evidence of the ceilings they ran against and
+    must never be pooled with runs that do.
+    """
+    profile = document.get("host_profile") or {}
+    fingerprint = profile.get("fingerprint")
+    if fingerprint:
+        return {
+            "fingerprint": str(fingerprint),
+            "role": profile.get("role"),
+            "hostname": profile.get("hostname"),
+            "legacy": False,
+        }
+    env = document.get("environment") or {}
+    return {
+        "fingerprint": None,
+        "role": None,
+        "hostname": env.get("hostname"),
+        "cpu_model": env.get("cpu_model"),
+        "scaling_governor": env.get("scaling_governor"),
+        "legacy": True,
+    }
+
+
+def matches_reference(host_key: Dict[str, Any], profile: Optional[Dict[str, Any]]) -> bool:
+    """Does this result belong to the published host?
+
+    With no reference profile in the repository nothing is filtered - that is
+    the state the corpus is in today, and a report that silently emptied itself
+    the moment the mechanism landed would be worse than one that publishes what
+    it always did.
+    """
+    if profile is None:
+        return True
+    if host_key.get("fingerprint"):
+        return host_key["fingerprint"] == profile.get("host_fingerprint")
+    host = profile.get("host") or {}
+    if host_key.get("hostname") is None and host_key.get("cpu_model") is None:
+        # No evidence either way. Only *positive* evidence of a different
+        # machine excludes a document: a filter that drops whatever it cannot
+        # attribute empties the site for anyone whose results predate the
+        # `environment` block, which is a worse failure than publishing a
+        # document whose provenance is merely unrecorded.
+        return True
+    return (
+        host_key.get("hostname") == host.get("hostname")
+        and host_key.get("cpu_model") == host.get("cpu_model")
+    )
+
+
+def resolve_host_profile(
+    path: Optional[str] = None, *, hosts_dir: Optional[Path] = None
+) -> Optional[Dict[str, Any]]:
+    """The profile to stamp onto this run.
+
+    An explicit path wins. Otherwise the committed profiles are searched for one
+    whose machine facts match this host, so a run on a calibrated machine is
+    stamped without anyone having to remember a flag — and a run on a machine
+    nobody calibrated is stamped with nothing, which is the honest answer.
+    """
+    if path:
+        return load_host_profile(path)
+    mine = host_identity()
+    for profile in list_host_profiles(hosts_dir):
+        host = profile.get("host") or {}
+        if all(
+            host.get(key) == mine.get(key)
+            for key in ("cpu_model", "cpu_count", "physical_groups", "threads_per_group", "frequency_policy")
+        ):
+            return profile
+    return None
+
+
+def host_profile_summary(profile: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """What travels inside a result: the fingerprint, the role, the ceilings.
+
+    Not the probe traces. A result carries what is needed to read its numbers
+    back and to refuse to pool it with another machine's; the raw walks stay in
+    ``hosts/``, where they are stored once instead of a few hundred times.
+    """
+    if not profile:
+        return None
+    host = profile.get("host") or {}
+    return {
+        "fingerprint": profile.get("host_fingerprint"),
+        "role": profile.get("role"),
+        "hostname": host.get("hostname"),
+        "frequency_policy": host.get("frequency_policy"),
+        "idle_verified": (profile.get("idle") or {}).get("verified"),
+        "ceilings": profile.get("ceilings"),
+        "measured_at": profile.get("measured_at"),
+    }
