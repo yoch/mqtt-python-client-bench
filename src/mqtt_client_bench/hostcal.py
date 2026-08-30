@@ -271,12 +271,20 @@ CEILING_GRID = (32_000, 64_000, 100_000, 150_000, 200_000, 260_000, 320_000)
 CEILING_HOLD_RATIO = 0.95
 
 
-def _ceiling_from_steps(steps: List[Dict[str, Any]]) -> Optional[float]:
-    """Highest sustained delivery before the knee.
+def _ceiling_from_steps(
+    steps: List[Dict[str, Any]], field: str = "delivered_msgs_per_s"
+) -> Optional[float]:
+    """Highest sustained value of ``field`` before the knee.
 
     Not the highest offer that was *attempted*: an offer the host cannot hold is
-    the loadgen or the broker falling behind, and recording it as a ceiling is
-    exactly the mistake the 200k constant made on smaller machines.
+    something falling behind, and recording it as a ceiling is exactly the
+    mistake the 200k constant made on smaller machines.
+
+    ``field`` decides *which* ceiling: the loadgen's is what it emitted, the
+    broker's is what it decoded, and the subscriber's delivery is neither. The
+    first version of this probe read delivery for all three and reported a
+    loadgen ceiling of 64k on a host whose loadgen holds 200k — it had measured
+    an emqtt-bench subscriber sharing a core group with the publisher.
     """
     best: Optional[float] = None
     # `run_scenario` does not promise to return points in the order they were
@@ -287,11 +295,11 @@ def _ceiling_from_steps(steps: List[Dict[str, Any]]) -> Optional[float]:
     )
     for step in steps:
         offer = step.get("effective_offer_msgs_per_s")
-        delivered = step.get("delivered_msgs_per_s")
-        if not offer or not delivered:
+        value = step.get(field)
+        if not offer or not value:
             continue
-        if delivered >= CEILING_HOLD_RATIO * offer:
-            best = max(best or 0.0, float(delivered))
+        if value >= CEILING_HOLD_RATIO * offer:
+            best = max(best or 0.0, float(value))
         else:
             # First step the host cannot hold: everything above it is noise.
             break
@@ -395,7 +403,7 @@ def busy_pct_over(total_s: float, *, samples: int = IDLE_BUSY_SAMPLES) -> Option
     return 0.5 * (values[mid - 1] + values[mid])
 
 
-def check_host_idle(*, strict: bool = True) -> Dict[str, Any]:
+def check_host_idle(*, strict: bool = True, use_loadavg: bool = True) -> Dict[str, Any]:
     """Is this machine quiet enough to be measured?
 
     Two signals, because neither is sufficient alone: CPU utilisation over the
@@ -419,7 +427,7 @@ def check_host_idle(*, strict: bool = True) -> Dict[str, Any]:
     reasons: List[str] = []
     if busy is not None and busy > busy_threshold:
         reasons.append(f"host_busy:cpu={busy:.1f}% over {busy_threshold:.0f}%")
-    if observed > load_threshold * cpus:
+    if use_loadavg and observed > load_threshold * cpus:
         reasons.append(
             f"host_busy:loadavg={observed:.2f} over {load_threshold * cpus:.2f} "
             f"({load_threshold} x {cpus} cpus)"
@@ -490,12 +498,31 @@ def _ceiling_steps(
     steps: List[Dict[str, Any]] = []
     for entry in doc.get("results") or []:
         point = entry.get("point") or {}
+        duration = float(point.get("duration_s") or 0.0) or None
         for run in entry.get("runs") or []:
+            loadgen = run.get("loadgen") or {}
+            sys_counters = run.get("sys_counters") or {}
+            received = sys_counters.get("publish_received_delta")
             steps.append(
                 {
                     "offer_requested_msgs_per_s": point.get("ingress_target_msgs_per_s"),
                     "loadgen_clients": point.get("loadgen_clients"),
                     "effective_offer_msgs_per_s": run.get("effective_offer_msgs_per_s"),
+                    # What the loadgen actually put on the wire. This is the
+                    # loadgen's own ceiling; the subscriber's delivery is not.
+                    "emitted_msgs_per_s": loadgen.get("observed_pub_rate"),
+                    # What the broker decoded. $SYS is refreshed about once a
+                    # second, so this carries a second of quantisation at each
+                    # end - fine for locating a knee, not for a ranking.
+                    "broker_received_msgs_per_s": (
+                        round(received / duration, 1)
+                        if received is not None and duration
+                        else None
+                    ),
+                    # Kept as a diagnostic only: in this topology the reference
+                    # subscriber shares the loadgen core group with the
+                    # publisher, so it is the weakest link of a shape no ranking
+                    # scenario uses.
                     "delivered_msgs_per_s": run.get("primary_msgs_per_s"),
                     "status": run.get("status"),
                     "bottleneck": run.get("bottleneck"),
@@ -540,21 +567,37 @@ def calibrate_host(
         emqtt = _ceiling_steps(profile=profile, engine="emqtt", grid=CEILING_GRID)
         probes["hammer_steps"] = hammer
         probes["emqtt_steps"] = emqtt
-        ceilings["loadgen_ceiling_msgs_per_s"] = _ceiling_from_steps(hammer)
-        ceilings["emqtt_ceiling_msgs_per_s"] = _ceiling_from_steps(emqtt)
-        # The broker is the common element of both walks: whichever engine
-        # pushed hardest, what the broker absorbed is the broker's number.
-        ceilings["broker_ceiling_msgs_per_s"] = max(
-            [v for v in (ceilings["loadgen_ceiling_msgs_per_s"], ceilings["emqtt_ceiling_msgs_per_s"]) if v]
-            or [None]
+        # Each ceiling comes off the counter that belongs to it.
+        ceilings["loadgen_ceiling_msgs_per_s"] = _ceiling_from_steps(
+            hammer, "emitted_msgs_per_s"
         )
+        ceilings["emqtt_ceiling_msgs_per_s"] = _ceiling_from_steps(
+            emqtt, "emitted_msgs_per_s"
+        )
+        # The broker is the common element of both walks: whichever engine
+        # pushed hardest, what the broker decoded is the broker's number.
+        broker = [
+            v
+            for v in (
+                _ceiling_from_steps(hammer, "broker_received_msgs_per_s"),
+                _ceiling_from_steps(emqtt, "broker_received_msgs_per_s"),
+            )
+            if v
+        ]
+        ceilings["broker_ceiling_msgs_per_s"] = max(broker) if broker else None
 
     # The probes just saturated a core group by design. Checking idleness the
     # instant they stop measures their own tail — the loadgen winding down, the
     # broker draining, the container runtime reaping — and calls the machine
     # busy for the one reason that is not a problem. Let it settle first.
     time.sleep(IDLE_AFTER_SETTLE_S)
-    idle_after = check_host_idle(strict=not allow_busy)
+    # Utilisation only. Load average is a trailing one-minute window that the
+    # probes just saturated by design, so it reports the measurement rather
+    # than the machine: it read 2.77 against a 1.60 gate straight after a run
+    # whose harness spread was 1.1%, which is as quiet as this host gets.
+    # A fresh utilisation window answers the question actually being asked --
+    # is something *else* running now.
+    idle_after = check_host_idle(strict=not allow_busy, use_loadavg=False)
 
     contention: List[str] = []
     if not idle_before["idle"]:
