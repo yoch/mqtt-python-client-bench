@@ -404,19 +404,75 @@ def clear_receive_maximum_overlay() -> None:
         RECEIVE_MAXIMUM_OVERRIDE.unlink()
 
 
-def apply_receive_maximum(n: int, *, sighup: bool = True) -> dict:
-    """Pin broker Receive Maximum for the next connections, then optionally SIGHUP."""
+def advertised_receive_maximum(
+    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, timeout_s: float = 10.0
+) -> Optional[int]:
+    """The Receive Maximum this broker puts in a CONNACK, read from the wire.
+
+    The only trustworthy answer. A config file says what was asked for; this
+    says what the running process is telling clients, which is what the flow
+    control scenario is about.
+    """
+    import paho.mqtt.client as mqtt
+    from paho.mqtt.enums import CallbackAPIVersion
+
+    seen: dict = {}
+
+    def _on_connect(client, userdata, flags, reason_code, properties=None):
+        seen["value"] = getattr(properties, "ReceiveMaximum", None) if properties else None
+        seen["done"] = True
+
+    client = mqtt.Client(CallbackAPIVersion.VERSION2, protocol=mqtt.MQTTv5)
+    client.on_connect = _on_connect
+    try:
+        client.connect(host, port, 30)
+        client.loop_start()
+        deadline = time.time() + timeout_s
+        while not seen.get("done") and time.time() < deadline:
+            time.sleep(0.02)
+    finally:
+        try:
+            client.loop_stop()
+            client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+    return seen.get("value")
+
+
+def apply_receive_maximum(
+    n: int, *, cpuset: Optional[str] = None, verify: bool = True
+) -> dict:
+    """Pin the broker's advertised Receive Maximum, and prove it took.
+
+    Mosquitto does not apply ``max_inflight_messages`` on SIGHUP. Measured on
+    2.1.2: writing the overlay and reloading moved the advertised value on the
+    *first* application after a container start and never again — apply(10)
+    reached the wire, apply(100) and the restore both stayed at 10. A scenario
+    that sweeps two values inside one broker lifetime therefore measured the
+    same broker twice while reporting `valid`, which is worse than reporting
+    nothing.
+
+    So the overlay is applied by recreating the container, and the result is
+    read back off a CONNACK rather than assumed. A caller that gets
+    ``applied`` False must fail the point closed.
+    """
     path = write_receive_maximum_overlay(n)
-    if sighup:
-        sighup_broker()
-    return {"receive_maximum": int(n), "overlay": str(path)}
+    broker_down()
+    meta = broker_up(wait=True, cpuset=cpuset)
+    advertised = advertised_receive_maximum(meta["host"], meta["port"]) if verify else None
+    return {
+        "receive_maximum": int(n),
+        "overlay": str(path),
+        "advertised": advertised,
+        "applied": (advertised == int(n)) if verify else None,
+    }
 
 
-def restore_receive_maximum(*, sighup: bool = True) -> None:
-    """Drop the overlay so the main ``max_inflight_messages 1000`` applies again."""
+def restore_receive_maximum(*, cpuset: Optional[str] = None) -> None:
+    """Drop the overlay so the main ``max_inflight_messages`` applies again."""
     clear_receive_maximum_overlay()
-    if sighup:
-        sighup_broker()
+    broker_down()
+    broker_up(wait=True, cpuset=cpuset)
 
 
 def sighup_broker() -> None:

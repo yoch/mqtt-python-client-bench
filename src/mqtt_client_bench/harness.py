@@ -1064,7 +1064,9 @@ def run_point(
                 }
             receive_maximum_applied = True
             try:
-                overlay = apply_receive_maximum(int(receive_maximum))
+                overlay = apply_receive_maximum(
+                    int(receive_maximum), cpuset=cpusets.get("broker")
+                )
             except Exception as exc:  # noqa: BLE001
                 return {
                     "schema_version": 1,
@@ -1082,6 +1084,29 @@ def run_point(
                 }
             receive_maximum_applied = True
             point["broker_receive_maximum"] = overlay["receive_maximum"]
+            point["broker_receive_maximum_advertised"] = overlay.get("advertised")
+            if overlay.get("applied") is False:
+                # Fail closed. The knob is the measurement here: two points that
+                # asked for 10 and 100 and got the same broker are not a flow
+                # control sweep, and reporting them `valid` is the one outcome
+                # worse than reporting nothing.
+                return {
+                    "schema_version": 1,
+                    "harness_fingerprint": HARNESS_FINGERPRINT,
+                    "run_id": run_id,
+                    "started_at": started_at,
+                    "finished_at": _utc_now(),
+                    "host_state": host_state,
+                    "point": point,
+                    "client": client,
+                    "client_path": client_path,
+                    "status": "inconclusive",
+                    "reasons": [
+                        "receive_maximum_not_applied:"
+                        f"asked={overlay['receive_maximum']},advertised={overlay.get('advertised')}"
+                    ],
+                    "workers": [],
+                }
         if topology == "publisher_only":
             cfg = base_cfg("publisher", "publisher")
             # Nobody will read the published sequences back: integrity is
@@ -1674,7 +1699,7 @@ def run_point(
             clear_profile()
         if receive_maximum_applied:
             try:
-                restore_receive_maximum()
+                restore_receive_maximum(cpuset=cpusets.get("broker"))
             except Exception:  # noqa: BLE001
                 pass
         if retained_seeded:
@@ -2073,7 +2098,11 @@ def run_scenario(
                 point_runs.append(result)
             all_results.append(
                 {
-                    "point": point,
+                    # The point as run, not as scheduled: run_point records what
+                    # it actually applied (the advertised Receive Maximum, for
+                    # one), and reporting the pre-run copy hid that the overlay
+                    # had never taken effect.
+                    "point": (point_runs[0].get("point") if point_runs else point) or point,
                     "runs": point_runs,
                     "summary": summarize_valid_runs(point_runs),
                 }

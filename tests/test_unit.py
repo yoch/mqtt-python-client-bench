@@ -2631,6 +2631,35 @@ class HostCalibrationTests(unittest.TestCase):
             _validate_host_profile(unverified)
 
 
+class ReceiveMaximumOverlayTests(unittest.TestCase):
+    def test_an_overlay_that_did_not_take_fails_the_point_closed(self):
+        from mqtt_client_bench import harness
+
+        # Mosquitto does not apply max_inflight_messages on SIGHUP. Measured on
+        # 2.1.2: the advertised value moved on the first application after a
+        # container start and never again - apply(10) reached the wire,
+        # apply(100) and the restore both stayed at 10. Two points asking for 10
+        # and 100 therefore measured the same broker twice and came back
+        # `valid`, which is worse than coming back with nothing.
+        point = {"receive_maximum": 100, "topology": "publisher_only"}
+        overlay = {"receive_maximum": 100, "advertised": 10, "applied": False, "overlay": "x"}
+        with patch.object(harness, "apply_receive_maximum", return_value=overlay):
+            with patch.object(harness, "restore_receive_maximum"):
+                result = harness.run_point(
+                    point, client="paho", host="127.0.0.1", port=1, tls_port=2,
+                    profile="smoke", work_dir=Path("/tmp"), cpusets={},
+                )
+        self.assertEqual(result["status"], "inconclusive")
+        self.assertTrue(
+            any(r.startswith("receive_maximum_not_applied:") for r in result["reasons"]),
+            result["reasons"],
+        )
+        # And the reason carries both numbers, so a reader does not have to
+        # reproduce the run to learn what the broker actually advertised.
+        self.assertIn("asked=100", result["reasons"][0])
+        self.assertIn("advertised=10", result["reasons"][0])
+
+
 class QueueRejectionPathTests(unittest.TestCase):
     """Which path answers the queue-rejection question, and why."""
 
