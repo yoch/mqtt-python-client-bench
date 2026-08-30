@@ -1867,6 +1867,7 @@ def run_scenario(
     load_profile_path: Optional[str] = None,
     seed: int = 42,
     point_filter: Optional[Callable[[dict], bool]] = None,
+    point_transform: Optional[Callable[[List[dict]], List[dict]]] = None,
     publish_path: str = "native",
 ) -> dict:
     scenario = SCENARIO_BY_NAME[name]
@@ -1875,6 +1876,13 @@ def run_scenario(
     points = expand_scenario(scenario, profile)
     if point_filter is not None:
         points = [p for p in points if point_filter(p)]
+    if point_transform is not None:
+        # Host calibration drives the ceiling topology at its own escalating
+        # grid. The hook keeps that out of the catalogue: the published
+        # `broker_ceiling_ingress` grid stays 32k/64k/128k for everyone else,
+        # and a probe that needs to walk past it does not have to fork the
+        # ingress path and risk drifting from what campaigns actually run.
+        points = list(point_transform(points))
     if network:
         for p in points:
             p["network"] = network
@@ -2009,6 +2017,37 @@ def _validate_load_profile(load_profile: dict, *, client: str, client_path: Opti
     buckets = load_profile.get("protocol_capacities")
     if buckets is not None and not isinstance(buckets, dict):
         raise ValueError("load profile protocol_capacities must be a mapping")
+
+
+def _validate_host_profile(host_profile: dict) -> None:
+    """Refuse a host profile that was not measured on this machine.
+
+    Same posture as ``_validate_load_profile``: a mismatch is an error at
+    startup, never a default quietly applied. A profile carries ceilings, and
+    ceilings borrowed from another machine are exactly the failure this whole
+    mechanism exists to remove — a 200k offer on a host that tops out at 60k
+    does not produce a slow client, it produces a meaningless number.
+    """
+    from mqtt_client_bench.hostcal import host_identity
+
+    expected = host_profile.get("host") or {}
+    actual = host_identity()
+    for key in ("cpu_model", "cpu_count", "physical_groups", "threads_per_group"):
+        want, got = expected.get(key), actual.get(key)
+        if want is not None and got is not None and want != got:
+            raise ValueError(
+                f"host profile {key} {want!r} does not match this machine {got!r}"
+            )
+    want_policy = expected.get("frequency_policy")
+    got_policy = actual.get("frequency_policy")
+    if want_policy and got_policy and want_policy != got_policy:
+        raise ValueError(
+            f"host profile frequency_policy {want_policy!r} does not match {got_policy!r}"
+        )
+    if host_profile.get("role") == "reference" and not (
+        (host_profile.get("idle") or {}).get("verified")
+    ):
+        raise ValueError("reference host profile is not idle-verified")
 
 
 def run_suite(suite: str, **kwargs) -> dict:
