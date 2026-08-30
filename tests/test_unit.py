@@ -2268,9 +2268,8 @@ class HostCalibrationTests(unittest.TestCase):
             },
             "ceilings": {
                 "harness_cost_ns_per_message": 3500.0,
-                "loadgen_ceiling_msgs_per_s": 200000.0,
-                "broker_ceiling_msgs_per_s": 200000.0,
-                "emqtt_ceiling_msgs_per_s": 100000.0,
+                "loadgen_ceiling_msgs_per_s": 637000.0,
+                "broker_fanout_msgs_per_s": 73000.0,
             },
         }
         fp = host_fingerprint(base)
@@ -2289,59 +2288,12 @@ class HostCalibrationTests(unittest.TestCase):
         for mutation in (
             ("host", "threads_per_group", 1),
             ("host", "frequency_policy", "unpinned"),
-            ("ceilings", "broker_ceiling_msgs_per_s", 60000.0),
+            ("ceilings", "loadgen_ceiling_msgs_per_s", 60000.0),
         ):
             section, key, value = mutation
             changed = json.loads(json.dumps(base))
             changed[section][key] = value
             self.assertNotEqual(host_fingerprint(changed), fp, f"{key} did not move the fingerprint")
-
-    def test_ceiling_is_the_last_sustained_step_not_the_last_attempted(self):
-        from mqtt_client_bench.hostcal import _ceiling_from_steps
-
-        steps = [
-            {"effective_offer_msgs_per_s": 32000, "delivered_msgs_per_s": 31900},
-            {"effective_offer_msgs_per_s": 64000, "delivered_msgs_per_s": 63800},
-            # The knee: the host stops keeping up.
-            {"effective_offer_msgs_per_s": 128000, "delivered_msgs_per_s": 70000},
-            # Anything past it is the loadgen or the broker falling behind, and
-            # recording it as a ceiling is the mistake the 200k constant made.
-            {"effective_offer_msgs_per_s": 200000, "delivered_msgs_per_s": 90000},
-        ]
-        self.assertEqual(_ceiling_from_steps(steps), 63800)
-        self.assertIsNone(_ceiling_from_steps([]))
-
-        # run_scenario does not promise to return points in the order it was
-        # given - observed here as 64k, 32k, 128k - and a walk that stops at
-        # the first unsustained step reads the wrong knee out of order.
-        shuffled = [steps[1], steps[0], steps[3], steps[2]]
-        self.assertEqual(_ceiling_from_steps(shuffled), 63800)
-
-    def test_each_ceiling_reads_its_own_counter(self):
-        from mqtt_client_bench.hostcal import _ceiling_from_steps
-
-        # The first version of the probe read the subscriber's delivery for all
-        # three ceilings and reported a 64k loadgen on a host whose loadgen
-        # holds 200k: in this topology the reference subscriber shares a core
-        # group with the publisher, so delivery is the weakest link of a shape
-        # no ranking scenario uses. Each ceiling must come off its own counter.
-        steps = [
-            {
-                "effective_offer_msgs_per_s": 100000,
-                "emitted_msgs_per_s": 99800,
-                "broker_received_msgs_per_s": 99000,
-                "delivered_msgs_per_s": 76000,
-            },
-            {
-                "effective_offer_msgs_per_s": 200000,
-                "emitted_msgs_per_s": 199000,
-                "broker_received_msgs_per_s": 150000,
-                "delivered_msgs_per_s": 77000,
-            },
-        ]
-        self.assertEqual(_ceiling_from_steps(steps, "emitted_msgs_per_s"), 199000)
-        self.assertEqual(_ceiling_from_steps(steps, "broker_received_msgs_per_s"), 99000)
-        self.assertEqual(_ceiling_from_steps(steps, "delivered_msgs_per_s"), None)
 
     def test_cpu_utilisation_decides_when_loadavg_looks_fine(self):
         from mqtt_client_bench import hostcal
@@ -2363,6 +2315,33 @@ class HostCalibrationTests(unittest.TestCase):
             with patch("os.getloadavg", return_value=(0.1, 0.1, 0.1)):
                 state = hostcal.check_host_idle()
         self.assertTrue(state["idle"], state["reasons"])
+
+    def test_loadgen_ceiling_takes_the_best_thread_count(self):
+        from mqtt_client_bench import hostcal
+
+        # HAMMER_PUB_CLIENTS = 2 is a hand-tuned constant; on this machine 4
+        # threads emit roughly twice what 2 do, and 8 collapse. The peak is a
+        # property of the core group, so it is found per host.
+        runs = {1: 131299.0, 2: 326202.0, 4: 636761.0, 8: 216900.0}
+        with patch.object(
+            hostcal, "_run_hammer",
+            side_effect=lambda mode, *, clients, **kw: {"msgs_per_s": runs[clients]},
+        ):
+            result = hostcal.measure_loadgen_ceiling(cpuset=None, seconds=1)
+        self.assertEqual(result["msgs_per_s"], 636761.0)
+        self.assertEqual(result["best_thread_count"], 4)
+        self.assertEqual(len(result["steps"]), 4)
+
+    def test_fanout_ceiling_is_named_as_a_diagnostic_not_an_offer(self):
+        from mqtt_client_bench.hostcal import _FINGERPRINT_CEILINGS
+
+        # The core sub_* offer is an over-offer: its job is to make the SUT
+        # client the bottleneck. Deriving it from what the broker can sustain
+        # would collapse it to the fan-out rate - measured here at 73k against
+        # a loadgen that emits 637k - and make the fastest clients neighbours
+        # of the constraint instead of its subject.
+        self.assertIn("broker_fanout_msgs_per_s", _FINGERPRINT_CEILINGS)
+        self.assertNotIn("broker_ceiling_msgs_per_s", _FINGERPRINT_CEILINGS)
 
     def test_calibration_refuses_a_busy_machine(self):
         from mqtt_client_bench import hostcal
