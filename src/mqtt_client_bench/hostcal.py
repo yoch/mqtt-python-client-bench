@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import platform
 import time
 from typing import Any, Dict, List, Optional
@@ -278,6 +279,12 @@ def _ceiling_from_steps(steps: List[Dict[str, Any]]) -> Optional[float]:
     exactly the mistake the 200k constant made on smaller machines.
     """
     best: Optional[float] = None
+    # `run_scenario` does not promise to return points in the order they were
+    # given, and this walk stops at the first step the host cannot hold: read
+    # out of order it would stop at the wrong one. Sort by what was offered.
+    steps = sorted(
+        steps, key=lambda s: float(s.get("effective_offer_msgs_per_s") or 0.0)
+    )
     for step in steps:
         offer = step.get("effective_offer_msgs_per_s")
         delivered = step.get("delivered_msgs_per_s")
@@ -332,6 +339,10 @@ IDLE_MAX_BUSY_PCT = 15.0
 # Spread of the harness-cost passes above which the machine was evidently not
 # quiet *during* the probe, whatever loadavg claimed before it.
 IDLE_MAX_PROBE_SPREAD_PCT = 35.0
+
+# Pause between the last probe and the closing idleness check, so the check sees
+# the machine rather than the probes' own teardown.
+IDLE_AFTER_SETTLE_S = 10.0
 
 
 def _cpu_totals() -> Optional[tuple]:
@@ -453,19 +464,29 @@ def _ceiling_steps(
             # emqtt-bench needs one client per 1000 msgs/s to hold I=1; the
             # hammer ignores this and paces itself.
             step["loadgen_clients"] = max(1, int(target // 1000))
-            if engine:
-                step["loadgen_engine"] = engine
             # A ceiling probe is a host measurement, never a client ranking.
             step["non_comparable"] = True
             out.append(step)
         return out
 
-    doc = run_scenario(
-        "broker_ceiling_ingress",
-        profile=profile,
-        runs=1,
-        point_transform=transform,
-    )
+    # MQTT_BENCH_LOADGEN is how the engine is chosen; `run_point` builds its
+    # LoadgenSpec with engine="auto" and never reads a per-point key, so setting
+    # one would be a knob that silently does nothing.
+    previous = os.environ.get("MQTT_BENCH_LOADGEN")
+    if engine:
+        os.environ["MQTT_BENCH_LOADGEN"] = engine
+    try:
+        doc = run_scenario(
+            "broker_ceiling_ingress",
+            profile=profile,
+            runs=1,
+            point_transform=transform,
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("MQTT_BENCH_LOADGEN", None)
+        else:
+            os.environ["MQTT_BENCH_LOADGEN"] = previous
     steps: List[Dict[str, Any]] = []
     for entry in doc.get("results") or []:
         point = entry.get("point") or {}
@@ -528,12 +549,22 @@ def calibrate_host(
             or [None]
         )
 
+    # The probes just saturated a core group by design. Checking idleness the
+    # instant they stop measures their own tail — the loadgen winding down, the
+    # broker draining, the container runtime reaping — and calls the machine
+    # busy for the one reason that is not a problem. Let it settle first.
+    time.sleep(IDLE_AFTER_SETTLE_S)
     idle_after = check_host_idle(strict=not allow_busy)
-    contended = (
-        not idle_before["idle"]
-        or not idle_after["idle"]
-        or harness["spread_pct"] > IDLE_MAX_PROBE_SPREAD_PCT
-    )
+
+    contention: List[str] = []
+    if not idle_before["idle"]:
+        contention += [f"before:{r}" for r in idle_before["reasons"]]
+    if not idle_after["idle"]:
+        contention += [f"after:{r}" for r in idle_after["reasons"]]
+    if harness["spread_pct"] > IDLE_MAX_PROBE_SPREAD_PCT:
+        contention.append(
+            f"probe_spread={harness['spread_pct']}% over {IDLE_MAX_PROBE_SPREAD_PCT}%"
+        )
 
     profile_doc: Dict[str, Any] = {
         "schema_version": 1,
@@ -547,15 +578,19 @@ def calibrate_host(
             "probe_spread_pct": harness["spread_pct"],
             # False whenever anything suggested the machine was working. A
             # profile that is not idle-verified must never become the reference.
-            "verified": not contended,
+            "verified": not contention,
+            "contention": contention,
         },
         "environment": env,
         "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if role == "reference" and contention:
+        # Demote rather than raise. The probes are minutes of work and they are
+        # still a valid picture of this machine under whatever conditions
+        # actually held; throwing them away teaches an operator to reach for
+        # --allow-busy, which is worse. What must not happen is the reference
+        # label ending up on a measurement nobody verified.
+        profile_doc["role"] = "runner"
+        profile_doc["reference_refused"] = contention
     profile_doc["host_fingerprint"] = host_fingerprint(profile_doc)
-    if role == "reference" and not profile_doc["idle"]["verified"]:
-        raise HostNotIdle(
-            "a reference profile requires an idle-verified measurement; "
-            f"probe spread was {harness['spread_pct']}%"
-        )
     return profile_doc
