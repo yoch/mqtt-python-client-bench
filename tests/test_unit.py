@@ -2510,6 +2510,23 @@ class HostCalibrationTests(unittest.TestCase):
         self.assertEqual(result["best_thread_count"], 4)
         self.assertEqual(len(result["steps"]), 4)
 
+    def test_one_thread_beating_the_rest_is_refused(self):
+        from mqtt_client_bench import hostcal
+
+        # Observed on the reference host: 535,097 msgs/s at one thread against
+        # ~235,000 at two, four and eight in the same sweep, and 168,905 at one
+        # thread in the run before. A single thread cannot beat several on the
+        # same cores; the probe raced something. The ceiling drives every
+        # campaign offer, so the sweep is refused rather than averaged into
+        # something that looks plausible.
+        runs = {1: 535097.0, 2: 240376.0, 4: 233484.0, 8: 235209.0}
+        with patch.object(
+            hostcal, "_run_hammer",
+            side_effect=lambda mode, *, clients, **kw: {"msgs_per_s": runs[clients]},
+        ):
+            with self.assertRaises(hostcal.CalibrationFailed):
+                hostcal.measure_loadgen_ceiling(cpuset=None, seconds=1)
+
     def test_fanout_ceiling_is_named_as_a_diagnostic_not_an_offer(self):
         from mqtt_client_bench.hostcal import _FINGERPRINT_CEILINGS
 
@@ -2602,6 +2619,142 @@ class HostCalibrationTests(unittest.TestCase):
         # Counted and named: a reader who expected a document and cannot find
         # it needs to know which machine it came from.
         self.assertEqual(skipped, {"elsewhere": 2})
+
+    def test_declared_unpinned_clock_is_the_only_thing_that_excuses_it(self):
+        from mqtt_client_bench.harness import host_state_reasons
+
+        xeon = {"scaling_governor": None, "loadavg": [0.1], "cpu_count": 4}
+
+        # No profile: still fails closed. Absent evidence is not evidence of a
+        # pinned clock, and this is the case that let a container campaign come
+        # back valid in the first place.
+        self.assertEqual(host_state_reasons(xeon), ["cpu_governor_unknown"])
+
+        # A written, versioned, fingerprinted declaration excuses it.
+        self.assertEqual(host_state_reasons(xeon, declared_policy="unpinned"), [])
+
+        # A profile claiming a pinned clock on a machine that has none does not.
+        self.assertEqual(
+            host_state_reasons(xeon, declared_policy="performance"),
+            ["cpu_governor_unknown"],
+        )
+
+        # And `unpinned` excuses an *unreadable* governor, never a readable one
+        # set to something else: those are different claims.
+        governed = {"scaling_governor": "powersave", "loadavg": [0.1], "cpu_count": 4}
+        self.assertEqual(
+            host_state_reasons(governed, declared_policy="unpinned"),
+            ["cpu_governor_not_performance:powersave"],
+        )
+
+    def test_python_and_broker_are_part_of_the_fingerprint(self):
+        from mqtt_client_bench.hostcal import host_fingerprint
+
+        # The harness cost is an interpreter cost before it is anything else and
+        # the fan-out ceiling is a property of one Mosquitto build, so a change
+        # in either makes the recorded ceilings mean something different.
+        base = {
+            "host": {
+                "cpu_model": "Test CPU", "cpu_count": 8, "physical_groups": 4,
+                "threads_per_group": 2, "frequency_policy": "performance",
+                "python": "3.12.3", "kernel": "Linux-6.8.0-137",
+            },
+            "broker": {"image": "m:2.1.2", "image_digest": "sha256:aaa", "config_hash": "c1"},
+            "ceilings": {"harness_cost_ns_per_message": 3300.0},
+        }
+        fp = host_fingerprint(base)
+        for section, key, value in (
+            ("host", "python", "3.13.0"),
+            ("broker", "image_digest", "sha256:bbb"),
+            ("broker", "config_hash", "c2"),
+        ):
+            changed = json.loads(json.dumps(base))
+            changed[section][key] = value
+            self.assertNotEqual(host_fingerprint(changed), fp, f"{key} did not move it")
+
+        # The kernel stays out: a point release moves it without moving any
+        # measurement, and a digest that churns for nothing gets ignored.
+        same = json.loads(json.dumps(base))
+        same["host"]["kernel"] = "Linux-6.8.0-999"
+        self.assertEqual(host_fingerprint(same), fp)
+
+    def test_only_the_reference_host_writes_into_the_published_corpus(self):
+        from mqtt_client_bench.hostcal import results_dir_for
+
+        # Campaign files are named <client>-<scenario>.json, so a runner writing
+        # to `results/` would overwrite the published corpus file by file. This
+        # is why the default depends on the host rather than on a flag someone
+        # has to remember on a machine they rarely log into.
+        reference = {"role": "reference", "host": {"hostname": "yoch-HP"}, "host_fingerprint": "abc"}
+        self.assertEqual(results_dir_for(reference), "results")
+
+        runner = {"role": "runner", "host": {"hostname": "xeon"}, "host_fingerprint": "def456"}
+        self.assertEqual(results_dir_for(runner), "results/xeon-def456")
+
+        # An uncalibrated host has no business there either, and cannot even say
+        # which machine it is.
+        self.assertEqual(results_dir_for(None), "results/uncalibrated")
+
+        # A hostname is not a path component until it is made one.
+        odd = {"role": "runner", "host": {"hostname": "host/../etc"}, "host_fingerprint": "f"}
+        self.assertEqual(results_dir_for(odd), "results/host----etc-f")
+
+    def test_a_runner_directory_is_invisible_to_the_default_build(self):
+        import json as _json
+        import tempfile
+        from pathlib import Path as _Path
+
+        from mqtt_client_bench.report import load_results_with_skips
+
+        def doc(hostname):
+            return {
+                "schema_version": 1, "scenario": "pub_qos_sweep_telemetry",
+                "client": "paho", "profile": "standard", "runs": 1,
+                "environment": {"hostname": hostname, "cpu_model": "cpu-a"},
+                "results": [],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = _Path(tmp)
+            (root / "a.json").write_text(_json.dumps(doc("keep")))
+            runner = root / "xeon-def456"
+            runner.mkdir()
+            (runner / "a.json").write_text(_json.dumps(doc("xeon")))
+
+            ref = {"host_fingerprint": "abc", "host": {"hostname": "keep", "cpu_model": "cpu-a"}}
+            docs, skipped = load_results_with_skips(root, reference=ref)
+            # Not skipped-and-counted: never looked at. The build globs the top
+            # level only, so a runner campaign cannot perturb the published site
+            # even before the host filter gets a say.
+            self.assertEqual(len(docs), 1)
+            self.assertEqual(skipped, {})
+
+            # And it reads on its own with the filter turned off.
+            own, _ = load_results_with_skips(runner, reference=None)
+            self.assertEqual(len(own), 1)
+
+    def test_a_zero_ceiling_is_a_failure_not_a_measurement(self):
+        from mqtt_client_bench import hostcal
+
+        # Measured for real: with no broker listening, every hammer step
+        # returned 0.0 and the profile was still written, marked idle-verified
+        # and signed. It would have become the committed reference whose
+        # ceilings drive every campaign offer, and its harness cost - which
+        # needs no broker - would have made it look half right.
+        idle = {"idle": True, "reasons": [], "loadavg_before": 0.1, "busy_pct": 1.0}
+        with patch.object(hostcal, "check_host_idle", return_value=idle):
+            with patch.object(hostcal, "measure_harness_cost_ns",
+                              return_value={"ns_per_message": 3300.0, "spread_pct": 1.0,
+                                            "median_ns_per_message": 3310.0,
+                                            "max_ns_per_message": 3320.0, "passes": 5}):
+                with patch.object(hostcal, "measure_loadgen_ceiling",
+                                  return_value={"msgs_per_s": 0.0, "best_thread_count": 1, "steps": []}):
+                    with patch.object(hostcal, "measure_broker_fanout_ceiling",
+                                      return_value={"msgs_per_s": 0.0, "subscriber_msgs_per_s": None}):
+                        with patch("mqtt_client_bench.broker.broker_running", return_value=True):
+                            with self.assertRaises(hostcal.CalibrationFailed) as caught:
+                                hostcal.calibrate_host(budget_s=30.0)
+        self.assertIn("loadgen_ceiling_msgs_per_s", str(caught.exception))
 
     def test_calibration_refuses_a_busy_machine(self):
         from mqtt_client_bench import hostcal

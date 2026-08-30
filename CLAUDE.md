@@ -178,6 +178,13 @@ results.
   Mosquitto CPU from a 200k offer are expected and do not invalidate the
   delivery count (diagnostic / `broker_ceiling` still fail those gates). Only
   `valid` runs enter medians.
+- **A runner is not the reference**: a host with no readable CPU governor is
+  refused unless its committed profile declares `frequency_policy: "unpinned"`;
+  the written, fingerprinted declaration is what permits it, never the absence
+  of the sysfs file. Such runs carry `clock_unpinned`, stay valid for their own
+  host's ranking, and `run matrix` defaults their output to
+  `results/<host>-<fingerprint>/` so a runner cannot overwrite the published
+  corpus file by file.
 - **One host per published site**: every result carries `host_profile`
   (fingerprint, role, ceilings) when the machine it ran on is calibrated.
   `report build` publishes only the profile marked `role: reference` and
