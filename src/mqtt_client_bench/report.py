@@ -120,6 +120,9 @@ _ENVIRONMENT_REASON_PREFIXES = (
     "barrier_failed",
     "sys_publish_dropped",
     "delivery_below_half_offer",
+    # The broker's forwarding was the constraint, not the client. Environment
+    # rather than capability: it says something about the machine.
+    "broker_fanout_limited",
     # Host state at T0. Without these the governor and loadavg gates fired but
     # the run only ever showed up as "other", so a machine-invalidated result
     # never reached the environment banner.
@@ -161,6 +164,8 @@ def _short_reason(reason: str) -> str:
         return "broker_drops"
     if reason.startswith("delivery_below_half_offer"):
         return "delivery_lt_half_offer"
+    if reason.startswith("broker_fanout_limited"):
+        return "broker_fanout"
     if reason.startswith("worker_error:"):
         return "worker_error"
     if reason.startswith("barrier_failed"):

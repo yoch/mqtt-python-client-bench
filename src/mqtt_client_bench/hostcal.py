@@ -630,38 +630,93 @@ def measure_broker_paced_ceiling(*, cpuset: Optional[str], seconds: int) -> Dict
     }
 
 
+# Offers to walk when looking for the fan-out knee. Lower than PACED_GRID
+# because a subscriber costs the broker far more than a discard does: the
+# no-subscriber ceiling here is ~699k and the one-subscriber ceiling ~76k.
+FANOUT_GRID = (25_000, 50_000, 75_000, 100_000, 150_000)
+
+FANOUT_REPEATS = 3
+
+
 def measure_broker_fanout_ceiling(
     *, pub_cpuset: Optional[str], sub_cpuset: Optional[str], seconds: int
 ) -> Dict[str, Any]:
-    """What the broker forwards with one subscriber attached.
+    """What the broker forwards to one subscriber.
 
-    Diagnostic, deliberately: this is *not* where the ingress offer comes from.
-    The core `sub_*` offer is an over-offer whose job is to make the SUT client
-    the bottleneck, and deriving it from a sustainable rate would collapse it to
-    this number and make the fastest clients neighbours of the constraint
-    instead of its subject.
+    Paced, like the ingress sweep and for the same reason: unpaced, the writer
+    blocks and its rate is whatever the broker drains, which makes the loop
+    degenerate and the number a property of the coupling rather than a ceiling.
+    This probe was left unpaced when the ingress one was fixed — it produced the
+    right order of magnitude by luck, and that is not a reason to keep it.
+
+    **One subscriber.** The broker reads a message once and writes it once per
+    subscriber, so this number does not generalise: it is the ceiling for the
+    shape every published `sub_*` scenario uses, and says nothing about
+    `fanout_scaling`, which runs 8 and 32.
+
+    Not where the ingress offer comes from. The core `sub_*` offer is an
+    over-offer whose job is to make the SUT client the bottleneck; deriving it
+    from a sustainable rate would collapse it to this number and make the
+    fastest clients neighbours of the constraint instead of its subject.
     """
     import threading
 
-    result: Dict[str, Any] = {}
+    steps: List[Dict[str, Any]] = []
+    ceiling: Optional[float] = None
+    for target in FANOUT_GRID:
+        samples: List[float] = []
+        for _ in range(FANOUT_REPEATS):
+            result: Dict[str, Any] = {}
 
-    def _sub():
-        result["sub"] = _run_hammer(
-            "sub", cpuset=sub_cpuset, clients=1, seconds=seconds + 3,
-            topic="hostcal/fanout",
+            def _sub() -> None:
+                result["sub"] = _run_hammer(
+                    "sub", cpuset=sub_cpuset, clients=1, seconds=seconds + 3,
+                    topic="hostcal/fanout",
+                )
+
+            thread = threading.Thread(target=_sub, daemon=True)
+            thread.start()
+            time.sleep(1.0)
+            pub = _run_hammer(
+                "pub", cpuset=pub_cpuset, clients=PACED_PUB_THREADS, seconds=seconds,
+                topic="hostcal/fanout", rate=target,
+            )
+            thread.join(timeout=seconds + 15)
+            # The subscriber's count is what the broker actually forwarded; the
+            # publisher's is what it accepted. Prefer the former, and fall back
+            # only if the subscriber did not report.
+            sub = result.get("sub") or {}
+            value = sub.get("msgs_per_s") or (pub or {}).get("msgs_per_s")
+            if value:
+                samples.append(float(value))
+        if not samples:
+            continue
+        samples.sort()
+        mid = len(samples) // 2
+        median = samples[mid] if len(samples) % 2 else 0.5 * (samples[mid - 1] + samples[mid])
+        held = median >= PACED_HOLD_RATIO * target
+        steps.append(
+            {
+                "offer_msgs_per_s": target,
+                "forwarded_msgs_per_s": round(median, 1),
+                "held": held,
+                "samples": [round(v, 1) for v in samples],
+            }
         )
-
-    thread = threading.Thread(target=_sub, daemon=True)
-    thread.start()
-    time.sleep(1.0)
-    pub = _run_hammer(
-        "pub", cpuset=pub_cpuset, clients=2, seconds=seconds,
-        topic="hostcal/fanout", rate=0,
-    )
-    thread.join(timeout=seconds + 15)
+        if held:
+            ceiling = max(ceiling or 0.0, median)
+        else:
+            break
+    if not ceiling:
+        raise CalibrationFailed(
+            "no paced offer was forwarded to the subscriber: the probe reached "
+            "nothing. Check that the broker is reachable and mqtt_hammer builds."
+        )
     return {
-        "msgs_per_s": (pub or {}).get("msgs_per_s"),
-        "subscriber_msgs_per_s": (result.get("sub") or {}).get("msgs_per_s"),
+        "msgs_per_s": round(ceiling, 1),
+        "subscribers": 1,
+        "repeats": FANOUT_REPEATS,
+        "steps": steps,
     }
 
 

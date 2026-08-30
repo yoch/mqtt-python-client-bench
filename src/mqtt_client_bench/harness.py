@@ -175,6 +175,13 @@ BROKER_RECONCILE_MAX_RATIO = 1.20
 # higher container_cpu_high threshold stays as the hard saturation signal.
 BROKER_CPU_HEADROOM_PCT = 70.0
 
+# Share of the host's measured one-subscriber fan-out ceiling above which a
+# subscribe point is reporting the broker's limit rather than the client's.
+# Deliberately not tight: the ceiling is itself a measurement with a percent or
+# two of spread, and the point of the mark is to warn a reader, not to draw a
+# line nobody can defend to the decimal.
+FANOUT_LIMITED_RATIO = 0.90
+
 # Load average per CPU above which the machine is not quiet enough for a
 # comparable number. The bench pins its own roles, so moderate unrelated load is
 # tolerable; a run queue longer than one task per CPU is not. Kept conservative
@@ -597,6 +604,7 @@ def validate_run(
     sys_counters: Optional[dict] = None,
     loadgen_ref_sub: Optional[dict] = None,
     measure_window: Optional[tuple] = None,
+    fanout_ceiling_msgs_per_s: Optional[float] = None,
 ) -> dict:
     reasons = []
     for result in worker_results:
@@ -855,6 +863,33 @@ def validate_run(
             bottleneck = "offer_limited"
         else:
             bottleneck = "sut_limited"
+
+    # A subscribe point delivering at this host's fan-out ceiling is measuring
+    # Mosquitto, not the client. Symmetric to offer_limited, which says the
+    # offer was the constraint; this says the broker's forwarding was.
+    #
+    # It stays `valid` and keeps its number: the delivery is real, and core
+    # subscribe deliberately does not invalidate on a pegged broker (8a95f0c).
+    # What was missing is that the reader had no way to tell a client score
+    # from a broker ceiling — mqttium came back at 76,796 msgs/s against a
+    # measured fan-out ceiling of 75-77k, which is the broker's number wearing
+    # the client's name.
+    #
+    # Only for one-subscriber points. The broker reads once and writes once per
+    # subscriber, so a ceiling measured at one says nothing about fanout_scaling
+    # at 8 or 32.
+    if (
+        fanout_ceiling_msgs_per_s
+        and bottleneck == "sut_limited"
+        and int(point.get("subscribers") or 0) == 1
+        and delivered_rate is not None
+        and delivered_rate >= FANOUT_LIMITED_RATIO * float(fanout_ceiling_msgs_per_s)
+    ):
+        bottleneck = "broker_limited"
+        reasons.append(
+            f"broker_fanout_limited:{delivered_rate:.0f}/"
+            f"{float(fanout_ceiling_msgs_per_s):.0f}"
+        )
 
     return {
         "status": status,
@@ -1601,6 +1636,9 @@ def run_point(
             sys_counters=sys_counters if isinstance(sys_counters, dict) else None,
             loadgen_ref_sub=loadgen_ref_sub_stats,
             measure_window=(measure_started_wall, measure_ended_wall),
+            fanout_ceiling_msgs_per_s=(
+                ((host_profile or {}).get("ceilings") or {}).get("broker_fanout_msgs_per_s")
+            ),
         )
         declared_policy = ((host_profile or {}).get("host") or {}).get("frequency_policy")
         for reason in host_state_reasons(host_state, declared_policy=declared_policy):
