@@ -130,6 +130,21 @@ def cmd_matrix(args: argparse.Namespace) -> int:
         print(f"error: unknown scenario {args.scenario}", file=sys.stderr)
         return 2
 
+    if args.output_dir is None:
+        # Not a default in the parser: it depends on which machine this is.
+        # Campaign files are named <client>-<scenario>.json, so a runner writing
+        # to `results/` would overwrite the published corpus file by file.
+        from mqtt_client_bench.hostcal import resolve_host_profile, results_dir_for
+
+        profile = resolve_host_profile(getattr(args, "host_profile", None))
+        args.output_dir = results_dir_for(profile)
+        if profile is None or profile.get("role") != "reference":
+            print(
+                f"note: this host is not the published reference; writing to "
+                f"{args.output_dir}",
+                file=sys.stderr,
+            )
+
     if args.scenario:
         scenarios = [args.scenario]
     else:
@@ -202,7 +217,12 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 
 
 def cmd_calibrate_host(args: argparse.Namespace) -> int:
-    from mqtt_client_bench.hostcal import HostNotIdle, calibrate_host, profile_path_name
+    from mqtt_client_bench.hostcal import (
+        CalibrationFailed,
+        HostNotIdle,
+        calibrate_host,
+        profile_path_name,
+    )
 
     try:
         profile = calibrate_host(
@@ -217,6 +237,11 @@ def cmd_calibrate_host(args: argparse.Namespace) -> int:
         # and the operator needs the sentence, not the stack.
         print(f"host calibration refused: {exc}")
         return 2
+    except CalibrationFailed as exc:
+        # No profile is written. A half-measured one is worse than none: its
+        # harness cost would look right while its ceilings were nonsense.
+        print(f"host calibration failed: {exc}")
+        return 3
 
     refused = profile.get("reference_refused")
     output = args.output or str(Path("hosts") / profile_path_name(profile))
@@ -268,7 +293,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     if args.action != "build":
         print(f"error: unknown report action {args.action}", file=sys.stderr)
         return 2
-    summary = build_site(Path(args.input), Path(args.output))
+    kwargs = {} if getattr(args, "reference", "auto") == "auto" else {"reference": None}
+    summary = build_site(Path(args.input), Path(args.output), **kwargs)
     print(json.dumps(summary, indent=2))
     return 0
 
@@ -356,7 +382,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--host-profile",
         help="JSON from calibrate-host (default: the hosts/ profile matching this machine)",
     )
-    matrix_p.add_argument("--output-dir", default="results", help="Where to write <client>-<scenario>.json")
+    matrix_p.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "Where to write <client>-<scenario>.json. Default depends on the "
+            "host: `results/` for the published reference, "
+            "`results/<host>-<fingerprint>/` for a runner."
+        ),
+    )
     matrix_p.add_argument("--seed", type=int, default=42)
     matrix_p.add_argument("--variant-index", type=int, default=None, help="Run a single variant index (default: all)")
     matrix_p.set_defaults(func=cmd_matrix)
@@ -423,6 +457,15 @@ def build_parser() -> argparse.ArgumentParser:
     report_p.add_argument("action", choices=["build"])
     report_p.add_argument("--input", default="results", help="Directory of committed JSON results")
     report_p.add_argument("--output", default="site", help="Output directory for the static site")
+    report_p.add_argument(
+        "--reference",
+        choices=["auto", "none"],
+        default="auto",
+        help=(
+            "auto: publish only the host marked `reference` in hosts/. "
+            "none: publish every document, for reading a runner's own results."
+        ),
+    )
     report_p.set_defaults(func=cmd_report)
 
     results_p = sub.add_parser(

@@ -10,6 +10,48 @@ on one loadgen core. For *why* the broker sits where it does — the per-byte
 header `read(2)` in 2.0.x and what 2.1 replaced it with — see
 `MOSQUITTO_PROFILING.md`.
 
+## Calibrating a host
+
+`run calibrate-host` measures this machine's ceilings into `hosts/`. Once per
+host: the profile is committed and every campaign reads it.
+
+```bash
+# Reference host (the one the site publishes). ~300 s, machine must be quiet.
+python -m mqtt_client_bench.run calibrate-host --role reference
+
+# A remote runner. Same command, different role: runners are never published.
+python -m mqtt_client_bench.run calibrate-host --role runner
+```
+
+The probe brings the broker up if none is listening and puts the machine back
+as it found it. A ceiling of zero is a failure, not a slow host, and no profile
+is written.
+
+Two things that will bite otherwise:
+
+- **Leave ~2 minutes between two calibrations.** The idleness gate reads a
+  one-minute load average, and 300 s of hammering leaves a tail well above its
+  threshold — a back-to-back second run is refused, correctly.
+- **After changing `docker-compose.yml`, run `broker down && broker up`.** A
+  container started before a volume was added does not have it, and the symptom
+  looks like the feature is broken rather than the container being stale.
+
+### Running on a remote runner
+
+1. **Preflight** — `docker info`, `gcc --version`, `emqtt_bench --help`,
+   `run clients -v`, then `broker up` and `broker down`. Any gap is a blocker.
+2. **Calibrate the host** on a quiet machine, then commit `hosts/<host>-<fp>.json`.
+3. **Calibrate the clients** with `run calibrate`, as on the reference host.
+4. **Run the campaign.** `run matrix` writes to `results/<host>-<fp>/` by
+   default on a runner — the campaign files are named `<client>-<scenario>.json`,
+   so writing to `results/` would overwrite the published corpus file by file.
+5. **Read it** with `report build --input results/<host>-<fp> --reference none`.
+
+A host with no cpufreq governor (a VM, a container) is refused unless its
+committed profile declares `frequency_policy: "unpinned"`. The declaration is
+what permits it — never the absence of the sysfs file — and such runs carry
+`clock_unpinned` and are never published.
+
 ## One subscriber is worth two thirds of the pipeline
 
 Measured on the reference host (i7-3770, loadgen cpuset = one physical group,

@@ -209,18 +209,30 @@ def host_state_snapshot() -> dict:
     }
 
 
-def host_state_reasons(host_state: Optional[dict]) -> List[str]:
-    """Environment invariants that must hold for a run to be comparable."""
+def host_state_reasons(
+    host_state: Optional[dict], *, declared_policy: Optional[str] = None
+) -> List[str]:
+    """Environment invariants that must hold for a run to be comparable.
+
+    ``declared_policy`` is the frequency policy the machine's committed host
+    profile claims. It is the *only* thing that can excuse an unreadable
+    governor, and the distinction carries the whole weight of this gate: a
+    machine with no cpufreq and no profile still fails closed, because absent
+    evidence is not evidence of a pinned clock. What excuses it is a written,
+    versioned, fingerprinted declaration that someone stood behind — never the
+    absence of a sysfs file.
+    """
     reasons: List[str] = []
     if not host_state:
         return reasons
     governor = host_state.get("scaling_governor")
     if governor is None:
-        # No cpufreq sysfs at all: a container or a VM, not the reference host.
-        # Skipping the check here let a whole campaign measured under an unknown
-        # frequency policy come back `valid`, which is the one thing this gate
-        # exists to prevent. Absent evidence is not evidence of a pinned clock.
-        reasons.append("cpu_governor_unknown")
+        if declared_policy != "unpinned":
+            # No cpufreq sysfs at all: a container or a VM. Skipping the check
+            # here let a whole campaign measured under an unknown frequency
+            # policy come back `valid`, which is the one thing this gate exists
+            # to prevent.
+            reasons.append("cpu_governor_unknown")
     elif governor != "performance":
         reasons.append(f"cpu_governor_not_performance:{governor}")
     load = host_state.get("loadavg") or []
@@ -1590,7 +1602,8 @@ def run_point(
             loadgen_ref_sub=loadgen_ref_sub_stats,
             measure_window=(measure_started_wall, measure_ended_wall),
         )
-        for reason in host_state_reasons(host_state):
+        declared_policy = ((host_profile or {}).get("host") or {}).get("frequency_policy")
+        for reason in host_state_reasons(host_state, declared_policy=declared_policy):
             validity["status"] = "inconclusive"
             validity["reasons"].append(reason)
         if worker_hang:
@@ -1676,6 +1689,12 @@ def run_point(
             # a host nobody calibrated, which is the honest answer rather than
             # a default borrowed from the reference host.
             "host_profile": host_profile_summary(host_profile),
+            # A run this host was allowed to produce despite an unreadable
+            # governor. It stays valid for its own host's ranking and is never
+            # published (the report keeps only the reference host), but the
+            # reader of a single result must not have to infer it.
+            "clock_unpinned": host_state.get("scaling_governor") is None
+            and declared_policy == "unpinned",
             "cpusets": cpusets,
             "non_comparable": bool(point.get("non_comparable")) or forced_facade,
             "protocol_effective": point.get("protocol", "MQTTv311"),
@@ -2199,6 +2218,29 @@ def _validate_host_profile(host_profile: dict) -> None:
             raise ValueError(
                 f"host profile {key} {want!r} does not match this machine {got!r}"
             )
+    from mqtt_client_bench.hostcal import host_fingerprint
+
+    recorded = host_profile.get("host_fingerprint")
+    if recorded:
+        recomputed = host_fingerprint(host_profile)
+        if recorded != recomputed:
+            raise ValueError(
+                f"host profile fingerprint {recorded!r} does not match its own "
+                f"contents ({recomputed!r}); it was written by an older "
+                "calibration and must be re-measured, not edited"
+            )
+    want_broker = host_profile.get("broker") or {}
+    if want_broker:
+        from mqtt_client_bench.hostcal import broker_identity
+
+        got_broker = broker_identity()
+        for key in ("image_digest", "config_hash"):
+            want, got = want_broker.get(key), got_broker.get(key)
+            if want and got and want != got:
+                raise ValueError(
+                    f"host profile broker {key} {want!r} does not match {got!r}; "
+                    "the fan-out ceiling was measured against a different broker"
+                )
     want_policy = expected.get("frequency_policy")
     got_policy = actual.get("frequency_policy")
     if want_policy and got_policy and want_policy != got_policy:
