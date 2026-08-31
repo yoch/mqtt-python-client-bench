@@ -56,9 +56,9 @@
     "cpu_model": "Intel(R) Xeon(R) Processor",
     "hostname": "cursor",
     "loadavg": [
-      1.115234375,
-      1.1328125,
-      1.041015625
+      1.3486328125,
+      1.228515625,
+      1.14404296875
     ],
     "machine": "x86_64",
     "physical_cpu_groups": [
@@ -89,7 +89,7 @@
     "mqttium",
     "mqttium-compat"
   ],
-  "points_complete": false,
+  "points_complete": true,
   "points_expected": 2,
   "profile": "standard",
   "results": [
@@ -3666,6 +3666,3585 @@
           187587.98012834362,
           187560.27625208578,
           187083.82198737358
+        ]
+      }
+    },
+    {
+      "point": {
+        "cadence": "capacity",
+        "description": "Ingress capacity: paced mqtt_hammer to one exact topic.",
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 64,
+        "inflight": 64,
+        "loadgen_clients": 32,
+        "max_queued": 640,
+        "name": "sub_exact_telemetry",
+        "network": "localhost",
+        "non_comparable": false,
+        "outstanding": 64,
+        "payload": "telemetry256",
+        "protocol": "MQTTv311",
+        "publishers": 1,
+        "qos_publish": 0,
+        "qos_subscribe": 0,
+        "scenario": "sub_exact_telemetry",
+        "subscribers": 1,
+        "subscription": "exact",
+        "suite": "core",
+        "tags": [
+          "representative",
+          "dual_protocol"
+        ],
+        "tls": false,
+        "topic_topology": "single",
+        "topology": "subscriber_ingress",
+        "warmup_s": 3.0
+      },
+      "runs": [
+        {
+          "bottleneck": "offer_limited",
+          "broker_cpu_max_pct": 91.50812861794698,
+          "broker_reconciliation": {
+            "applicable": false,
+            "broker_received": null,
+            "completed": null,
+            "ratio": null,
+            "reason": null
+          },
+          "client": "gmqtt",
+          "client_path": null,
+          "clock_unpinned": true,
+          "cost_per_message": {
+            "cpu_ns_in_window": 12000145308,
+            "cpu_us_per_message": 5.0159946881259465,
+            "delivered": 2392376,
+            "messages": 2392376,
+            "published": 0,
+            "rss_peak_kb": 29320
+          },
+          "cpusets": {
+            "broker": "1",
+            "loadgen": "2",
+            "orch": "3",
+            "sut": "0"
+          },
+          "delivery_offer_ratio": 0.9967824824460478,
+          "effective_offer_msgs_per_s": 200000.0,
+          "environment": {
+            "client_versions": {
+              "aiomqtt": "2.5.1",
+              "aiomqtt3": null,
+              "amqtt": "0.12.0",
+              "awscrt": "0.36.2",
+              "gmqtt": "0.7.0",
+              "mqttium": "1.0.0rc10",
+              "paho": "2.1.0",
+              "zmqtt": "0.2.1"
+            },
+            "cpu_count": 4,
+            "cpu_model": "Intel(R) Xeon(R) Processor",
+            "hostname": "cursor",
+            "loadavg": [
+              1.2890625,
+              1.16943359375,
+              1.05908203125
+            ],
+            "machine": "x86_64",
+            "physical_cpu_groups": [
+              [
+                0
+              ],
+              [
+                1
+              ],
+              [
+                2
+              ],
+              [
+                3
+              ]
+            ],
+            "platform": "Linux-6.12.94+-x86_64-with-glibc2.39",
+            "python": "3.12.3",
+            "scaling_governor": null
+          },
+          "finished_at": "2026-08-31T12:06:00+00:00",
+          "harness_fingerprint": "f750098b8de3ce58",
+          "host_profile": {
+            "ceilings": {
+              "broker_fanout_msgs_per_s": 149815.6,
+              "broker_paced_ceiling_msgs_per_s": 799819.4,
+              "harness_cost_ns_per_message": 1088.2,
+              "recommended_offer_msgs_per_s": 679846.5
+            },
+            "fingerprint": "ee5b909b92c756ad",
+            "frequency_policy": "unpinned",
+            "hostname": "cursor",
+            "idle_verified": true,
+            "measured_at": "2026-08-31T08:36:48Z",
+            "role": "runner"
+          },
+          "host_state": {
+            "cpu_count": 4,
+            "loadavg": [
+              1.0849609375,
+              1.13037109375,
+              1.0439453125
+            ],
+            "scaling_governor": null
+          },
+          "ingress_reconciliation": {
+            "applicable": true,
+            "broker_received": 3995813,
+            "loadgen_msgs": 4195850,
+            "ratio": 0.9523250354516963,
+            "reason": null
+          },
+          "loadgen": {
+            "args": [
+              "taskset",
+              "-c",
+              "2",
+              "/workspace/scripts/mqtt_hammer",
+              "pub",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "11883",
+              "--topic",
+              "bench/939bb712/org/acme/site/s0000/device/d0000/telemetry/temperature",
+              "--clients",
+              "2",
+              "--payload",
+              "256",
+              "--duration",
+              "42",
+              "--rate",
+              "200000"
+            ],
+            "clients": 2,
+            "effective_offer_msgs_per_s": 200000.0,
+            "emitted_msgs": 4195850,
+            "engine": "hammer",
+            "image": null,
+            "image_digest": null,
+            "interval_ms": 0,
+            "mode": "pub",
+            "mqtt_version": 5,
+            "mqtt_version_override": "emqtt_bench_v311_client_id_rejected_by_mosquitto",
+            "mqtt_version_requested": 4,
+            "nominal_rate": 200000.0,
+            "observed_pub_rate": 199816.7,
+            "observed_recv_rate": null,
+            "paced": true,
+            "parsed": {
+              "kinds": [
+                "pub"
+              ],
+              "last_rate": 199816.7,
+              "last_total": 4195850,
+              "max_rate": 199816.7,
+              "median_rate": 199816.7,
+              "rates": [
+                199816.7
+              ],
+              "samples": 1,
+              "totals": [
+                4195850
+              ]
+            },
+            "parsed_pub_rate_raw": 199816.7,
+            "qos": 0,
+            "qos0_pub_counter_double_count": false,
+            "rate_msgs_per_s": 200000.0,
+            "stdout_tail": "{\"role\":\"pub\",\"clients\":2,\"rate_limit\":200000,\"msgs\":4195850,\"seconds\":20.998,\"msgs_per_s\":199816.7}",
+            "target_requested": 200000.0
+          },
+          "loadgen_ref_sub": null,
+          "managed_broker": true,
+          "matrix_rotation": [
+            "paho",
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat"
+          ],
+          "matrix_slot": 1,
+          "network": {
+            "applied": false,
+            "profile": "localhost",
+            "reason": "localhost_noop"
+          },
+          "non_comparable": false,
+          "point": {
+            "cadence": "capacity",
+            "description": "Ingress capacity: paced mqtt_hammer to one exact topic.",
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
+            "ingress_target_msgs_per_s": 200000.0,
+            "loadgen_clients": 2,
+            "max_queued": 640,
+            "name": "sub_exact_telemetry",
+            "network": "localhost",
+            "non_comparable": false,
+            "outstanding": 64,
+            "payload": "telemetry256",
+            "protocol": "MQTTv311",
+            "publishers": 1,
+            "qos_publish": 0,
+            "qos_subscribe": 0,
+            "run_id": "939bb712",
+            "scenario": "sub_exact_telemetry",
+            "subscribers": 1,
+            "subscription": "exact",
+            "suite": "core",
+            "tags": [
+              "representative",
+              "dual_protocol"
+            ],
+            "tls": false,
+            "topic_topology": "single",
+            "topology": "subscriber_ingress",
+            "warmup_s": 3.0
+          },
+          "primary_msgs_per_s": 199356.49648920956,
+          "protocol_effective": "MQTTv311",
+          "publish_path": null,
+          "qdisc": null,
+          "reasons": [],
+          "run_id": "939bb712",
+          "run_index": 0,
+          "schema_version": 1,
+          "secondary_msgs_per_s": {
+            "subscriber": 199356.49648920956
+          },
+          "started_at": "2026-08-31T12:05:32+00:00",
+          "status": "valid",
+          "sys_counters": {
+            "after": {
+              "dropped": 50321279,
+              "messages_received": 785919026,
+              "messages_sent": 264700695,
+              "publish_received": 752389476,
+              "publish_sent": 149659492,
+              "raw": {
+                "$SYS/broker/messages/received": 785919026,
+                "$SYS/broker/messages/sent": 264700695,
+                "$SYS/broker/publish/messages/dropped": 50321279,
+                "$SYS/broker/publish/messages/received": 752389476,
+                "$SYS/broker/publish/messages/sent": 149659492
+              }
+            },
+            "before": {
+              "dropped": 50321279,
+              "messages_received": 781923210,
+              "messages_sent": 260989587,
+              "publish_received": 748393663,
+              "publish_sent": 145948385,
+              "raw": {
+                "$SYS/broker/messages/received": 781923210,
+                "$SYS/broker/messages/sent": 260989587,
+                "$SYS/broker/publish/messages/dropped": 50321279,
+                "$SYS/broker/publish/messages/received": 748393663,
+                "$SYS/broker/publish/messages/sent": 145948385
+              }
+            },
+            "dropped_delta": 0,
+            "messages_received_delta": 3995816,
+            "messages_sent_delta": 3711108,
+            "publish_received_delta": 3995813,
+            "publish_sent_delta": 3711107
+          },
+          "telemetry": [
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": null,
+                  "cpu_usage_usec": 3121023278,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13934592,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0849609375,
+                1.13037109375,
+                1.0439453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 27,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20307,
+                  "rss_hwm_kb": 28684,
+                  "rss_kb": 28684,
+                  "stime_ticks": 1,
+                  "uss_kb": 17472,
+                  "utime_ticks": 26,
+                  "voluntary_ctxt_switches": 14
+                }
+              },
+              "ts": 1788177932.3244877
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 67.60792206801054,
+                  "cpu_usage_usec": 3121699695,
+                  "mem": "13.4MiB",
+                  "mem_bytes": 14012416,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0849609375,
+                1.13037109375,
+                1.0439453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 117,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20681,
+                  "rss_hwm_kb": 29060,
+                  "rss_kb": 29060,
+                  "stime_ticks": 10,
+                  "uss_kb": 17848,
+                  "utime_ticks": 107,
+                  "voluntary_ctxt_switches": 17
+                }
+              },
+              "ts": 1788177933.3253422
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.6749365690998,
+                  "cpu_usage_usec": 3122466883,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14245888,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0849609375,
+                1.13037109375,
+                1.0439453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 217,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20681,
+                  "rss_hwm_kb": 29060,
+                  "rss_kb": 29060,
+                  "stime_ticks": 25,
+                  "uss_kb": 17848,
+                  "utime_ticks": 192,
+                  "voluntary_ctxt_switches": 17
+                }
+              },
+              "ts": 1788177934.3259034
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 75.92665785462016,
+                  "cpu_usage_usec": 3123226529,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13983744,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0849609375,
+                1.13037109375,
+                1.0439453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 317,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20681,
+                  "rss_hwm_kb": 29060,
+                  "rss_kb": 29060,
+                  "stime_ticks": 47,
+                  "uss_kb": 17848,
+                  "utime_ticks": 270,
+                  "voluntary_ctxt_switches": 17
+                }
+              },
+              "ts": 1788177935.3264306
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.77454315423603,
+                  "cpu_usage_usec": 3123994678,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14225408,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0849609375,
+                1.13037109375,
+                1.0439453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 417,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20681,
+                  "rss_hwm_kb": 29060,
+                  "rss_kb": 29060,
+                  "stime_ticks": 60,
+                  "uss_kb": 17848,
+                  "utime_ticks": 357,
+                  "voluntary_ctxt_switches": 20
+                }
+              },
+              "ts": 1788177936.3270109
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 13.28057164283505,
+                  "cpu_usage_usec": 3124127549,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13975552,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                0.998046875,
+                1.111328125,
+                1.0380859375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 435,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20683,
+                  "rss_hwm_kb": 29060,
+                  "rss_kb": 29060,
+                  "stime_ticks": 63,
+                  "uss_kb": 17848,
+                  "utime_ticks": 372,
+                  "voluntary_ctxt_switches": 23
+                }
+              },
+              "ts": 1788177937.327476
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 0.024788814741428168,
+                  "cpu_usage_usec": 3124127797,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13934592,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                0.998046875,
+                1.111328125,
+                1.0380859375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 435,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20683,
+                  "rss_hwm_kb": 29060,
+                  "rss_kb": 29060,
+                  "stime_ticks": 63,
+                  "uss_kb": 17848,
+                  "utime_ticks": 372,
+                  "voluntary_ctxt_switches": 24
+                }
+              },
+              "ts": 1788177938.327949
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 24.61610329284638,
+                  "cpu_usage_usec": 3124374078,
+                  "mem": "13.5MiB",
+                  "mem_bytes": 14204928,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                0.998046875,
+                1.111328125,
+                1.0380859375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 466,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20682,
+                  "rss_hwm_kb": 29060,
+                  "rss_kb": 29060,
+                  "stime_ticks": 73,
+                  "uss_kb": 17848,
+                  "utime_ticks": 393,
+                  "voluntary_ctxt_switches": 25
+                }
+              },
+              "ts": 1788177939.3283975
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.07770835400407,
+                  "cpu_usage_usec": 3125135207,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14274560,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                0.998046875,
+                1.111328125,
+                1.0380859375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 567,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 79,
+                  "uss_kb": 18108,
+                  "utime_ticks": 488,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177940.3288894
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.51153900736612,
+                  "cpu_usage_usec": 3125900740,
+                  "mem": "14.4MiB",
+                  "mem_bytes": 15097856,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                0.998046875,
+                1.111328125,
+                1.0380859375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 666,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 85,
+                  "uss_kb": 18108,
+                  "utime_ticks": 581,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177941.3294015
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.53223461161576,
+                  "cpu_usage_usec": 3126666402,
+                  "mem": "13.9MiB",
+                  "mem_bytes": 14606336,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.07861328125,
+                1.12646484375,
+                1.04345703125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 766,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 89,
+                  "uss_kb": 18108,
+                  "utime_ticks": 677,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177942.329876
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.81366905789122,
+                  "cpu_usage_usec": 3127434895,
+                  "mem": "14.0MiB",
+                  "mem_bytes": 14635008,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.07861328125,
+                1.12646484375,
+                1.04345703125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 866,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 92,
+                  "uss_kb": 18108,
+                  "utime_ticks": 774,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177943.3303354
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.69411961084319,
+                  "cpu_usage_usec": 3128202334,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14262272,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.07861328125,
+                1.12646484375,
+                1.04345703125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 967,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 98,
+                  "uss_kb": 18108,
+                  "utime_ticks": 869,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177944.3308446
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.66178260756921,
+                  "cpu_usage_usec": 3128969370,
+                  "mem": "13.8MiB",
+                  "mem_bytes": 14422016,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.07861328125,
+                1.12646484375,
+                1.04345703125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1066,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 102,
+                  "uss_kb": 18108,
+                  "utime_ticks": 964,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177945.331539
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 80.55815072692671,
+                  "cpu_usage_usec": 3129775401,
+                  "mem": "13.4MiB",
+                  "mem_bytes": 14057472,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.07861328125,
+                1.12646484375,
+                1.04345703125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1166,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 105,
+                  "uss_kb": 18108,
+                  "utime_ticks": 1061,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177946.332004
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 87.81497621530652,
+                  "cpu_usage_usec": 3130653980,
+                  "mem": "13.5MiB",
+                  "mem_bytes": 14184448,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.072265625,
+                1.1240234375,
+                1.04296875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1266,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 107,
+                  "uss_kb": 18108,
+                  "utime_ticks": 1159,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177947.3325517
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 87.87666821216787,
+                  "cpu_usage_usec": 3131533150,
+                  "mem": "13.4MiB",
+                  "mem_bytes": 14086144,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.072265625,
+                1.1240234375,
+                1.04296875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1367,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 111,
+                  "uss_kb": 18108,
+                  "utime_ticks": 1256,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177948.3330512
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 87.80133111603021,
+                  "cpu_usage_usec": 3132411541,
+                  "mem": "13.5MiB",
+                  "mem_bytes": 14184448,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.072265625,
+                1.1240234375,
+                1.04296875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1467,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 115,
+                  "uss_kb": 18108,
+                  "utime_ticks": 1352,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177949.333488
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 87.87538771111376,
+                  "cpu_usage_usec": 3133290770,
+                  "mem": "13.5MiB",
+                  "mem_bytes": 14110720,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.072265625,
+                1.1240234375,
+                1.04296875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1566,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 119,
+                  "uss_kb": 18108,
+                  "utime_ticks": 1447,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177950.3339207
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 87.37555234005146,
+                  "cpu_usage_usec": 3134165649,
+                  "mem": "14.4MiB",
+                  "mem_bytes": 15114240,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.072265625,
+                1.1240234375,
+                1.04296875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1666,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 125,
+                  "uss_kb": 18108,
+                  "utime_ticks": 1541,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788177951.334508
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 89.58289985087464,
+                  "cpu_usage_usec": 3135062242,
+                  "mem": "14.3MiB",
+                  "mem_bytes": 14991360,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.22705078125,
+                1.1552734375,
+                1.0537109375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1766,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 129,
+                  "uss_kb": 18108,
+                  "utime_ticks": 1637,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788177952.335835
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 91.50812861794698,
+                  "cpu_usage_usec": 3135978718,
+                  "mem": "14.0MiB",
+                  "mem_bytes": 14696448,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.22705078125,
+                1.1552734375,
+                1.0537109375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1867,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 136,
+                  "uss_kb": 18108,
+                  "utime_ticks": 1731,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788177953.3366647
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 78.9233075737983,
+                  "cpu_usage_usec": 3136768575,
+                  "mem": "13.9MiB",
+                  "mem_bytes": 14524416,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.22705078125,
+                1.1552734375,
+                1.0537109375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1967,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 141,
+                  "uss_kb": 18108,
+                  "utime_ticks": 1826,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788177954.3382103
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 89.57330444673983,
+                  "cpu_usage_usec": 3137665010,
+                  "mem": "14.5MiB",
+                  "mem_bytes": 15167488,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.22705078125,
+                1.1552734375,
+                1.0537109375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2067,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 149,
+                  "uss_kb": 18108,
+                  "utime_ticks": 1918,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788177955.338918
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 89.25979989109116,
+                  "cpu_usage_usec": 3138558247,
+                  "mem": "14.1MiB",
+                  "mem_bytes": 14786560,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.22705078125,
+                1.1552734375,
+                1.0537109375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2167,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 152,
+                  "uss_kb": 18108,
+                  "utime_ticks": 2015,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788177956.3397224
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 85.34632224775174,
+                  "cpu_usage_usec": 3139412255,
+                  "mem": "13.7MiB",
+                  "mem_bytes": 14348288,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.2890625,
+                1.16943359375,
+                1.05908203125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2268,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17048,
+                  "pss_kb": 20942,
+                  "rss_hwm_kb": 29320,
+                  "rss_kb": 29320,
+                  "stime_ticks": 157,
+                  "uss_kb": 18108,
+                  "utime_ticks": 2111,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788177957.3404813
+            }
+          ],
+          "worker_memory_peaks": {
+            "w0": {
+              "peak_pss_kb": 20942,
+              "peak_rss_hwm_kb": 29320,
+              "peak_rss_kb": 29320,
+              "peak_uss_kb": 18108,
+              "pid": 17048,
+              "samples": 26
+            }
+          },
+          "workers": [
+            {
+              "adapter": "gmqtt",
+              "callback_filters": 0,
+              "callback_invocations": 2392376,
+              "callback_topics_count": 0,
+              "callbacks_per_s": 199356.49648920956,
+              "client": "gmqtt",
+              "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+              "client_version": "0.7.0",
+              "completion_mechanism": "callback",
+              "cpu_ns_in_window": 12000145308,
+              "delivered_during_drain": 1199110,
+              "duration_s": 12.000491793000037,
+              "filters": [
+                "bench/939bb712/org/acme/site/s0000/device/d0000/telemetry/temperature"
+              ],
+              "implementation_language": "python",
+              "io_model": "asyncio_bridged",
+              "latencies_ns": [],
+              "latency_sampling": {
+                "buffered": 0,
+                "capacity": 50000,
+                "observed": 0,
+                "retained": 0,
+                "strategy": "exact_uniform_subsample"
+              },
+              "memory_peak": {
+                "peak_pss_kb": 20942,
+                "peak_rss_hwm_kb": 29320,
+                "peak_rss_kb": 29320,
+                "peak_uss_kb": 18108,
+                "pid": 17048,
+                "samples": 26
+              },
+              "msgs_per_s": 199356.49648920956,
+              "ok": true,
+              "overlapping_callbacks": false,
+              "payload_bytes_in_window": 612448256,
+              "payload_bytes_per_s": 51035263.10123765,
+              "pid": 17048,
+              "private_api": {
+                "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+                "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+                "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+              },
+              "process_exit": {
+                "possible_oom_or_sigkill": false,
+                "returncode": 0,
+                "signal": null
+              },
+              "qos": 0,
+              "role": "subscriber",
+              "sequence_summary": {
+                "count": 0,
+                "digest_sum64": "0000000000000000",
+                "digest_xor64": "0000000000000000",
+                "exact_limit": 20000,
+                "exact_retained": true,
+                "first": null,
+                "last": null,
+                "out_of_order": 0,
+                "tracked": true
+              },
+              "sequences": [],
+              "stability": "stable",
+              "subscriber_delivered": 2392376,
+              "synthetic_mids": true,
+              "t0_s": 15250.110960321,
+              "t1_s": 15262.111452114
+            }
+          ]
+        },
+        {
+          "bottleneck": "offer_limited",
+          "broker_cpu_max_pct": 86.66394094943513,
+          "broker_reconciliation": {
+            "applicable": false,
+            "broker_received": null,
+            "completed": null,
+            "ratio": null,
+            "reason": null
+          },
+          "client": "gmqtt",
+          "client_path": null,
+          "clock_unpinned": true,
+          "cost_per_message": {
+            "cpu_ns_in_window": 11998755770,
+            "cpu_us_per_message": 5.023018598817626,
+            "delivered": 2388754,
+            "messages": 2388754,
+            "published": 0,
+            "rss_peak_kb": 29192
+          },
+          "cpusets": {
+            "broker": "1",
+            "loadgen": "2",
+            "orch": "3",
+            "sut": "0"
+          },
+          "delivery_offer_ratio": 0.9953064120685354,
+          "effective_offer_msgs_per_s": 200000.0,
+          "environment": {
+            "client_versions": {
+              "aiomqtt": "2.5.1",
+              "aiomqtt3": null,
+              "amqtt": "0.12.0",
+              "awscrt": "0.36.2",
+              "gmqtt": "0.7.0",
+              "mqttium": "1.0.0rc10",
+              "paho": "2.1.0",
+              "zmqtt": "0.2.1"
+            },
+            "cpu_count": 4,
+            "cpu_model": "Intel(R) Xeon(R) Processor",
+            "hostname": "cursor",
+            "loadavg": [
+              1.21630859375,
+              1.1484375,
+              1.0712890625
+            ],
+            "machine": "x86_64",
+            "physical_cpu_groups": [
+              [
+                0
+              ],
+              [
+                1
+              ],
+              [
+                2
+              ],
+              [
+                3
+              ]
+            ],
+            "platform": "Linux-6.12.94+-x86_64-with-glibc2.39",
+            "python": "3.12.3",
+            "scaling_governor": null
+          },
+          "finished_at": "2026-08-31T12:09:51+00:00",
+          "harness_fingerprint": "f750098b8de3ce58",
+          "host_profile": {
+            "ceilings": {
+              "broker_fanout_msgs_per_s": 149815.6,
+              "broker_paced_ceiling_msgs_per_s": 799819.4,
+              "harness_cost_ns_per_message": 1088.2,
+              "recommended_offer_msgs_per_s": 679846.5
+            },
+            "fingerprint": "ee5b909b92c756ad",
+            "frequency_policy": "unpinned",
+            "hostname": "cursor",
+            "idle_verified": true,
+            "measured_at": "2026-08-31T08:36:48Z",
+            "role": "runner"
+          },
+          "host_state": {
+            "cpu_count": 4,
+            "loadavg": [
+              1.1298828125,
+              1.126953125,
+              1.06201171875
+            ],
+            "scaling_governor": null
+          },
+          "ingress_reconciliation": {
+            "applicable": true,
+            "broker_received": 3994813,
+            "loadgen_msgs": 4194950,
+            "ratio": 0.9522909689030858,
+            "reason": null
+          },
+          "loadgen": {
+            "args": [
+              "taskset",
+              "-c",
+              "2",
+              "/workspace/scripts/mqtt_hammer",
+              "pub",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "11883",
+              "--topic",
+              "bench/afc6581d/org/acme/site/s0000/device/d0000/telemetry/temperature",
+              "--clients",
+              "2",
+              "--payload",
+              "256",
+              "--duration",
+              "42",
+              "--rate",
+              "200000"
+            ],
+            "clients": 2,
+            "effective_offer_msgs_per_s": 200000.0,
+            "emitted_msgs": 4194950,
+            "engine": "hammer",
+            "image": null,
+            "image_digest": null,
+            "interval_ms": 0,
+            "mode": "pub",
+            "mqtt_version": 5,
+            "mqtt_version_override": "emqtt_bench_v311_client_id_rejected_by_mosquitto",
+            "mqtt_version_requested": 4,
+            "nominal_rate": 200000.0,
+            "observed_pub_rate": 199808.7,
+            "observed_recv_rate": null,
+            "paced": true,
+            "parsed": {
+              "kinds": [
+                "pub"
+              ],
+              "last_rate": 199808.7,
+              "last_total": 4194950,
+              "max_rate": 199808.7,
+              "median_rate": 199808.7,
+              "rates": [
+                199808.7
+              ],
+              "samples": 1,
+              "totals": [
+                4194950
+              ]
+            },
+            "parsed_pub_rate_raw": 199808.7,
+            "qos": 0,
+            "qos0_pub_counter_double_count": false,
+            "rate_msgs_per_s": 200000.0,
+            "stdout_tail": "{\"role\":\"pub\",\"clients\":2,\"rate_limit\":200000,\"msgs\":4194950,\"seconds\":20.995,\"msgs_per_s\":199808.7}",
+            "target_requested": 200000.0
+          },
+          "loadgen_ref_sub": null,
+          "managed_broker": true,
+          "matrix_rotation": [
+            "gmqtt",
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho"
+          ],
+          "matrix_slot": 0,
+          "network": {
+            "applied": false,
+            "profile": "localhost",
+            "reason": "localhost_noop"
+          },
+          "non_comparable": false,
+          "point": {
+            "cadence": "capacity",
+            "description": "Ingress capacity: paced mqtt_hammer to one exact topic.",
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
+            "ingress_target_msgs_per_s": 200000.0,
+            "loadgen_clients": 2,
+            "max_queued": 640,
+            "name": "sub_exact_telemetry",
+            "network": "localhost",
+            "non_comparable": false,
+            "outstanding": 64,
+            "payload": "telemetry256",
+            "protocol": "MQTTv311",
+            "publishers": 1,
+            "qos_publish": 0,
+            "qos_subscribe": 0,
+            "run_id": "afc6581d",
+            "scenario": "sub_exact_telemetry",
+            "subscribers": 1,
+            "subscription": "exact",
+            "suite": "core",
+            "tags": [
+              "representative",
+              "dual_protocol"
+            ],
+            "tls": false,
+            "topic_topology": "single",
+            "topology": "subscriber_ingress",
+            "warmup_s": 3.0
+          },
+          "primary_msgs_per_s": 199061.2824137071,
+          "protocol_effective": "MQTTv311",
+          "publish_path": null,
+          "qdisc": null,
+          "reasons": [],
+          "run_id": "afc6581d",
+          "run_index": 1,
+          "schema_version": 1,
+          "secondary_msgs_per_s": {
+            "subscriber": 199061.2824137071
+          },
+          "started_at": "2026-08-31T12:09:23+00:00",
+          "status": "valid",
+          "sys_counters": {
+            "after": {
+              "dropped": 65069605,
+              "messages_received": 820903674,
+              "messages_sent": 281598199,
+              "publish_received": 787374026,
+              "publish_sent": 166601705,
+              "raw": {
+                "$SYS/broker/messages/received": 820903674,
+                "$SYS/broker/messages/sent": 281598199,
+                "$SYS/broker/publish/messages/dropped": 65069605,
+                "$SYS/broker/publish/messages/received": 787374026,
+                "$SYS/broker/publish/messages/sent": 166601705
+              }
+            },
+            "before": {
+              "dropped": 65069605,
+              "messages_received": 816908858,
+              "messages_sent": 277887091,
+              "publish_received": 783379213,
+              "publish_sent": 162890598,
+              "raw": {
+                "$SYS/broker/messages/received": 816908858,
+                "$SYS/broker/messages/sent": 277887091,
+                "$SYS/broker/publish/messages/dropped": 65069605,
+                "$SYS/broker/publish/messages/received": 783379213,
+                "$SYS/broker/publish/messages/sent": 162890598
+              }
+            },
+            "dropped_delta": 0,
+            "messages_received_delta": 3994816,
+            "messages_sent_delta": 3711108,
+            "publish_received_delta": 3994813,
+            "publish_sent_delta": 3711107
+          },
+          "telemetry": [
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": null,
+                  "cpu_usage_usec": 3199372922,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13934592,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.1298828125,
+                1.126953125,
+                1.06201171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 28,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20245,
+                  "rss_hwm_kb": 28552,
+                  "rss_kb": 28552,
+                  "stime_ticks": 2,
+                  "uss_kb": 17460,
+                  "utime_ticks": 26,
+                  "voluntary_ctxt_switches": 14
+                }
+              },
+              "ts": 1788178163.3253634
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 68.50733220450374,
+                  "cpu_usage_usec": 3200058448,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13983744,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.1298828125,
+                1.126953125,
+                1.06201171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 118,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20636,
+                  "rss_hwm_kb": 28944,
+                  "rss_kb": 28944,
+                  "stime_ticks": 10,
+                  "uss_kb": 17852,
+                  "utime_ticks": 108,
+                  "voluntary_ctxt_switches": 17
+                }
+              },
+              "ts": 1788178164.3263526
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.77993150160782,
+                  "cpu_usage_usec": 3200826597,
+                  "mem": "13.4MiB",
+                  "mem_bytes": 14000128,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.1298828125,
+                1.126953125,
+                1.06201171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 218,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20636,
+                  "rss_hwm_kb": 28944,
+                  "rss_kb": 28944,
+                  "stime_ticks": 13,
+                  "uss_kb": 17852,
+                  "utime_ticks": 205,
+                  "voluntary_ctxt_switches": 17
+                }
+              },
+              "ts": 1788178165.3268728
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.76878015288432,
+                  "cpu_usage_usec": 3201594617,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13991936,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.1298828125,
+                1.126953125,
+                1.06201171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 318,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20636,
+                  "rss_hwm_kb": 28944,
+                  "rss_kb": 28944,
+                  "stime_ticks": 20,
+                  "uss_kb": 17852,
+                  "utime_ticks": 298,
+                  "voluntary_ctxt_switches": 17
+                }
+              },
+              "ts": 1788178166.3273244
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.8335494592992,
+                  "cpu_usage_usec": 3202363373,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14303232,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.19970703125,
+                1.1416015625,
+                1.0673828125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 417,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20636,
+                  "rss_hwm_kb": 28944,
+                  "rss_kb": 28944,
+                  "stime_ticks": 25,
+                  "uss_kb": 17852,
+                  "utime_ticks": 392,
+                  "voluntary_ctxt_switches": 20
+                }
+              },
+              "ts": 1788178167.3277617
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 13.366601594917013,
+                  "cpu_usage_usec": 3202497118,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13942784,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.19970703125,
+                1.1416015625,
+                1.0673828125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 434,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20677,
+                  "rss_hwm_kb": 28984,
+                  "rss_kb": 28984,
+                  "stime_ticks": 25,
+                  "uss_kb": 17892,
+                  "utime_ticks": 409,
+                  "voluntary_ctxt_switches": 23
+                }
+              },
+              "ts": 1788178168.3283315
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 0.028381695310800828,
+                  "cpu_usage_usec": 3202497402,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13942784,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.19970703125,
+                1.1416015625,
+                1.0673828125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 434,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20677,
+                  "rss_hwm_kb": 28984,
+                  "rss_kb": 28984,
+                  "stime_ticks": 25,
+                  "uss_kb": 17892,
+                  "utime_ticks": 409,
+                  "voluntary_ctxt_switches": 24
+                }
+              },
+              "ts": 1788178169.3289132
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 24.722166325303707,
+                  "cpu_usage_usec": 3202744818,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14245888,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.19970703125,
+                1.1416015625,
+                1.0673828125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 466,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20676,
+                  "rss_hwm_kb": 28984,
+                  "rss_kb": 28984,
+                  "stime_ticks": 27,
+                  "uss_kb": 17892,
+                  "utime_ticks": 439,
+                  "voluntary_ctxt_switches": 25
+                }
+              },
+              "ts": 1788178170.329738
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 75.86303443650539,
+                  "cpu_usage_usec": 3203503902,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14303232,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.19970703125,
+                1.1416015625,
+                1.0673828125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 566,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 35,
+                  "uss_kb": 18100,
+                  "utime_ticks": 531,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178171.3303914
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 75.75450938407725,
+                  "cpu_usage_usec": 3204261819,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14221312,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.18359375,
+                1.13916015625,
+                1.06689453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 667,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 38,
+                  "uss_kb": 18100,
+                  "utime_ticks": 629,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178172.3309298
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 82.14993368460333,
+                  "cpu_usage_usec": 3205083964,
+                  "mem": "14.0MiB",
+                  "mem_bytes": 14659584,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.18359375,
+                1.13916015625,
+                1.06689453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 767,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 41,
+                  "uss_kb": 18100,
+                  "utime_ticks": 726,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178173.3315
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 85.90791585730295,
+                  "cpu_usage_usec": 3205943652,
+                  "mem": "14.1MiB",
+                  "mem_bytes": 14823424,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.18359375,
+                1.13916015625,
+                1.06689453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 867,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 41,
+                  "uss_kb": 18100,
+                  "utime_ticks": 826,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178174.3322568
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 79.60504749608512,
+                  "cpu_usage_usec": 3206740300,
+                  "mem": "14.0MiB",
+                  "mem_bytes": 14708736,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.18359375,
+                1.13916015625,
+                1.06689453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 967,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 43,
+                  "uss_kb": 18100,
+                  "utime_ticks": 924,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178175.3331175
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.36223551023622,
+                  "cpu_usage_usec": 3207514296,
+                  "mem": "14.3MiB",
+                  "mem_bytes": 14983168,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.18359375,
+                1.13916015625,
+                1.06689453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1067,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 46,
+                  "uss_kb": 18100,
+                  "utime_ticks": 1021,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178176.3336852
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.13737261263097,
+                  "cpu_usage_usec": 3208286038,
+                  "mem": "14.1MiB",
+                  "mem_bytes": 14778368,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.16845703125,
+                1.13671875,
+                1.06640625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1167,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 48,
+                  "uss_kb": 18100,
+                  "utime_ticks": 1119,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178177.3341665
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 86.66394094943513,
+                  "cpu_usage_usec": 3209153081,
+                  "mem": "14.0MiB",
+                  "mem_bytes": 14729216,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.16845703125,
+                1.13671875,
+                1.06640625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1267,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 50,
+                  "uss_kb": 18100,
+                  "utime_ticks": 1217,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178178.3346517
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 84.23038551486843,
+                  "cpu_usage_usec": 3209995876,
+                  "mem": "14.4MiB",
+                  "mem_bytes": 15101952,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.16845703125,
+                1.13671875,
+                1.06640625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1367,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 53,
+                  "uss_kb": 18100,
+                  "utime_ticks": 1314,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178179.3350966
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 82.09150962271812,
+                  "cpu_usage_usec": 3210817375,
+                  "mem": "14.3MiB",
+                  "mem_bytes": 15003648,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.16845703125,
+                1.13671875,
+                1.06640625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1467,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 53,
+                  "uss_kb": 18100,
+                  "utime_ticks": 1414,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178180.3357067
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.85755913108606,
+                  "cpu_usage_usec": 3211596551,
+                  "mem": "14.6MiB",
+                  "mem_bytes": 15323136,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.16845703125,
+                1.13671875,
+                1.06640625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1567,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 57,
+                  "uss_kb": 18100,
+                  "utime_ticks": 1510,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178181.3364584
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.00950762505101,
+                  "cpu_usage_usec": 3212357165,
+                  "mem": "14.1MiB",
+                  "mem_bytes": 14819328,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.2353515625,
+                1.1513671875,
+                1.07177734375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1667,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 59,
+                  "uss_kb": 18100,
+                  "utime_ticks": 1608,
+                  "voluntary_ctxt_switches": 29
+                }
+              },
+              "ts": 1788178182.337175
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.31090195747949,
+                  "cpu_usage_usec": 3213120714,
+                  "mem": "13.9MiB",
+                  "mem_bytes": 14589952,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.2353515625,
+                1.1513671875,
+                1.07177734375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1767,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 63,
+                  "uss_kb": 18100,
+                  "utime_ticks": 1704,
+                  "voluntary_ctxt_switches": 32
+                }
+              },
+              "ts": 1788178183.3378692
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.76500621335339,
+                  "cpu_usage_usec": 3213888847,
+                  "mem": "13.8MiB",
+                  "mem_bytes": 14508032,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.2353515625,
+                1.1513671875,
+                1.07177734375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1868,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 67,
+                  "uss_kb": 18100,
+                  "utime_ticks": 1801,
+                  "voluntary_ctxt_switches": 32
+                }
+              },
+              "ts": 1788178184.338547
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.33486685334722,
+                  "cpu_usage_usec": 3214652644,
+                  "mem": "14.2MiB",
+                  "mem_bytes": 14880768,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.2353515625,
+                1.1513671875,
+                1.07177734375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1967,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 69,
+                  "uss_kb": 18100,
+                  "utime_ticks": 1898,
+                  "voluntary_ctxt_switches": 32
+                }
+              },
+              "ts": 1788178185.3391523
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.55151134835032,
+                  "cpu_usage_usec": 3215418576,
+                  "mem": "14.0MiB",
+                  "mem_bytes": 14659584,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.2353515625,
+                1.1513671875,
+                1.07177734375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2068,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 75,
+                  "uss_kb": 18100,
+                  "utime_ticks": 1993,
+                  "voluntary_ctxt_switches": 32
+                }
+              },
+              "ts": 1788178186.3397384
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.32627642424846,
+                  "cpu_usage_usec": 3216192273,
+                  "mem": "14.0MiB",
+                  "mem_bytes": 14725120,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.21630859375,
+                1.1484375,
+                1.0712890625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2167,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 77,
+                  "uss_kb": 18100,
+                  "utime_ticks": 2090,
+                  "voluntary_ctxt_switches": 32
+                }
+              },
+              "ts": 1788178187.340246
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 86.24013771941969,
+                  "cpu_usage_usec": 3217055239,
+                  "mem": "14.0MiB",
+                  "mem_bytes": 14647296,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.21630859375,
+                1.1484375,
+                1.0712890625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2268,
+                  "nonvoluntary_ctxt_switches": 4,
+                  "pid": 17214,
+                  "pss_kb": 20884,
+                  "rss_hwm_kb": 29192,
+                  "rss_kb": 29192,
+                  "stime_ticks": 83,
+                  "uss_kb": 18100,
+                  "utime_ticks": 2185,
+                  "voluntary_ctxt_switches": 32
+                }
+              },
+              "ts": 1788178188.3408496
+            }
+          ],
+          "worker_memory_peaks": {
+            "w0": {
+              "peak_pss_kb": 20884,
+              "peak_rss_hwm_kb": 29192,
+              "peak_rss_kb": 29192,
+              "peak_uss_kb": 18100,
+              "pid": 17214,
+              "samples": 26
+            }
+          },
+          "workers": [
+            {
+              "adapter": "gmqtt",
+              "callback_filters": 0,
+              "callback_invocations": 2388754,
+              "callback_topics_count": 0,
+              "callbacks_per_s": 199061.2824137071,
+              "client": "gmqtt",
+              "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+              "client_version": "0.7.0",
+              "completion_mechanism": "callback",
+              "cpu_ns_in_window": 11998755770,
+              "delivered_during_drain": 1199905,
+              "duration_s": 12.000093493999884,
+              "filters": [
+                "bench/afc6581d/org/acme/site/s0000/device/d0000/telemetry/temperature"
+              ],
+              "implementation_language": "python",
+              "io_model": "asyncio_bridged",
+              "latencies_ns": [],
+              "latency_sampling": {
+                "buffered": 0,
+                "capacity": 50000,
+                "observed": 0,
+                "retained": 0,
+                "strategy": "exact_uniform_subsample"
+              },
+              "memory_peak": {
+                "peak_pss_kb": 20884,
+                "peak_rss_hwm_kb": 29192,
+                "peak_rss_kb": 29192,
+                "peak_uss_kb": 18100,
+                "pid": 17214,
+                "samples": 26
+              },
+              "msgs_per_s": 199061.2824137071,
+              "ok": true,
+              "overlapping_callbacks": false,
+              "payload_bytes_in_window": 611521024,
+              "payload_bytes_per_s": 50959688.297909014,
+              "pid": 17214,
+              "private_api": {
+                "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+                "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+                "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+              },
+              "process_exit": {
+                "possible_oom_or_sigkill": false,
+                "returncode": 0,
+                "signal": null
+              },
+              "qos": 0,
+              "role": "subscriber",
+              "sequence_summary": {
+                "count": 0,
+                "digest_sum64": "0000000000000000",
+                "digest_xor64": "0000000000000000",
+                "exact_limit": 20000,
+                "exact_retained": true,
+                "first": null,
+                "last": null,
+                "out_of_order": 0,
+                "tracked": true
+              },
+              "sequences": [],
+              "stability": "stable",
+              "subscriber_delivered": 2388754,
+              "synthetic_mids": true,
+              "t0_s": 15481.114808502,
+              "t1_s": 15493.114901996
+            }
+          ]
+        },
+        {
+          "bottleneck": "offer_limited",
+          "broker_cpu_max_pct": 90.3893011766981,
+          "broker_reconciliation": {
+            "applicable": false,
+            "broker_received": null,
+            "completed": null,
+            "ratio": null,
+            "reason": null
+          },
+          "client": "gmqtt",
+          "client_path": null,
+          "clock_unpinned": true,
+          "cost_per_message": {
+            "cpu_ns_in_window": 12000615504,
+            "cpu_us_per_message": 5.015367343859771,
+            "delivered": 2392769,
+            "messages": 2392769,
+            "published": 0,
+            "rss_peak_kb": 29184
+          },
+          "cpusets": {
+            "broker": "1",
+            "loadgen": "2",
+            "orch": "3",
+            "sut": "0"
+          },
+          "delivery_offer_ratio": 0.9969129400934288,
+          "effective_offer_msgs_per_s": 200000.0,
+          "environment": {
+            "client_versions": {
+              "aiomqtt": "2.5.1",
+              "aiomqtt3": null,
+              "amqtt": "0.12.0",
+              "awscrt": "0.36.2",
+              "gmqtt": "0.7.0",
+              "mqttium": "1.0.0rc10",
+              "paho": "2.1.0",
+              "zmqtt": "0.2.1"
+            },
+            "cpu_count": 4,
+            "cpu_model": "Intel(R) Xeon(R) Processor",
+            "hostname": "cursor",
+            "loadavg": [
+              1.3486328125,
+              1.228515625,
+              1.14404296875
+            ],
+            "machine": "x86_64",
+            "physical_cpu_groups": [
+              [
+                0
+              ],
+              [
+                1
+              ],
+              [
+                2
+              ],
+              [
+                3
+              ]
+            ],
+            "platform": "Linux-6.12.94+-x86_64-with-glibc2.39",
+            "python": "3.12.3",
+            "scaling_governor": null
+          },
+          "finished_at": "2026-08-31T12:18:06+00:00",
+          "harness_fingerprint": "f750098b8de3ce58",
+          "host_profile": {
+            "ceilings": {
+              "broker_fanout_msgs_per_s": 149815.6,
+              "broker_paced_ceiling_msgs_per_s": 799819.4,
+              "harness_cost_ns_per_message": 1088.2,
+              "recommended_offer_msgs_per_s": 679846.5
+            },
+            "fingerprint": "ee5b909b92c756ad",
+            "frequency_policy": "unpinned",
+            "hostname": "cursor",
+            "idle_verified": true,
+            "measured_at": "2026-08-31T08:36:48Z",
+            "role": "runner"
+          },
+          "host_state": {
+            "cpu_count": 4,
+            "loadavg": [
+              1.0966796875,
+              1.17724609375,
+              1.12548828125
+            ],
+            "scaling_governor": null
+          },
+          "ingress_reconciliation": {
+            "applicable": true,
+            "broker_received": 3996313,
+            "loadgen_msgs": 4196400,
+            "ratio": 0.9523193689829378,
+            "reason": null
+          },
+          "loadgen": {
+            "args": [
+              "taskset",
+              "-c",
+              "2",
+              "/workspace/scripts/mqtt_hammer",
+              "pub",
+              "--host",
+              "127.0.0.1",
+              "--port",
+              "11883",
+              "--topic",
+              "bench/c53b51c1/org/acme/site/s0000/device/d0000/telemetry/temperature",
+              "--clients",
+              "2",
+              "--payload",
+              "256",
+              "--duration",
+              "42",
+              "--rate",
+              "200000"
+            ],
+            "clients": 2,
+            "effective_offer_msgs_per_s": 200000.0,
+            "emitted_msgs": 4196400,
+            "engine": "hammer",
+            "image": null,
+            "image_digest": null,
+            "interval_ms": 0,
+            "mode": "pub",
+            "mqtt_version": 5,
+            "mqtt_version_override": "emqtt_bench_v311_client_id_rejected_by_mosquitto",
+            "mqtt_version_requested": 4,
+            "nominal_rate": 200000.0,
+            "observed_pub_rate": 199840.8,
+            "observed_recv_rate": null,
+            "paced": true,
+            "parsed": {
+              "kinds": [
+                "pub"
+              ],
+              "last_rate": 199840.8,
+              "last_total": 4196400,
+              "max_rate": 199840.8,
+              "median_rate": 199840.8,
+              "rates": [
+                199840.8
+              ],
+              "samples": 1,
+              "totals": [
+                4196400
+              ]
+            },
+            "parsed_pub_rate_raw": 199840.8,
+            "qos": 0,
+            "qos0_pub_counter_double_count": false,
+            "rate_msgs_per_s": 200000.0,
+            "stdout_tail": "{\"role\":\"pub\",\"clients\":2,\"rate_limit\":200000,\"msgs\":4196400,\"seconds\":20.999,\"msgs_per_s\":199840.8}",
+            "target_requested": 200000.0
+          },
+          "loadgen_ref_sub": null,
+          "managed_broker": true,
+          "matrix_rotation": [
+            "aiomqtt",
+            "amqtt",
+            "awscrt",
+            "zmqtt",
+            "mqttium",
+            "mqttium-compat",
+            "paho",
+            "gmqtt"
+          ],
+          "matrix_slot": 7,
+          "network": {
+            "applied": false,
+            "profile": "localhost",
+            "reason": "localhost_noop"
+          },
+          "non_comparable": false,
+          "point": {
+            "cadence": "capacity",
+            "description": "Ingress capacity: paced mqtt_hammer to one exact topic.",
+            "drain_s": 6.0,
+            "duration_s": 12.0,
+            "effective_inflight_window": 64,
+            "inflight": 64,
+            "ingress_target_msgs_per_s": 200000.0,
+            "loadgen_clients": 2,
+            "max_queued": 640,
+            "name": "sub_exact_telemetry",
+            "network": "localhost",
+            "non_comparable": false,
+            "outstanding": 64,
+            "payload": "telemetry256",
+            "protocol": "MQTTv311",
+            "publishers": 1,
+            "qos_publish": 0,
+            "qos_subscribe": 0,
+            "run_id": "c53b51c1",
+            "scenario": "sub_exact_telemetry",
+            "subscribers": 1,
+            "subscription": "exact",
+            "suite": "core",
+            "tags": [
+              "representative",
+              "dual_protocol"
+            ],
+            "tls": false,
+            "topic_topology": "single",
+            "topology": "subscriber_ingress",
+            "warmup_s": 3.0
+          },
+          "primary_msgs_per_s": 199382.58801868575,
+          "protocol_effective": "MQTTv311",
+          "publish_path": null,
+          "qdisc": null,
+          "reasons": [],
+          "run_id": "c53b51c1",
+          "run_index": 2,
+          "schema_version": 1,
+          "secondary_msgs_per_s": {
+            "subscriber": 199382.58801868575
+          },
+          "started_at": "2026-08-31T12:17:38+00:00",
+          "status": "valid",
+          "sys_counters": {
+            "after": {
+              "dropped": 98642896,
+              "messages_received": 895862360,
+              "messages_sent": 315175398,
+              "publish_received": 862332501,
+              "publish_sent": 200290060,
+              "raw": {
+                "$SYS/broker/messages/received": 895862360,
+                "$SYS/broker/messages/sent": 315175398,
+                "$SYS/broker/publish/messages/dropped": 98642896,
+                "$SYS/broker/publish/messages/received": 862332501,
+                "$SYS/broker/publish/messages/sent": 200290060
+              }
+            },
+            "before": {
+              "dropped": 98642896,
+              "messages_received": 891866044,
+              "messages_sent": 311463301,
+              "publish_received": 858336188,
+              "publish_sent": 196577964,
+              "raw": {
+                "$SYS/broker/messages/received": 891866044,
+                "$SYS/broker/messages/sent": 311463301,
+                "$SYS/broker/publish/messages/dropped": 98642896,
+                "$SYS/broker/publish/messages/received": 858336188,
+                "$SYS/broker/publish/messages/sent": 196577964
+              }
+            },
+            "dropped_delta": 0,
+            "messages_received_delta": 3996316,
+            "messages_sent_delta": 3712097,
+            "publish_received_delta": 3996313,
+            "publish_sent_delta": 3712096
+          },
+          "telemetry": [
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": null,
+                  "cpu_usage_usec": 3351464569,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13934592,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0966796875,
+                1.17724609375,
+                1.12548828125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 27,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20285,
+                  "rss_hwm_kb": 28672,
+                  "rss_kb": 28672,
+                  "stime_ticks": 1,
+                  "uss_kb": 17488,
+                  "utime_ticks": 26,
+                  "voluntary_ctxt_switches": 14
+                }
+              },
+              "ts": 1788178658.324731
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 67.42777789864961,
+                  "cpu_usage_usec": 3352139187,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14221312,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0966796875,
+                1.17724609375,
+                1.12548828125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 117,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20660,
+                  "rss_hwm_kb": 29048,
+                  "rss_kb": 29048,
+                  "stime_ticks": 7,
+                  "uss_kb": 17864,
+                  "utime_ticks": 110,
+                  "voluntary_ctxt_switches": 17
+                }
+              },
+              "ts": 1788178659.3256087
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.6108447643987,
+                  "cpu_usage_usec": 3352905685,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14249984,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0966796875,
+                1.17724609375,
+                1.12548828125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 217,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20660,
+                  "rss_hwm_kb": 29048,
+                  "rss_kb": 29048,
+                  "stime_ticks": 11,
+                  "uss_kb": 17864,
+                  "utime_ticks": 206,
+                  "voluntary_ctxt_switches": 17
+                }
+              },
+              "ts": 1788178660.3260775
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.32733381393408,
+                  "cpu_usage_usec": 3353679298,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14229504,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0966796875,
+                1.17724609375,
+                1.12548828125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 316,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20660,
+                  "rss_hwm_kb": 29048,
+                  "rss_kb": 29048,
+                  "stime_ticks": 19,
+                  "uss_kb": 17864,
+                  "utime_ticks": 297,
+                  "voluntary_ctxt_switches": 17
+                }
+              },
+              "ts": 1788178661.3265722
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.31016135688205,
+                  "cpu_usage_usec": 3354452773,
+                  "mem": "13.6MiB",
+                  "mem_bytes": 14237696,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0966796875,
+                1.17724609375,
+                1.12548828125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 416,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20660,
+                  "rss_hwm_kb": 29048,
+                  "rss_kb": 29048,
+                  "stime_ticks": 26,
+                  "uss_kb": 17864,
+                  "utime_ticks": 390,
+                  "voluntary_ctxt_switches": 20
+                }
+              },
+              "ts": 1788178662.3270206
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 13.322978772652482,
+                  "cpu_usage_usec": 3354586069,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13934592,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0888671875,
+                1.173828125,
+                1.12451171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 434,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20661,
+                  "rss_hwm_kb": 29048,
+                  "rss_kb": 29048,
+                  "stime_ticks": 27,
+                  "uss_kb": 17864,
+                  "utime_ticks": 407,
+                  "voluntary_ctxt_switches": 23
+                }
+              },
+              "ts": 1788178663.327512
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 0.026786546189315016,
+                  "cpu_usage_usec": 3354586337,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13934592,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0888671875,
+                1.173828125,
+                1.12451171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 434,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20661,
+                  "rss_hwm_kb": 29048,
+                  "rss_kb": 29048,
+                  "stime_ticks": 27,
+                  "uss_kb": 17864,
+                  "utime_ticks": 407,
+                  "voluntary_ctxt_switches": 24
+                }
+              },
+              "ts": 1788178664.3280113
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 24.89441696842985,
+                  "cpu_usage_usec": 3354835406,
+                  "mem": "13.3MiB",
+                  "mem_bytes": 13979648,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0888671875,
+                1.173828125,
+                1.12451171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 466,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20660,
+                  "rss_hwm_kb": 29048,
+                  "rss_kb": 29048,
+                  "stime_ticks": 28,
+                  "uss_kb": 17864,
+                  "utime_ticks": 438,
+                  "voluntary_ctxt_switches": 25
+                }
+              },
+              "ts": 1788178665.3285146
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.8870071885796,
+                  "cpu_usage_usec": 3355614633,
+                  "mem": "14.0MiB",
+                  "mem_bytes": 14630912,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0888671875,
+                1.173828125,
+                1.12451171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 567,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 33,
+                  "uss_kb": 18000,
+                  "utime_ticks": 534,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178666.3290071
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.88161168689479,
+                  "cpu_usage_usec": 3356393894,
+                  "mem": "14.4MiB",
+                  "mem_bytes": 15122432,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.0888671875,
+                1.173828125,
+                1.12451171875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 667,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 34,
+                  "uss_kb": 18000,
+                  "utime_ticks": 633,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178667.329556
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.86296971317856,
+                  "cpu_usage_usec": 3357172898,
+                  "mem": "13.9MiB",
+                  "mem_bytes": 14589952,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.162109375,
+                1.18798828125,
+                1.12939453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 767,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 39,
+                  "uss_kb": 18000,
+                  "utime_ticks": 728,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178668.33007
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.47165775729357,
+                  "cpu_usage_usec": 3357937969,
+                  "mem": "13.7MiB",
+                  "mem_bytes": 14323712,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.162109375,
+                1.18798828125,
+                1.12939453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 867,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 42,
+                  "uss_kb": 18000,
+                  "utime_ticks": 825,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178669.330549
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 78.18944006385158,
+                  "cpu_usage_usec": 3358720220,
+                  "mem": "13.7MiB",
+                  "mem_bytes": 14372864,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.162109375,
+                1.18798828125,
+                1.12939453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 966,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 47,
+                  "uss_kb": 18000,
+                  "utime_ticks": 919,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178670.3309789
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 81.98893173265192,
+                  "cpu_usage_usec": 3359540539,
+                  "mem": "14.5MiB",
+                  "mem_bytes": 15216640,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.162109375,
+                1.18798828125,
+                1.12939453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1066,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 49,
+                  "uss_kb": 18000,
+                  "utime_ticks": 1017,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178671.331444
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 90.3893011766981,
+                  "cpu_usage_usec": 3360444862,
+                  "mem": "13.5MiB",
+                  "mem_bytes": 14184448,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.162109375,
+                1.18798828125,
+                1.12939453125
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1166,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 53,
+                  "uss_kb": 18000,
+                  "utime_ticks": 1113,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178672.3319666
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 83.1241871814305,
+                  "cpu_usage_usec": 3361276508,
+                  "mem": "13.8MiB",
+                  "mem_bytes": 14471168,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.2294921875,
+                1.20166015625,
+                1.13427734375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1266,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 57,
+                  "uss_kb": 18000,
+                  "utime_ticks": 1209,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178673.3324368
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.82867521741008,
+                  "cpu_usage_usec": 3362055154,
+                  "mem": "14.2MiB",
+                  "mem_bytes": 14876672,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.2294921875,
+                1.20166015625,
+                1.13427734375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1367,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 60,
+                  "uss_kb": 18000,
+                  "utime_ticks": 1307,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178674.3329232
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 76.71046733381287,
+                  "cpu_usage_usec": 3362822639,
+                  "mem": "14.3MiB",
+                  "mem_bytes": 15044608,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.2294921875,
+                1.20166015625,
+                1.13427734375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1467,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 62,
+                  "uss_kb": 18000,
+                  "utime_ticks": 1405,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178675.3334281
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 78.69463498593042,
+                  "cpu_usage_usec": 3363609971,
+                  "mem": "14.1MiB",
+                  "mem_bytes": 14802944,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.2294921875,
+                1.20166015625,
+                1.13427734375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1567,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 66,
+                  "uss_kb": 18000,
+                  "utime_ticks": 1501,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178676.333862
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.42325613423043,
+                  "cpu_usage_usec": 3364384602,
+                  "mem": "14.1MiB",
+                  "mem_bytes": 14774272,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.2294921875,
+                1.20166015625,
+                1.13427734375
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1667,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 69,
+                  "uss_kb": 18000,
+                  "utime_ticks": 1598,
+                  "voluntary_ctxt_switches": 31
+                }
+              },
+              "ts": 1788178677.3343968
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 77.97496452731806,
+                  "cpu_usage_usec": 3365164687,
+                  "mem": "13.9MiB",
+                  "mem_bytes": 14618624,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.29150390625,
+                1.21533203125,
+                1.13916015625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1767,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 71,
+                  "uss_kb": 18000,
+                  "utime_ticks": 1696,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788178678.334883
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 81.20719196161,
+                  "cpu_usage_usec": 3365977137,
+                  "mem": "14.0MiB",
+                  "mem_bytes": 14725120,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.29150390625,
+                1.21533203125,
+                1.13916015625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1866,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 77,
+                  "uss_kb": 18000,
+                  "utime_ticks": 1789,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788178679.3353217
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 88.71096151749803,
+                  "cpu_usage_usec": 3366864669,
+                  "mem": "13.7MiB",
+                  "mem_bytes": 14331904,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.29150390625,
+                1.21533203125,
+                1.13916015625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 1967,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 80,
+                  "uss_kb": 18000,
+                  "utime_ticks": 1887,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788178680.335782
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 88.43127305168753,
+                  "cpu_usage_usec": 3367749474,
+                  "mem": "13.8MiB",
+                  "mem_bytes": 14508032,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.29150390625,
+                1.21533203125,
+                1.13916015625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2066,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 83,
+                  "uss_kb": 18000,
+                  "utime_ticks": 1983,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788178681.3362625
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 88.56761925806723,
+                  "cpu_usage_usec": 3368635539,
+                  "mem": "13.9MiB",
+                  "mem_bytes": 14561280,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.29150390625,
+                1.21533203125,
+                1.13916015625
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2167,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 86,
+                  "uss_kb": 18000,
+                  "utime_ticks": 2081,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788178682.3368049
+            },
+            {
+              "containers": {
+                "workspace-mosquitto-1": {
+                  "cpu_pct": 88.55055455135451,
+                  "cpu_usage_usec": 3369521453,
+                  "mem": "14.1MiB",
+                  "mem_bytes": 14741504,
+                  "name": "workspace-mosquitto-1",
+                  "source": "cgroup"
+                }
+              },
+              "loadavg": [
+                1.3486328125,
+                1.228515625,
+                1.14404296875
+              ],
+              "processes": {
+                "w0": {
+                  "cpu_ticks": 2268,
+                  "nonvoluntary_ctxt_switches": 5,
+                  "pid": 17524,
+                  "pss_kb": 20796,
+                  "rss_hwm_kb": 29184,
+                  "rss_kb": 29184,
+                  "stime_ticks": 91,
+                  "uss_kb": 18000,
+                  "utime_ticks": 2177,
+                  "voluntary_ctxt_switches": 34
+                }
+              },
+              "ts": 1788178683.3372395
+            }
+          ],
+          "worker_memory_peaks": {
+            "w0": {
+              "peak_pss_kb": 20796,
+              "peak_rss_hwm_kb": 29184,
+              "peak_rss_kb": 29184,
+              "peak_uss_kb": 18000,
+              "pid": 17524,
+              "samples": 26
+            }
+          },
+          "workers": [
+            {
+              "adapter": "gmqtt",
+              "callback_filters": 0,
+              "callback_invocations": 2392769,
+              "callback_topics_count": 0,
+              "callbacks_per_s": 199382.58801868575,
+              "client": "gmqtt",
+              "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+              "client_version": "0.7.0",
+              "completion_mechanism": "callback",
+              "cpu_ns_in_window": 12000615504,
+              "delivered_during_drain": 1199905,
+              "duration_s": 12.000892473999556,
+              "filters": [
+                "bench/c53b51c1/org/acme/site/s0000/device/d0000/telemetry/temperature"
+              ],
+              "implementation_language": "python",
+              "io_model": "asyncio_bridged",
+              "latencies_ns": [],
+              "latency_sampling": {
+                "buffered": 0,
+                "capacity": 50000,
+                "observed": 0,
+                "retained": 0,
+                "strategy": "exact_uniform_subsample"
+              },
+              "memory_peak": {
+                "peak_pss_kb": 20796,
+                "peak_rss_hwm_kb": 29184,
+                "peak_rss_kb": 29184,
+                "peak_uss_kb": 18000,
+                "pid": 17524,
+                "samples": 26
+              },
+              "msgs_per_s": 199382.58801868575,
+              "ok": true,
+              "overlapping_callbacks": false,
+              "payload_bytes_in_window": 612548864,
+              "payload_bytes_per_s": 51041942.53278355,
+              "pid": 17524,
+              "private_api": {
+                "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+                "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+                "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+              },
+              "process_exit": {
+                "possible_oom_or_sigkill": false,
+                "returncode": 0,
+                "signal": null
+              },
+              "qos": 0,
+              "role": "subscriber",
+              "sequence_summary": {
+                "count": 0,
+                "digest_sum64": "0000000000000000",
+                "digest_xor64": "0000000000000000",
+                "exact_limit": 20000,
+                "exact_retained": true,
+                "first": null,
+                "last": null,
+                "out_of_order": 0,
+                "tracked": true
+              },
+              "sequences": [],
+              "stability": "stable",
+              "subscriber_delivered": 2392769,
+              "synthetic_mids": true,
+              "t0_s": 15976.110727208,
+              "t1_s": 15988.111619682
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "inconclusive_n": 0,
+        "inconclusive_rates": [],
+        "mad": 26.09152947619441,
+        "max": 199382.58801868575,
+        "mean": 199266.78897386746,
+        "median": 199356.49648920956,
+        "min": 199061.2824137071,
+        "n": 3,
+        "total_runs": 3,
+        "values": [
+          199356.49648920956,
+          199061.2824137071,
+          199382.58801868575
         ]
       }
     }
