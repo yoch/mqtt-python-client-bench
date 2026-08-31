@@ -638,6 +638,24 @@ FANOUT_GRID = (25_000, 50_000, 75_000, 100_000, 150_000)
 FANOUT_REPEATS = 3
 
 
+def _forwarded_msgs_per_s(pub: Optional[dict], sub: Optional[dict]) -> Optional[float]:
+    """Broker fan-out rate for one paced pub/sub pair.
+
+    The subscriber's message count is authoritative for delivery; its
+    ``msgs_per_s`` is not, because the sub hammer runs longer than the paced
+    publisher (connect ramp, one-second lead-in, and tail drain), which dilutes
+    the rate below what was actually forwarded during the offer window.
+    """
+    pub = pub or {}
+    sub = sub or {}
+    sub_msgs = sub.get("msgs")
+    pub_secs = pub.get("seconds")
+    if sub_msgs is not None and pub_secs and float(pub_secs) > 0:
+        return float(sub_msgs) / float(pub_secs)
+    raw = sub.get("msgs_per_s") or pub.get("msgs_per_s")
+    return float(raw) if raw is not None else None
+
+
 def measure_broker_fanout_ceiling(
     *, pub_cpuset: Optional[str], sub_cpuset: Optional[str], seconds: int
 ) -> Dict[str, Any]:
@@ -682,11 +700,8 @@ def measure_broker_fanout_ceiling(
                 topic="hostcal/fanout", rate=target,
             )
             thread.join(timeout=seconds + 15)
-            # The subscriber's count is what the broker actually forwarded; the
-            # publisher's is what it accepted. Prefer the former, and fall back
-            # only if the subscriber did not report.
             sub = result.get("sub") or {}
-            value = sub.get("msgs_per_s") or (pub or {}).get("msgs_per_s")
+            value = _forwarded_msgs_per_s(pub, sub)
             if value:
                 samples.append(float(value))
         if not samples:
