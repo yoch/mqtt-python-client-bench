@@ -446,7 +446,9 @@ def effective_loadgen_mqtt_version(requested: int) -> int:
     return int(requested)
 
 
-def resolve_ingress_offer(point: dict, clients: int) -> float:
+def resolve_ingress_offer(
+    point: dict, clients: int, host_profile: Optional[dict] = None
+) -> float:
     """Aggregate msgs/s requested from the ingress loadgen.
 
     Hammer ``--rate`` is an absolute cap. emqtt-bench ``-I`` is milliseconds, so
@@ -454,10 +456,24 @@ def resolve_ingress_offer(point: dict, clients: int) -> float:
     equivalently ``loadgen_clients = N`` and a high enough target). emqtt paths
     are clamped later to EMQTT_MAX_OFFER_MSGS_PER_S.
 
-    MQTT_BENCH_INGRESS_OFFER replaces the 200k default for diagnostic probes
-    past the reference broker ceiling. A point that takes the override is
-    marked non_comparable: its delivery count answers "what does this host's
-    pipeline do at offer X", never "how does this client rank".
+    The host profile **caps** this, it does not set it. The offer's job is to
+    make the SUT client the bottleneck, and 200k already does that by a factor
+    of three to thirteen; raising it to what the host can emit buys nothing and
+    costs the broker's headroom. Measured on the two fastest clients, 200k
+    against 594k:
+
+        gmqtt   MQTTv311   61,199 -> 60,098   broker CPU 100% either way
+        mqttium MQTTv311   76,796 -> 76,078   and the 594k arm came back
+                                              inconclusive on every run
+
+    So the rule is a floor-preserving cap: a host that cannot emit the reference
+    offer gets what it can emit, less a margin, and a host that can emit more is
+    left alone. On this workstation that is min(200k, 509k) = 200k, so nothing
+    changes here — which is the point. What it removes is a smaller machine
+    silently recording an offer it never produced.
+
+    MQTT_BENCH_INGRESS_OFFER still overrides both, for diagnostic probes past
+    the ceiling; a point that takes it is marked non_comparable.
     """
     if point.get("ingress_target_msgs_per_s") is not None:
         return float(point["ingress_target_msgs_per_s"])
@@ -468,7 +484,15 @@ def resolve_ingress_offer(point: dict, clients: int) -> float:
         point["non_comparable"] = True
         point["ingress_offer_overridden"] = True
         return override
-    return DEFAULT_INGRESS_OFFER_MSGS_PER_S
+
+    offer = DEFAULT_INGRESS_OFFER_MSGS_PER_S
+    ceiling = ((host_profile or {}).get("ceilings") or {}).get(
+        "recommended_offer_msgs_per_s"
+    )
+    if ceiling and float(ceiling) < offer:
+        offer = float(ceiling)
+        point["ingress_offer_capped_by_host"] = offer
+    return offer
 
 
 def _python() -> str:
@@ -1331,7 +1355,7 @@ def run_point(
             # Capacity points must exceed the historical ~5k delivery ceiling
             # even in smoke runs, otherwise A/B ingress optimisations are hidden
             # behind the offered rate and incorrectly labelled SUT-limited.
-            target = resolve_ingress_offer(point, clients)
+            target = resolve_ingress_offer(point, clients, host_profile)
             if cadence == "periodic10":
                 target = 10.0
             callback_filters = int(point.get("callback_filters", 0) or 0)
@@ -1349,7 +1373,7 @@ def run_point(
                     # is equalized later by clamp_emqtt_offer (I=1 at the
                     # emqtt 100k cap), not by this bump.
                     clients = max(clients, min(callback_filters, 256))
-                target = resolve_ingress_offer(point, clients)
+                target = resolve_ingress_offer(point, clients, host_profile)
             elif point.get("subscription") in ("plus", "hash") or str(point.get("topic_topology", "")).startswith("fleet"):
                 lg_topic = f"bench/{run_id}/org/acme/site/s0000/device/d0000/telemetry/temperature"
             else:
@@ -1391,7 +1415,14 @@ def run_point(
                 if engine == "hammer":
                     clients = resolve_hammer_pub_clients(point, clients)
                     interval = 0
-                    hammer_rate = float(clamp_hammer_rate(target))
+                    hammer_rate = float(
+                        clamp_hammer_rate(
+                            target,
+                            ((host_profile or {}).get("ceilings") or {}).get(
+                                "broker_paced_ceiling_msgs_per_s"
+                            ),
+                        )
+                    )
                 else:
                     clients, target = clamp_emqtt_offer(clients, target)
                     interval = interval_for_rate(clients, target)
