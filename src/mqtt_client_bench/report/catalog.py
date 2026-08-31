@@ -140,8 +140,8 @@ FACTS: Dict[str, ScenarioFacts] = {
         question="What does local topic-filter matching cost as filters multiply?",
         ranked=False,
         caveats=(
-            "Needs native message_callback_add, so only paho and mqttium-compat run it at "
-            "all — there is no field to rank against.",
+            "Needs native message_callback_add, so only paho, mqttium and mqttium-compat "
+            "run it — rank within io_model, never across the sync/asyncio split.",
         ),
     ),
     "duplex_gateway": ScenarioFacts(

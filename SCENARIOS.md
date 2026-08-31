@@ -168,11 +168,11 @@ Mosquitto 2.1 is single-threaded: do not widen the broker cpuset.
 
 ### `sub_callback_matching`
 
-- **Goal**: cost of **local** `message_callback_add` matching (Paho).
+- **Goal**: cost of **local** native `message_callback_add` matching.
 - **Topology**: `subscriber_ingress` · broker subscription `#`, loadgen publishes on `cb/<i>/…` · tag `diagnostic`.
 - **Loadgen**: templated `cb/%i/data` → emqtt-bench. Offer is the 200k ranking default clamped to **100k** (emqtt I=1 cap); publisher count is raised to 100 so variants 1 / 16 / 256 share the same offer. Campaign JSON that still shows 32k for filters=1/16 and 100k for 256 predates this equalization and is not internally comparable across the filter sweep.
 - **Variants**: `callback_filters ∈ {1,16,256}`.
-- **Refusals**: clients without `native_message_callback_add` (everything except paho / mqttium-compat).
+- **Refusals**: clients without `native_message_callback_add` (everything except paho / mqttium / mqttium-compat).
 
 ### `duplex_gateway`
 
