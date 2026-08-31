@@ -23,6 +23,14 @@ cd "$(dirname "$0")/.."
 source .venv/bin/activate
 mkdir -p calibrations results logs
 
+RESULTS_DIR="${RESULTS_DIR:-$(python -c '
+from mqtt_client_bench.hostcal import resolve_host_profile, results_dir_for
+print(results_dir_for(resolve_host_profile()))
+')}"
+mkdir -p "$RESULTS_DIR"
+export MQTT_BENCH_RESULTS_DIR="$RESULTS_DIR"
+echo "RESULTS_DIR=$RESULTS_DIR" | tee -a logs/campaign.log
+
 CLIENTS="${CLIENTS:-paho,gmqtt,aiomqtt,amqtt,awscrt}"
 # aiomqtt v3 shares an import name with v2, so it cannot be interleaved by
 # `matrix` and gets a sequential pass of its own from its own venv. Set
@@ -148,9 +156,11 @@ scenario_complete() {  # <scenario> <clients-csv> <python>
   # drifted: status reported everything complete while this gate was about to
   # re-measure all of it.
   "$3" -c '
-import sys
+import os, sys
+from pathlib import Path
 from mqtt_client_bench.campaign import scenario_state
-st = scenario_state(sys.argv[1], sys.argv[2].split(","))
+results_dir = Path(os.environ.get("MQTT_BENCH_RESULTS_DIR", "results"))
+st = scenario_state(sys.argv[1], sys.argv[2].split(","), results_dir)
 for client, (state, why, _pts) in st["clients"].items():
     if state != "done":
         print(f"    {client} {sys.argv[1]}: {state}" + (f" ({why})" if why else ""), file=sys.stderr)
@@ -167,7 +177,6 @@ for s in "${SCENARIOS[@]}"; do
   if ! python -m mqtt_client_bench.run matrix \
       --clients "$CLIENTS" --scenario "$s" --profile standard --runs 3 \
       --load-profile-dir calibrations \
-      --output-dir results \
       >>"logs/matrix-${s}.log" 2>&1; then
     note_failure "matrix $s" "logs/matrix-${s}.log"
   fi
@@ -191,7 +200,7 @@ if [[ -n "$AIOMQTT3_VENV" && -x "$AIOMQTT3_VENV/bin/python" ]]; then
     if ! "$A3PY" -m mqtt_client_bench.run run \
         --scenario "$s" --client aiomqtt3 --profile standard --runs 3 \
         --load-profile calibrations/aiomqtt3-load.json \
-        --output "results/aiomqtt3-${s}.json" \
+        --output "$RESULTS_DIR/aiomqtt3-${s}.json" \
         >>"logs/aiomqtt3-${s}.log" 2>&1; then
       note_failure "aiomqtt3 $s" "logs/aiomqtt3-${s}.log"
     fi
@@ -236,10 +245,10 @@ run_abba() {  # <label> <clients> <output>
   fi
 }
 
-run_abba paho-gmqtt paho,gmqtt results/compare-paho-gmqtt-pub-qos.json
-run_abba paho-awscrt paho,awscrt results/compare-paho-awscrt-pub-qos.json
+run_abba paho-gmqtt paho,gmqtt "$RESULTS_DIR/compare-paho-gmqtt-pub-qos.json"
+run_abba paho-awscrt paho,awscrt "$RESULTS_DIR/compare-paho-awscrt-pub-qos.json"
 
-if ! python -m mqtt_client_bench.run report build --input results --output site \
+if ! python -m mqtt_client_bench.run report build --input "$RESULTS_DIR" --reference none --output site-runner \
   >>logs/campaign.log 2>&1; then
   note_failure "report build" "logs/campaign.log"
 fi
