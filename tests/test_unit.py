@@ -3204,9 +3204,12 @@ class ReportTests(unittest.TestCase):
                 r'<td class="[^"]*\bsolo\b[^"]*"[^>]*>([\d,.]+)</td>', matrix_only
             )
             self.assertIn("7,000.0", solo_cells)
-            self.assertIn("alone in the sync/stable group", matrix_only)
+            self.assertIn("alone in the sync group", matrix_only)
             self.assertIn("group-start", matrix_only)
-            # The chart is server-rendered SVG: no CDN, no canvas, no JS.
+            # Charts are server-rendered SVG: no CDN and no canvas. The site
+            # does ship a small same-origin app.js, but it only adds hover,
+            # sorting and the theme switch on top of markup that is already
+            # complete, so nothing it does can be asserted from the HTML.
             self.assertIn('<svg class="chart-svg"', index)
             self.assertNotIn("<canvas", index)
             # Rate-capped / niche checks stay in the matrix (at the end) but leave the chart.
@@ -3350,6 +3353,34 @@ class ReportTests(unittest.TestCase):
             self.assertNotIn("<td class=\"num\">tcp_nodelay", matrix_body)
             # The reason appears only as a tooltip, never as a cell value.
             self.assertIn('title="refused — client lacks the capability: tcp_nodelay"', matrix_body)
+
+    def test_stability_orders_a_peer_group_without_splitting_it(self):
+        """A pre-release client competes with released ones of the same I/O model.
+
+        Stability used to split the peer groups, which put libraries doing
+        identical work in separate charts and meant a client graduating from
+        experimental to stable would silently change who it was compared with.
+        It now orders a group instead: stable first, pre-release badged.
+        """
+        from mqtt_client_bench.report.aggregate import peer_groups
+        from mqtt_client_bench.report.model import ClientMeta, _sort_clients
+
+        meta = {
+            "paho": ClientMeta("paho", io_model="sync", stability="stable"),
+            "gmqtt": ClientMeta("gmqtt", io_model="asyncio_bridged", stability="stable"),
+            "zmqtt": ClientMeta("zmqtt", io_model="asyncio_bridged", stability="experimental"),
+            "awscrt": ClientMeta("awscrt", io_model="crt_event_loop", stability="stable"),
+        }
+        self.assertEqual(meta["zmqtt"].peer_group, meta["gmqtt"].peer_group)
+
+        ordered = _sort_clients(list(meta), meta)
+        groups = peer_groups(ordered, meta)
+        self.assertEqual(
+            [group for group, _ in groups],
+            ["sync", "asyncio_bridged", "crt_event_loop"],
+        )
+        bridged = dict(groups)["asyncio_bridged"]
+        self.assertEqual(bridged, ["gmqtt", "zmqtt"], "stable sorts before experimental")
 
     def test_integrity_aggregates_all_runs(self):
         from mqtt_client_bench.report import _collect_integrity

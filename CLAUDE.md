@@ -108,8 +108,15 @@ tagged `non_comparable` and `report build` skips `*-smoke.json` and `_*.json`.
 - `adapters/` — one module per library plus `base.py` (protocol + capabilities),
   `registry.py` (name → class, `client_path` sys.path injection for A/B of the same
   library), `async_bridge.py`.
-- `report.py` + `report_assets/style.css` — reads `results/*.json`, classifies each doc, and
-  emits the static site (index matrix + per-result detail pages).
+- `report/` + `report_assets/` — reads `results/*.json` and emits the static site.
+  `model.py` decides what a number may mean (comparability gates, doc
+  classification); `catalog.py` says what each scenario measures and which way is
+  better; `aggregate.py` turns docs into series; `charts.py` draws inline SVG;
+  `pages/` composes six page kinds (overview, scenario, client, corpus, run,
+  methodology). Charts paint with `var(--c-<client>)` so one stylesheet swap
+  re-themes the site for dark mode, and `assets/series.css` is generated per
+  build from the clients actually published. `app.js` is same-origin progressive
+  enhancement only — hover, table sort, theme switch — never a data path.
 - `result.schema.json` — output contract; `SchemaTests` guards it.
 
 ### Adapter layer
@@ -244,8 +251,12 @@ results.
   clients within each point. Sequential per-client campaigns let hours of drift
   enter the ranking as if it were a library difference.
 - **Peer grouping**: rankings compare within the same `io_model` (`sync` /
-  `asyncio_bridged` / `crt_event_loop`) and the same MQTT protocol; `stable` and
-  `experimental` clients are ranked separately.
+  `asyncio_bridged` / `crt_event_loop`) and the same MQTT protocol. `stability`
+  no longer splits a group: it orders one (stable first) and is shown as a
+  badge. Splitting on it put libraries doing identical work in separate charts,
+  and a client graduating from experimental to stable would silently have
+  changed who it was compared against — `mqttium` is about to make exactly that
+  move. `ClientMeta.peer_group` is the single definition.
 - Ingress offer accounting: emqtt-bench double-counts QoS0 publishes — compare
   against `effective_offer_msgs_per_s` / `observed_pub_rate`, never the raw
   parsed rate (`docs/CEILING_PROBES.md`). Hammer counts are 1:1 with `$SYS
