@@ -15,7 +15,7 @@ from __future__ import annotations
 import ssl
 from collections import deque
 from pathlib import Path
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from mqtt_client_bench.adapters.base import AdapterCapabilities, SubscribeResult
 from mqtt_client_bench.adapters.mqttium import MqttiumAdapter
@@ -47,6 +47,7 @@ class MqttiumAsyncAdapter:
         self.on_connect = None
         self.on_publish = None
         self.on_message = None
+        self._pending_filters: List[Tuple[str, Any]] = []
 
     @classmethod
     def capabilities(cls) -> AdapterCapabilities:
@@ -111,6 +112,10 @@ class MqttiumAsyncAdapter:
                 self.on_message(self, None, msg)
 
             self._client.on_message = _on_message
+
+        for filt, wrapped in self._pending_filters:
+            self._client.message_callback_add(filt, wrapped)
+        self._pending_filters.clear()
 
         await self._client.connect(host, port, ssl=tls)
         if self.on_connect is not None:
@@ -198,6 +203,17 @@ class MqttiumAsyncAdapter:
     async def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
         result = await self._client.subscribe(topic, qos=qos)
         return SubscribeResult(rc=0, mid=int(result.mid))
+
+    def message_callback_add(self, topic: str, callback: Any) -> None:
+        """Library matcher. Role callbacks are Paho-shaped (client, userdata, msg)."""
+
+        def _cb(msg: Any) -> None:
+            callback(self, None, msg)
+
+        if self._client is None:
+            self._pending_filters.append((topic, _cb))
+            return
+        self._client.message_callback_add(topic, _cb)
 
     def build_publish_properties(self, profile: str) -> Any:
         return MqttiumAdapter.build_publish_properties(self, profile)

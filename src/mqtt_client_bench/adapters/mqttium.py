@@ -1,11 +1,11 @@
-"""MQTTium native adapter — AsyncClient via AsyncioBridge (PyPI ≥1.0.0rc10)."""
+"""MQTTium native adapter — AsyncClient via AsyncioBridge (PyPI ≥1.0.0rc11)."""
 
 from __future__ import annotations
 
 import ssl
 from collections import deque
 from pathlib import Path
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from mqtt_client_bench.adapters.async_bridge import BridgedAdapterBase, IncomingMessage
 from mqtt_client_bench.adapters.base import AdapterCapabilities, PublishResult, SubscribeResult
@@ -30,7 +30,8 @@ class MqttiumAdapter(BridgedAdapterBase):
     _NOTES = (
         "MQTTium AsyncClient (https://pypi.org/project/mqttium/) — async-native MQTT "
         "3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop "
-        "(PyPI ≥1.0.0rc10). Release candidate; ranked under --suite experimental. Paho VERSION2 "
+        "(PyPI ≥1.0.0rc11). Native ``message_callback_add`` (rc11). Ranked under "
+        "--suite experimental. Paho VERSION2 "
         "façade is `mqttium-compat`."
     )
 
@@ -50,6 +51,8 @@ class MqttiumAdapter(BridgedAdapterBase):
         # on it, so no lock is needed on the hot path.
         self._real_to_synth: Dict[int, Deque[int]] = {}
         self._on_publish_cb: Any = None
+        # Filters registered before connect(); flushed onto AsyncClient once it exists.
+        self._pending_filters: List[Tuple[str, Any]] = []
 
     @classmethod
     def capabilities(cls) -> AdapterCapabilities:
@@ -65,7 +68,7 @@ class MqttiumAdapter(BridgedAdapterBase):
             max_queued=True,
             max_queued_bytes=True,
             message_callback_add=True,
-            native_message_callback_add=False,
+            native_message_callback_add=True,
             v5_publish_properties=True,
             stability="experimental",
             io_model="asyncio_bridged",
@@ -216,6 +219,9 @@ class MqttiumAdapter(BridgedAdapterBase):
                 )
 
             self._client.on_message = _on_message
+            for filt, wrapped in self._pending_filters:
+                self._client.message_callback_add(filt, wrapped)
+            self._pending_filters.clear()
             await self._client.connect(host, port, ssl=tls)
             self._connected = True
             self._fire_on_connect(flags={}, reason_code=0, properties=None)
@@ -301,6 +307,30 @@ class MqttiumAdapter(BridgedAdapterBase):
 
         self.schedule_call(_publish_qosn)
         return PublishResult(rc=0, mid=mid)
+
+    def _wrap_native_message_cb(self, callback: Any) -> Any:
+        def _cb(msg: Any) -> None:
+            callback(
+                self,
+                None,
+                IncomingMessage(
+                    topic=str(msg.topic),
+                    payload=msg.payload,
+                    qos=int(msg.qos),
+                    retain=bool(msg.retain),
+                ),
+            )
+
+        return _cb
+
+    def message_callback_add(self, topic: str, callback: Any) -> None:
+        """Library matcher, not the harness emulator in BridgedAdapterBase."""
+        wrapped = self._wrap_native_message_cb(callback)
+        if self._client is None:
+            self._pending_filters.append((topic, wrapped))
+            return
+        client = self._client
+        self.schedule_call(lambda: client.message_callback_add(topic, wrapped))
 
     def subscribe(self, topic: str, qos: int = 0) -> SubscribeResult:
         mid = self.alloc_mid()

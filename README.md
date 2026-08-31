@@ -37,7 +37,7 @@ markup that is already complete without it.
 |---|---|---|
 | `zmqtt` | [faststream-community/zMQTT](https://github.com/faststream-community/zMQTT) | Pure asyncio MQTT 3.1.1/5 (Alpha) — `pip install 'mqtt-client-bench[zmqtt]'` |
 | `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | aiomqtt **v3** alpha (mqtt5 sans-io, MQTT5 only). **Cannot** share an env with `aiomqtt` v2 |
-| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (RC ≥1.0.0rc10, `publish_nowait` on bridge loop) — `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
+| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (RC ≥1.0.0rc11, `publish_nowait` on bridge loop, native `message_callback_add`) — `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
 | `mqttium-compat` | same | Paho VERSION2 façade only (`mqttium.compat.paho`) — ranked separately from `mqttium` |
 
 ```bash
@@ -68,7 +68,7 @@ Wrappers of Paho/gmqtt (`fastapi-mqtt`, `jmqtt`, …) are intentionally excluded
 | Other publisher capacity / QoS0–1 | stable clients with matching caps | still MQTTv311-only; QoS2 excluded for gmqtt and aiomqtt3 |
 | `pub_qos1_inflight` | paho, aiomqtt | requires `max_inflight` |
 | Application RTT | same protocol + RTT calibration | fractions of that protocol’s `rtt_capacity`; awscrt refused (no `TCP_NODELAY`) |
-| `sub_callback_matching` | **paho only** | native `message_callback_add` |
+| `sub_callback_matching` | paho, mqttium, mqttium-compat | native `message_callback_add`; peer-grouped by `io_model` |
 | Fleet idle | sync clients only | async_bridged refused (1 loop/thread per conn) |
 | MQTT v5 properties | paho, gmqtt, aiomqtt, awscrt, zmqtt | amqtt / aiomqtt3 constraints apply |
 | `aiomqtt3` rankings | **MQTTv5 peers only** | v5-only client; calibrate via `protocol_capacities.MQTTv5` |
@@ -208,7 +208,7 @@ that its peers do not. Rankings remain peer-grouped by `io_model` (sync vs
 asyncio_bridged vs CRT); do not treat paho and aiomqtt as interchangeable.
 
 `mqttium` uses ``AsyncClient.publish_nowait`` on the bridge event-loop thread
-(PyPI ≥1.0.0rc10; loop-bound, not cross-thread). QoS≥1 completion is
+(PyPI ≥1.0.0rc11; loop-bound, not cross-thread). QoS≥1 completion is
 ``receipt.wait()``, which also re-raises an admission failure so a refused
 publish is not counted as a completion. The adapter installs no
 ``AsyncClient.on_publish``: mqttium takes its direct QoS0 transport write only

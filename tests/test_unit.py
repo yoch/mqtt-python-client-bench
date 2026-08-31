@@ -22,6 +22,7 @@ if str(SRC) not in sys.path:
 from mqtt_client_bench.adapters import registry  # noqa: E402
 from mqtt_client_bench.adapters.base import AdapterCapabilities  # noqa: E402
 from mqtt_client_bench.adapters.native import NativeAsyncAdapter  # noqa: E402
+from mqtt_client_bench.adapters.mqttium import MqttiumAdapter  # noqa: E402
 from mqtt_client_bench.adapters.mqttium_async import FlowControlError, MqttiumAsyncAdapter  # noqa: E402
 from mqtt_client_bench.roles import publisher  # noqa: E402
 from mqtt_client_bench.adapters.registry import (  # noqa: E402
@@ -356,14 +357,15 @@ class AdapterRegistryTests(unittest.TestCase):
             missing = unsupported_for_client(name, point)
             self.assertEqual(missing, [], name)
 
-    def test_callback_matching_paho_only(self):
+    def test_callback_matching_native_clients(self):
         point = {"callback_filters": 64, "qos_subscribe": 0}
         from mqtt_client_bench.adapters.registry import _ADAPTERS
 
-        self.assertEqual(unsupported_for_client("paho", point), [])
-        # mqttium-compat claims native_message_callback_add; everyone else must refuse.
+        native = {"paho", "mqttium", "mqttium-compat"}
+        for name in native:
+            self.assertEqual(unsupported_for_client(name, point), [], name)
         for name in _ADAPTERS:
-            if name in ("paho", "mqttium-compat"):
+            if name in native:
                 continue
             try:
                 missing = unsupported_for_client(name, point)
@@ -566,6 +568,8 @@ class AdapterRegistryTests(unittest.TestCase):
         async_client = AsyncClient(client_id="shape-probe")
         for attr in (
             "publish_nowait",
+            "message_callback_add",
+            "message_callback_remove",
             "_engine",
             "_engine_lock",
             "_sub_futs",
@@ -605,6 +609,12 @@ class AdapterRegistryTests(unittest.TestCase):
         self.assertEqual(inner._engine.config.max_pending_outbound_messages, 200)
         self.assertEqual(inner._engine.config.max_pending_outbound_bytes, 64 << 20)
         self.assertEqual(inner._max_outbound_bytes, 8 << 20)
+
+    def test_mqttium_queues_native_filters_until_connect(self):
+        adapter = MqttiumAdapter.create(client_id="cb-probe")
+        adapter.message_callback_add("bench/+/x", lambda *_a: None)
+        self.assertEqual(len(adapter._pending_filters), 1)
+        self.assertIsNone(adapter._client)
 
     def test_gmqtt_v5_properties_align_payload_format(self):
         from mqtt_client_bench.adapters.gmqtt import GmqttAdapter
