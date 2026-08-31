@@ -2513,9 +2513,17 @@ class HostCalibrationTests(unittest.TestCase):
         plan = probe_durations(300.0)
         self.assertEqual(plan["budget_s"], 300.0)
         self.assertGreaterEqual(plan["harness_passes"], 30)
-        # The paced sweep is 7 offers x 3 repeats, so each run is short; what
-        # matters is that the budget is spent on it rather than elsewhere.
-        self.assertGreaterEqual(plan["sweep_step_s"] * 21, 200)
+        # Each share is divided by the runs that probe actually makes, so the
+        # total lands near the budget instead of several times over it: the
+        # fan-out probe became a grid of 15 runs, and a per-run duration would
+        # have spent 450 s of a 300 s budget on it alone.
+        total = (
+            plan["harness_passes"] * 0.5
+            + plan["sweep_runs"] * plan["sweep_step_s"]
+            + plan["fanout_runs"] * plan["fanout_s"]
+        )
+        self.assertLessEqual(total, plan["budget_s"] * 1.1)
+        self.assertGreaterEqual(total, plan["budget_s"] * 0.7)
         # The floor keeps a mistyped budget from producing a meaningless probe.
         tiny = probe_durations(1.0)
         self.assertGreaterEqual(tiny["budget_s"], 30.0)
