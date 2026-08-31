@@ -216,6 +216,12 @@ results.
   cannot be read as a library difference. Only for one-subscriber points: the
   broker reads once and writes once per subscriber, so a ceiling measured at one
   says nothing about `fanout_scaling` at 8 or 32.
+- **The host profile caps the ingress offer, it does not set it**: the offer's
+  job is to make the SUT client the bottleneck, and 200k already does that by
+  3-13x. Measured on the two fastest clients, raising it to 594k moved delivery
+  under 2 % and turned every mqttium run inconclusive. So `resolve_ingress_offer`
+  takes `min(200k, recommended_offer_msgs_per_s)`: unchanged on the reference
+  host, and a smaller machine can no longer record an offer it never produced.
 - **The core ingress offer is an over-offer, not a sustainable rate**: on the
   reference host `mqtt_hammer` emits ~230k msgs/s alone, but **one** subscriber
   drops the whole pipeline to ~76k — Mosquitto must fan out as well as decode,
