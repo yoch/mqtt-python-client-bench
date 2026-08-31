@@ -9,6 +9,16 @@ generalized behind a per-library adapter layer.
 **Live reports:** [yoch.github.io/mqtt-python-client-bench](https://yoch.github.io/mqtt-python-client-bench/)
 (generated automatically from committed `results/*.json`).
 
+The site has six kinds of page: an **overview** with the throughput and latency
+rankings and the performance matrix; one page per **scenario**, comparing every
+client along that scenario's own axis; one page per **client**, with its
+identity, the library internals its adapter depends on and the capabilities it
+declines; a **corpus** page showing coverage, what was invalidated and what has
+never been run; one page per **result file**; and the **methodology**. Charts are
+inline SVG rendered at build time — the site pulls nothing from a CDN, and a
+small same-origin script adds hover, sorting and a dark-mode switch on top of
+markup that is already complete without it.
+
 ## Clients
 
 ### Stable catalogue
@@ -65,6 +75,7 @@ Wrappers of Paho/gmqtt (`fastapi-mqtt`, `jmqtt`, …) are intentionally excluded
 | Netem (`lan`/`wan`/`edge`) | diagnostic only | marked `non_comparable` on loopback |
 | Smoke profile | never | always `non_comparable` |
 | I/O peer groups | within the same `io_model` | `sync` (paho, mqttium-compat) ≠ `asyncio_bridged` (aiomqtt, gmqtt, mqttium, …) ≠ `crt_event_loop` (awscrt); `mqttium` ≠ `mqttium-compat` |
+| Stability | does **not** split a group | stable and pre-release clients of the same `io_model` compete directly; stable sorts first and pre-release carries an `exp` badge |
 
 ## Quick start
 
@@ -235,7 +246,7 @@ Benchmarks always run **locally** (Docker Mosquitto, host networking). GitHub
 Actions does **not** execute the suites; it only rebuilds the report site.
 
 1. Run with `--profile standard` and write JSON into `results/`.
-2. Preview with `report build`.
+2. Preview with `report build`, then open `site/index.html` in a browser.
 3. Commit JSON under `results/` and push to `main`.
 
 ## Comparative runs
