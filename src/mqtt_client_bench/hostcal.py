@@ -252,6 +252,33 @@ _FINGERPRINT_CEILINGS = (
 )
 
 
+# Significant figures kept from a measurement before it enters the digest.
+#
+# Two, because the digest answers "which machine is this", not "what exactly did
+# it measure". Fixed-width buckets do not work here: the values span 3,300 ns to
+# 600,000 msgs/s, and any absolute rounding is either meaningless at one end or
+# hypersensitive at the other. A relative bucket has the same problem in a
+# subtler form - two calibrations agreeing to 1.3% still straddled a boundary.
+_FINGERPRINT_SIGFIGS = 2
+
+
+def _quantise(value: float) -> float:
+    """Round to a few significant figures, so the digest tracks the machine.
+
+    Measured across two calibrations of this workstation: ceilings agreeing to
+    0.03% and a harness cost agreeing to 1.3% all land on the same values here,
+    where an absolute rounding to the nearest hundred gave two different
+    fingerprints for one machine — and a fingerprint that changes when nothing
+    did makes every result referencing it look stale.
+    """
+    import math
+
+    if value <= 0:
+        return 0.0
+    digits = _FINGERPRINT_SIGFIGS - 1 - int(math.floor(math.log10(abs(value))))
+    return round(value, digits)
+
+
 def host_fingerprint(profile: Dict[str, Any]) -> str:
     """Short digest over the identity and the ceilings, in the shape of
     ``provenance.harness_fingerprint``."""
@@ -265,11 +292,17 @@ def host_fingerprint(profile: Dict[str, Any]) -> str:
         digest.update(f"broker.{key}={broker.get(key)!r}\0".encode("utf-8"))
     for key in _FINGERPRINT_CEILINGS:
         value = ceilings.get(key)
-        # Quantise so re-probing the same machine does not churn the digest on
-        # a percent of measurement noise. Two hosts that differ by less than
-        # this are not distinguishable by these probes anyway.
-        if isinstance(value, (int, float)):
-            value = round(float(value), -2) if value >= 1000 else round(float(value), 1)
+        # Quantise *relatively*, so re-probing the same machine does not churn
+        # the digest on measurement noise. An absolute rounding cannot serve
+        # both ends of this range: to the nearest hundred is right for a 3300 ns
+        # cost and meaningless for a 600,000 msgs/s ceiling, where two
+        # calibrations agreeing to 0.03% still landed on different hundreds and
+        # produced different fingerprints for one machine.
+        #
+        # Two hosts closer than this bucket are not told apart by these probes
+        # anyway, so nothing is lost by refusing to distinguish them.
+        if isinstance(value, (int, float)) and value:
+            value = _quantise(float(value))
         digest.update(f"{key}={value!r}\0".encode("utf-8"))
     return digest.hexdigest()[:16]
 
@@ -462,23 +495,31 @@ CALIBRATION_BUDGET_S = 300.0
 # How the budget is split. The thread sweep gets the bulk because it is the
 # noisiest measurement and the one whose answer is a choice, not a magnitude.
 _BUDGET_HARNESS_SHARE = 0.10
-_BUDGET_FANOUT_SHARE = 0.10
-_BUDGET_SWEEP_SHARE = 0.80
+_BUDGET_FANOUT_SHARE = 0.35
+_BUDGET_SWEEP_SHARE = 0.55
 
 
 def probe_durations(budget_s: float = CALIBRATION_BUDGET_S) -> Dict[str, Any]:
-    """Split a calibration budget across the probes."""
+    """Split a calibration budget across the probes.
+
+    Each share is divided by the number of runs that probe actually makes, not
+    handed to it as a single duration. The fan-out probe used to be one run and
+    became a paced grid of five offers times three repeats; left as a per-run
+    duration its 10% share would have taken 450 s of a 300 s budget, and the
+    operator would have discovered that by watching the clock.
+    """
     budget = max(30.0, float(budget_s))
     harness_total = budget * _BUDGET_HARNESS_SHARE
     passes = max(5, int(harness_total / HARNESS_COST_WINDOW_S))
-    # The paced sweep is the bulk: one run per grid point per repeat.
-    runs = max(1, len(PACED_GRID) * PACED_REPEATS)
-    per_step = budget * _BUDGET_SWEEP_SHARE / runs
+    sweep_runs = max(1, len(PACED_GRID) * PACED_REPEATS)
+    fanout_runs = max(1, len(FANOUT_GRID) * FANOUT_REPEATS)
     return {
         "budget_s": budget,
         "harness_passes": passes,
-        "sweep_step_s": max(2, int(per_step)),
-        "fanout_s": max(2, int(budget * _BUDGET_FANOUT_SHARE)),
+        "sweep_runs": sweep_runs,
+        "sweep_step_s": max(2, int(budget * _BUDGET_SWEEP_SHARE / sweep_runs)),
+        "fanout_runs": fanout_runs,
+        "fanout_s": max(2, int(budget * _BUDGET_FANOUT_SHARE / fanout_runs)),
     }
 
 
@@ -682,11 +723,23 @@ def measure_broker_fanout_ceiling(
                 topic="hostcal/fanout", rate=target,
             )
             thread.join(timeout=seconds + 15)
-            # The subscriber's count is what the broker actually forwarded; the
-            # publisher's is what it accepted. Prefer the former, and fall back
-            # only if the subscriber did not report.
+            # The subscriber's *count* is what the broker forwarded; its own
+            # rate is not, because its window has to outlive the publisher's to
+            # catch the trailing messages and therefore includes idle time. Rate
+            # it over the publisher's measured window instead — dividing by the
+            # subscriber's understated the forwarded rate by the ratio of the
+            # two windows, which was enough to fail the first step of the grid
+            # and refuse the whole calibration.
             sub = result.get("sub") or {}
-            value = sub.get("msgs_per_s") or (pub or {}).get("msgs_per_s")
+            pub_seconds = (pub or {}).get("seconds")
+            msgs = sub.get("msgs")
+            value = None
+            if msgs and pub_seconds:
+                value = float(msgs) / float(pub_seconds)
+            elif pub:
+                # No subscriber reading: fall back to what the broker accepted,
+                # which is an upper bound on what it forwarded.
+                value = pub.get("msgs_per_s")
             if value:
                 samples.append(float(value))
         if not samples:

@@ -2452,10 +2452,24 @@ class HostCalibrationTests(unittest.TestCase):
         renamed["host"]["hostname"] = "b"
         self.assertEqual(host_fingerprint(renamed), fp)
 
-        # Measurement noise must not churn the digest.
-        jittered = json.loads(json.dumps(base))
-        jittered["ceilings"]["harness_cost_ns_per_message"] = 3512.0
-        self.assertEqual(host_fingerprint(jittered), fp)
+        # Measurement noise must not churn the digest. Real numbers, from two
+        # calibrations of this workstation: an absolute rounding put these on
+        # different fingerprints for one machine, which makes every result that
+        # references it look stale for no reason.
+        for key, first, second in (
+            ("harness_cost_ns_per_message", 3325.9, 3283.9),
+            ("broker_paced_ceiling_msgs_per_s", 599256.5, 599438.0),
+            ("broker_fanout_msgs_per_s", 74819.1, 74828.4),
+        ):
+            one = json.loads(json.dumps(base)); one["ceilings"][key] = first
+            two = json.loads(json.dumps(base)); two["ceilings"][key] = second
+            self.assertEqual(host_fingerprint(one), host_fingerprint(two),
+                             f"{key} churned the fingerprint on noise")
+
+        # A real change still moves it: 600k and 60k are different machines.
+        big = json.loads(json.dumps(base))
+        big["ceilings"]["broker_paced_ceiling_msgs_per_s"] = 60000.0
+        self.assertNotEqual(host_fingerprint(big), host_fingerprint(base))
 
         # A different machine, or a real change in what it can do, must.
         for mutation in (
@@ -2513,9 +2527,17 @@ class HostCalibrationTests(unittest.TestCase):
         plan = probe_durations(300.0)
         self.assertEqual(plan["budget_s"], 300.0)
         self.assertGreaterEqual(plan["harness_passes"], 30)
-        # The paced sweep is 7 offers x 3 repeats, so each run is short; what
-        # matters is that the budget is spent on it rather than elsewhere.
-        self.assertGreaterEqual(plan["sweep_step_s"] * 21, 200)
+        # Each share is divided by the runs that probe actually makes, so the
+        # total lands near the budget instead of several times over it: the
+        # fan-out probe became a grid of 15 runs, and a per-run duration would
+        # have spent 450 s of a 300 s budget on it alone.
+        total = (
+            plan["harness_passes"] * 0.5
+            + plan["sweep_runs"] * plan["sweep_step_s"]
+            + plan["fanout_runs"] * plan["fanout_s"]
+        )
+        self.assertLessEqual(total, plan["budget_s"] * 1.1)
+        self.assertGreaterEqual(total, plan["budget_s"] * 0.7)
         # The floor keeps a mistyped budget from producing a meaningless probe.
         tiny = probe_durations(1.0)
         self.assertGreaterEqual(tiny["budget_s"], 30.0)
