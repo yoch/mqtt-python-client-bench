@@ -330,11 +330,21 @@ def hammer_rate_cap() -> int:
     return HAMMER_MAX_RATE_MSGS_PER_S
 
 
-def clamp_hammer_rate(target_msgs_per_s: Optional[float]) -> int:
-    """Cap hammer at hammer_rate_cap(). 0 means unpaced."""
+def clamp_hammer_rate(
+    target_msgs_per_s: Optional[float], host_ceiling: Optional[float] = None
+) -> int:
+    """Cap hammer at the host's measured ceiling, or the constant without one.
+
+    The constant is what this workstation happens to sustain. A smaller machine
+    given the same number would record an offer it never produced, which is the
+    whole reason the ceiling is measured.
+    """
     if target_msgs_per_s is None or float(target_msgs_per_s) <= 0:
         return 0
-    return max(1, min(int(round(float(target_msgs_per_s))), hammer_rate_cap()))
+    cap = hammer_rate_cap()
+    if host_ceiling and float(host_ceiling) < cap:
+        cap = int(round(float(host_ceiling)))
+    return max(1, min(int(round(float(target_msgs_per_s))), cap))
 
 
 def resolve_hammer_pub_clients(point: dict, declared_clients: int) -> int:

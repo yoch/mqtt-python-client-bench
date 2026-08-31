@@ -43,6 +43,11 @@ MEASUREMENT_PATH = (
     "telemetry.py",
     "workloads.py",
     "loadgen.py",
+    # Joins the measurement path here and not earlier: until the ceilings
+    # capped offers, nothing this module produced could change a number, and
+    # moving the fingerprint would have signalled a change of meaning that had
+    # not happened.
+    "hostcal.py",
     "broker.py",
     "adapters/base.py",
     "adapters/async_bridge.py",
