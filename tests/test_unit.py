@@ -2840,6 +2840,75 @@ class ReceiveMaximumOverlayTests(unittest.TestCase):
         self.assertIn("advertised=10", result["reasons"][0])
 
 
+class HostCappedOfferTests(unittest.TestCase):
+    """The host profile caps the ingress offer; it does not set it."""
+
+    @staticmethod
+    def _profile(recommended):
+        return {"ceilings": {"recommended_offer_msgs_per_s": recommended}}
+
+    def test_a_capable_host_keeps_the_reference_offer(self):
+        from mqtt_client_bench.harness import (
+            DEFAULT_INGRESS_OFFER_MSGS_PER_S, resolve_ingress_offer,
+        )
+
+        # This workstation: min(200k, 509k) = 200k, so nothing changes here -
+        # which is the point. Measured on the two fastest clients, raising the
+        # offer to 594k moved delivery by under 2% and pushed every mqttium run
+        # to inconclusive, so a higher offer buys nothing and costs headroom.
+        point = {}
+        offer = resolve_ingress_offer(point, 32, self._profile(509368.0))
+        self.assertEqual(offer, DEFAULT_INGRESS_OFFER_MSGS_PER_S)
+        self.assertNotIn("ingress_offer_capped_by_host", point)
+
+    def test_a_weaker_host_gets_what_it_can_emit(self):
+        from mqtt_client_bench.harness import resolve_ingress_offer
+
+        # The failure this removes: a smaller machine recording an offer of
+        # 200k it never produced, which is what the withdrawn container
+        # campaign did.
+        point = {}
+        offer = resolve_ingress_offer(point, 32, self._profile(60000.0))
+        self.assertEqual(offer, 60000.0)
+        self.assertEqual(point["ingress_offer_capped_by_host"], 60000.0)
+
+    def test_no_profile_falls_back_to_the_constant(self):
+        from mqtt_client_bench.harness import (
+            DEFAULT_INGRESS_OFFER_MSGS_PER_S, resolve_ingress_offer,
+        )
+
+        self.assertEqual(
+            resolve_ingress_offer({}, 32, None), DEFAULT_INGRESS_OFFER_MSGS_PER_S
+        )
+
+    def test_an_explicit_target_and_the_override_both_win(self):
+        from mqtt_client_bench.harness import resolve_ingress_offer
+
+        # Ceiling-grid points pin their own offer and must not be capped into
+        # a different grid.
+        self.assertEqual(
+            resolve_ingress_offer({"ingress_target_msgs_per_s": 128000}, 128,
+                                  self._profile(60000.0)),
+            128000.0,
+        )
+        # The diagnostic override sits above both, and marks the point.
+        with patch.dict(os.environ, {"MQTT_BENCH_INGRESS_OFFER": "300000"}, clear=False):
+            point = {}
+            self.assertEqual(resolve_ingress_offer(point, 32, self._profile(60000.0)),
+                             300000.0)
+            self.assertTrue(point["non_comparable"])
+
+    def test_the_hammer_clamp_takes_the_host_ceiling(self):
+        from mqtt_client_bench.loadgen import HAMMER_MAX_RATE_MSGS_PER_S, clamp_hammer_rate
+
+        # Without a profile, the constant: what this workstation sustains.
+        self.assertEqual(clamp_hammer_rate(500000), HAMMER_MAX_RATE_MSGS_PER_S)
+        # With one, the machine's own number.
+        self.assertEqual(clamp_hammer_rate(500000, 90000.0), 90000)
+        # A ceiling above the constant does not raise it.
+        self.assertEqual(clamp_hammer_rate(500000, 900000.0), HAMMER_MAX_RATE_MSGS_PER_S)
+
+
 class BrokerFanoutLimitTests(unittest.TestCase):
     """A subscribe point at the host's fan-out ceiling measures the broker."""
 
