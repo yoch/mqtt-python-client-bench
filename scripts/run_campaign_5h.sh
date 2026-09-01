@@ -21,7 +21,28 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck disable=SC1091
 source .venv/bin/activate
-mkdir -p calibrations results logs
+mkdir -p calibrations logs
+
+# Where this campaign writes.
+#
+# Not `results/` unconditionally. Campaign files are named
+# <client>-<scenario>.json, so a runner writing there replaces the published
+# corpus file by file — which is exactly what happened on the first cursor
+# runner campaign, and it had to be restored from git. `run matrix` already
+# defaults its output by the host's role, but this script was overriding that
+# default with an explicit `--output-dir results`, so the guard never applied
+# where it mattered most: the unattended multi-hour loop.
+RESULTS_DIR="${RESULTS_DIR:-$(python - <<'PYEOF'
+import sys
+sys.path.insert(0, "src")
+from mqtt_client_bench.hostcal import resolve_host_profile, results_dir_for
+print(results_dir_for(resolve_host_profile()))
+PYEOF
+)}"
+mkdir -p "$RESULTS_DIR"
+if [[ "$RESULTS_DIR" != "results" ]]; then
+  echo "note: this host is not the published reference; writing to $RESULTS_DIR"
+fi
 
 CLIENTS="${CLIENTS:-paho,gmqtt,aiomqtt,amqtt,awscrt}"
 # aiomqtt v3 shares an import name with v2, so it cannot be interleaved by
@@ -143,19 +164,23 @@ SCENARIOS=("${REPR[@]}" "${DIAGNOSTIC[@]}")
 # *from the current harness*. Results predating the fairness fixes carry no run
 # provenance, so they are correctly treated as missing and re-run.
 scenario_complete() {  # <scenario> <clients-csv> <python>
+  # Reads $RESULTS_DIR, not `results/`. On a runner the two differ, and a skip
+  # gate looking at the published corpus would be answering a question about a
+  # different machine — which is the whole point of keeping them apart.
   # One rule, in mqtt_client_bench.campaign, shared with `campaign_ctl status`.
   # It used to be written out here and again in the control script, and the two
   # drifted: status reported everything complete while this gate was about to
   # re-measure all of it.
   "$3" -c '
 import sys
+from pathlib import Path
 from mqtt_client_bench.campaign import scenario_state
-st = scenario_state(sys.argv[1], sys.argv[2].split(","))
+st = scenario_state(sys.argv[1], sys.argv[2].split(","), Path(sys.argv[3]))
 for client, (state, why, _pts) in st["clients"].items():
     if state != "done":
         print(f"    {client} {sys.argv[1]}: {state}" + (f" ({why})" if why else ""), file=sys.stderr)
 raise SystemExit(0 if st["state"] == "done" else 1)
-' "$1" "$2" 2>>logs/campaign.log
+' "$1" "$2" "$RESULTS_DIR" 2>>logs/campaign.log
 }
 
 for s in "${SCENARIOS[@]}"; do
@@ -167,7 +192,7 @@ for s in "${SCENARIOS[@]}"; do
   if ! python -m mqtt_client_bench.run matrix \
       --clients "$CLIENTS" --scenario "$s" --profile standard --runs 3 \
       --load-profile-dir calibrations \
-      --output-dir results \
+      --output-dir "$RESULTS_DIR" \
       >>"logs/matrix-${s}.log" 2>&1; then
     note_failure "matrix $s" "logs/matrix-${s}.log"
   fi
@@ -191,7 +216,7 @@ if [[ -n "$AIOMQTT3_VENV" && -x "$AIOMQTT3_VENV/bin/python" ]]; then
     if ! "$A3PY" -m mqtt_client_bench.run run \
         --scenario "$s" --client aiomqtt3 --profile standard --runs 3 \
         --load-profile calibrations/aiomqtt3-load.json \
-        --output "results/aiomqtt3-${s}.json" \
+        --output "$RESULTS_DIR/aiomqtt3-${s}.json" \
         >>"logs/aiomqtt3-${s}.log" 2>&1; then
       note_failure "aiomqtt3 $s" "logs/aiomqtt3-${s}.log"
     fi
@@ -236,10 +261,17 @@ run_abba() {  # <label> <clients> <output>
   fi
 }
 
-run_abba paho-gmqtt paho,gmqtt results/compare-paho-gmqtt-pub-qos.json
-run_abba paho-awscrt paho,awscrt results/compare-paho-awscrt-pub-qos.json
+run_abba paho-gmqtt paho,gmqtt "$RESULTS_DIR/compare-paho-gmqtt-pub-qos.json"
+run_abba paho-awscrt paho,awscrt "$RESULTS_DIR/compare-paho-awscrt-pub-qos.json"
 
-if ! python -m mqtt_client_bench.run report build --input results --output site \
+# A runner builds its own site and never the published one; `--reference none`
+# keeps the filter from emptying it, since these results are not the reference
+# host's.
+REPORT_ARGS=(--input "$RESULTS_DIR" --output site)
+if [[ "$RESULTS_DIR" != "results" ]]; then
+  REPORT_ARGS=(--input "$RESULTS_DIR" --output site-runner --reference none)
+fi
+if ! python -m mqtt_client_bench.run report build "${REPORT_ARGS[@]}" \
   >>logs/campaign.log 2>&1; then
   note_failure "report build" "logs/campaign.log"
 fi
