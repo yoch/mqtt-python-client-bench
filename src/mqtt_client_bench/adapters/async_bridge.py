@@ -151,7 +151,11 @@ to ``MAX_BRIDGE_WORKERS``, so concurrency still matches the outstanding window.
         if self._loop is None:
             raise RuntimeError("asyncio bridge is not running")
         if threading.current_thread() is self._thread:
-            fn()
+            # Never run inline on the loop thread: MQTTium rc11+ may invoke
+            # on_message synchronously in the reader/drain turn, and a role
+            # that publishes from that callback (application RTT responder) would
+            # otherwise re-enter the client before delivery settles.
+            self._loop.call_soon(fn)
             return
         wake = False
         with self._pending_lock:
