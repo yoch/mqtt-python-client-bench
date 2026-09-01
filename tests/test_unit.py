@@ -777,6 +777,35 @@ class BridgedAdapterTests(unittest.TestCase):
         self.assertEqual(len(finished), 64)
         bridge.stop()
 
+    def test_schedule_call_defers_on_loop_thread(self):
+        """Loop-thread schedule_call must not run inline (RTT echo from on_message)."""
+        import asyncio
+        import time
+
+        from mqtt_client_bench.adapters.async_bridge import AsyncioBridge
+
+        bridge = AsyncioBridge()
+        bridge.start()
+        depth = {"n": 0}
+        ran = []
+
+        def _nested():
+            depth["n"] += 1
+            ran.append(depth["n"])
+            depth["n"] -= 1
+
+        async def _on_loop():
+            bridge.schedule_call(_nested)
+            # Inline execution would append before this line.
+            self.assertEqual(ran, [])
+
+        bridge.run(_on_loop())
+        deadline = time.time() + 2.0
+        while not ran and time.time() < deadline:
+            time.sleep(0.01)
+        bridge.stop()
+        self.assertEqual(ran, [1])
+
     def test_bridge_stop_drops_queued_work_cleanly(self):
         from mqtt_client_bench.adapters.async_bridge import AsyncioBridge
 
