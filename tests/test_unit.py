@@ -2948,6 +2948,49 @@ class HostCappedOfferTests(unittest.TestCase):
         self.assertEqual(clamp_hammer_rate(500000, 900000.0), HAMMER_MAX_RATE_MSGS_PER_S)
 
 
+class CampaignScriptRoutingTests(unittest.TestCase):
+    """The canonical campaign loop must not write into the published corpus."""
+
+    def test_the_script_routes_every_output_through_results_dir(self):
+        from pathlib import Path as _Path
+
+        script = _Path("scripts/run_campaign_5h.sh").read_text()
+
+        # `run matrix` defaults its output directory from the host's role, but
+        # this script was overriding that with an explicit `--output-dir
+        # results`, so the guard never applied where it mattered most: the
+        # unattended multi-hour loop. The first cursor runner campaign
+        # overwrote the published corpus that way and had to be restored from
+        # git.
+        self.assertNotIn("--output-dir results ", script)
+        self.assertIn('--output-dir "$RESULTS_DIR"', script)
+        self.assertIn('--output "$RESULTS_DIR/aiomqtt3-${s}.json"', script)
+        self.assertIn('"$RESULTS_DIR/compare-paho-gmqtt-pub-qos.json"', script)
+
+        # Resumption reads the same directory it writes. A skip gate pointed at
+        # the published corpus would be answering a question about a different
+        # machine, which defeats keeping them apart — and resumption is what a
+        # runner that can vanish mid-campaign depends on.
+        self.assertIn('"$1" "$2" "$RESULTS_DIR"', script)
+
+    def test_results_dir_for_matches_what_the_script_asks_for(self):
+        import json as _json
+        from pathlib import Path as _Path
+
+        from mqtt_client_bench.hostcal import results_dir_for
+
+        # The reference host owns `results/`; a runner gets its own directory.
+        # Exercised against the two profiles actually committed here.
+        for path in sorted(_Path("hosts").glob("*.json")):
+            profile = _json.loads(path.read_text())
+            got = results_dir_for(profile)
+            if profile.get("role") == "reference":
+                self.assertEqual(got, "results", path.name)
+            else:
+                self.assertTrue(got.startswith("results/"), path.name)
+                self.assertNotEqual(got, "results", path.name)
+
+
 class BrokerFanoutLimitTests(unittest.TestCase):
     """A subscribe point at the host's fan-out ceiling measures the broker."""
 
