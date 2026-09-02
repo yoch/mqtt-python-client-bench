@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Prepare + run mqttium / mqttium-compat against the pinned PyPI release.
+# Prepare + run mqttium (and optionally mqttium-compat) against a pinned PyPI release.
 # Usage: bash scripts/run_mqttium_campaign.sh
+#   MQTTIUM_ONLY=1          — skip mqttium-compat (default)
+#   MQTTIUM_COMPAT=1        — also run mqttium-compat
 # Does NOT run automatically — invoke explicitly when ready.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -9,7 +11,19 @@ cd "$ROOT"
 source .venv/bin/activate
 export PYTHONPATH=src
 
-MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc11}"
+RESULTS_DIR="${RESULTS_DIR:-$(python - <<'PYEOF'
+import sys
+sys.path.insert(0, "src")
+from mqtt_client_bench.hostcal import resolve_host_profile, results_dir_for
+print(results_dir_for(resolve_host_profile()))
+PYEOF
+)}"
+mkdir -p "$RESULTS_DIR"
+if [[ "$RESULTS_DIR" != "results" ]]; then
+  echo "note: this host is not the published reference; writing to $RESULTS_DIR"
+fi
+
+MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc12}"
 echo "=== ensure mqttium==${MQTTIUM_VER} (site-packages, no editable) ==="
 pip install --force-reinstall --no-cache-dir "mqttium==${MQTTIUM_VER}"
 python - <<'PY'
@@ -24,19 +38,19 @@ assert hasattr(AsyncClient, "publish_nowait"), "publish_nowait required"
 print("OK", v, path)
 PY
 
-mkdir -p calibrations results logs
-# Archive prior mqttium* JSON so a1/a2 medians are not mixed into the site.
+mkdir -p calibrations logs
+# Archive prior mqttium* JSON in this results dir so medians are not mixed.
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-ARCHIVE="results/_archive_mqttium_${STAMP}"
+ARCHIVE="${RESULTS_DIR}/_archive_mqttium_${STAMP}"
 mkdir -p "$ARCHIVE"
 shopt -s nullglob
 # Two loops, not one glob list: `mqttium-*.json` also matches
 # `mqttium-compat-*.json`, and with `set -e` the second copy of a name
 # that the first glob already moved aborts the campaign.
-for f in results/mqttium-compat-*.json; do
+for f in "${RESULTS_DIR}"/mqttium-compat-*.json; do
   mv -v "$f" "$ARCHIVE/"
 done
-for f in results/mqttium-*.json; do
+for f in "${RESULTS_DIR}"/mqttium-*.json; do
   mv -v "$f" "$ARCHIVE/"
 done
 shopt -u nullglob
@@ -53,9 +67,11 @@ echo "=== calibrate native ==="
 python -m mqtt_client_bench.run calibrate --client mqttium --profile standard \
   --output calibrations/mqttium-load.json | tee logs/calibrate-mqttium.log
 
-echo "=== calibrate compat ==="
-python -m mqtt_client_bench.run calibrate --client mqttium-compat --profile standard \
-  --output calibrations/mqttium-compat-load.json | tee logs/calibrate-mqttium-compat.log
+if [[ "${MQTTIUM_COMPAT:-0}" == "1" ]]; then
+  echo "=== calibrate compat ==="
+  python -m mqtt_client_bench.run calibrate --client mqttium-compat --profile standard \
+    --output calibrations/mqttium-compat-load.json | tee logs/calibrate-mqttium-compat.log
+fi
 
 SCENARIOS=(
   pub_payload_sweep_qos0
@@ -73,7 +89,12 @@ SCENARIOS=(
   application_rtt_qos1
 )
 
-for client in mqttium mqttium-compat; do
+CLIENTS=(mqttium)
+if [[ "${MQTTIUM_COMPAT:-0}" == "1" ]]; then
+  CLIENTS+=(mqttium-compat)
+fi
+
+for client in "${CLIENTS[@]}"; do
   load="calibrations/${client}-load.json"
   for s in "${SCENARIOS[@]}"; do
     echo "==> ${client} ${s} $(date -Is)"
@@ -83,10 +104,10 @@ for client in mqttium mqttium-compat; do
       --profile standard \
       --runs 3 \
       --load-profile "$load" \
-      --output "results/${client}-${s}.json" \
+      --output "${RESULTS_DIR}/${client}-${s}.json" \
       >"logs/${client}-${s}.log" 2>&1
   done
 done
 
-python -m mqtt_client_bench.run report build --input results --output site
+python -m mqtt_client_bench.run report build --input "$RESULTS_DIR" --output site-mqttium-rc12
 echo "CAMPAIGN_DONE $(date -Is)"
