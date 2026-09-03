@@ -11,8 +11,9 @@
 #   MQTTIUM_GIT_SHA=commit         Checkout exact commit (overrides branch tip)
 #   MQTTIUM_RUN_LABEL=name         Write under \$RESULTS_DIR/name/ (paired A/B runs)
 #   MQTTIUM_SKIP_ARCHIVE=1         Do not move prior mqttium-*.json
-#   Baseline reuse: post-#422 main (d520edf) ≡ PR #422 campaign (cf80ab7);
-#   copy results to results/<host>/post422-baseline/ instead of re-running.
+#   Baseline reuse:
+#   - post-#422 (d520edf) ≡ PR #422 campaign → post422-baseline/
+#   - post-#423 (1d14bfca) ≡ PR #423 campaign → pr423/
 #   MQTTIUM_PREP_ONLY=1            Install/archive only
 #
 # Does NOT run automatically — invoke explicitly when ready.
