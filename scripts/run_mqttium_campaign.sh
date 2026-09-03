@@ -35,15 +35,20 @@ CLIENT_PATH_ARGS=()
 MQTTIUM_CLIENT_PATH="${MQTTIUM_CLIENT_PATH:-}"
 
 if [[ -n "${MQTTIUM_GIT_REF:-}" ]]; then
-  MQTTIUM_CLIENT_PATH="${MQTTIUM_CLIENT_PATH:-$ROOT/.mqttium-git}"
-  echo "=== clone mqttium@${MQTTIUM_GIT_REF} -> ${MQTTIUM_CLIENT_PATH} ==="
-  rm -rf "$MQTTIUM_CLIENT_PATH"
-  git clone --depth 1 --branch "$MQTTIUM_GIT_REF" https://github.com/yoch/mqttium.git "$MQTTIUM_CLIENT_PATH"
+  MQTTIUM_CLIENT_PATH="${MQTTIUM_CLIENT_PATH:-$ROOT/.mqttium-pr422}"
+  SRC_DIR="${MQTTIUM_CLIENT_PATH}-src"
+  echo "=== clone mqttium@${MQTTIUM_GIT_REF} -> ${SRC_DIR} ==="
+  rm -rf "$SRC_DIR" "$MQTTIUM_CLIENT_PATH"
+  git clone --depth 1 --branch "$MQTTIUM_GIT_REF" https://github.com/yoch/mqttium.git "$SRC_DIR"
+  pip install --no-cache-dir --force-reinstall --target "$MQTTIUM_CLIENT_PATH" "$SRC_DIR"
+elif [[ -n "$MQTTIUM_CLIENT_PATH" && -f "$MQTTIUM_CLIENT_PATH/pyproject.toml" ]]; then
+  echo "=== install mqttium from ${MQTTIUM_CLIENT_PATH} (--target) ==="
+  TARGET="${MQTTIUM_CLIENT_PATH}-installed"
+  pip install --no-cache-dir --force-reinstall --target "$TARGET" "$MQTTIUM_CLIENT_PATH"
+  MQTTIUM_CLIENT_PATH="$TARGET"
 fi
 
 if [[ -n "$MQTTIUM_CLIENT_PATH" ]]; then
-  echo "=== install mqttium from ${MQTTIUM_CLIENT_PATH} (--target) ==="
-  pip install --no-cache-dir --force-reinstall --target "$MQTTIUM_CLIENT_PATH" "$MQTTIUM_CLIENT_PATH"
   CLIENT_PATH_ARGS=(--client-path "$MQTTIUM_CLIENT_PATH")
   python - <<PY
 import sys
