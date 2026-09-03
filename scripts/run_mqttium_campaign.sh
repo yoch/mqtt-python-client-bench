@@ -8,7 +8,9 @@
 #   MQTTIUM_VER=1.0.0rc12          PyPI pin when MQTTIUM_CLIENT_PATH is unset
 #   MQTTIUM_CLIENT_PATH=...        Use this checkout via --client-path (skip PyPI)
 #   MQTTIUM_GIT_REF=branch         Clone yoch/mqttium@ref into MQTTIUM_CLIENT_PATH
-#   MQTTIUM_COMPAT=1               Also run mqttium-compat (default: mqttium only)
+#   MQTTIUM_GIT_SHA=commit         Checkout exact commit (overrides branch tip)
+#   MQTTIUM_RUN_LABEL=name         Write under \$RESULTS_DIR/name/ (paired A/B runs)
+#   MQTTIUM_SKIP_ARCHIVE=1         Do not move prior mqttium-*.json
 #   MQTTIUM_PREP_ONLY=1            Install/archive only
 #
 # Does NOT run automatically — invoke explicitly when ready.
@@ -30,17 +32,31 @@ mkdir -p "$RESULTS_DIR"
 if [[ "$RESULTS_DIR" != "results" ]]; then
   echo "note: this host is not the published reference; writing to $RESULTS_DIR"
 fi
+if [[ -n "${MQTTIUM_RUN_LABEL:-}" ]]; then
+  RESULTS_DIR="${RESULTS_DIR}/${MQTTIUM_RUN_LABEL}"
+  mkdir -p "$RESULTS_DIR"
+  echo "note: run label ${MQTTIUM_RUN_LABEL} -> ${RESULTS_DIR}"
+fi
 
 CLIENT_PATH_ARGS=()
 MQTTIUM_CLIENT_PATH="${MQTTIUM_CLIENT_PATH:-}"
 
-if [[ -n "${MQTTIUM_GIT_REF:-}" ]]; then
-  MQTTIUM_CLIENT_PATH="${MQTTIUM_CLIENT_PATH:-$ROOT/.mqttium-pr422}"
-  SRC_DIR="${MQTTIUM_CLIENT_PATH}-src"
-  echo "=== clone mqttium@${MQTTIUM_GIT_REF} -> ${SRC_DIR} ==="
-  rm -rf "$SRC_DIR" "$MQTTIUM_CLIENT_PATH"
-  git clone --depth 1 --branch "$MQTTIUM_GIT_REF" https://github.com/yoch/mqttium.git "$SRC_DIR"
+if [[ -n "${MQTTIUM_GIT_REF:-}" || -n "${MQTTIUM_GIT_SHA:-}" ]]; then
+  INSTALL_ROOT="${MQTTIUM_CLIENT_PATH:-$ROOT/.mqttium-${MQTTIUM_RUN_LABEL:-git}}"
+  SRC_DIR="${INSTALL_ROOT}-src"
+  MQTTIUM_CLIENT_PATH="$INSTALL_ROOT"
+  if [[ -n "${MQTTIUM_GIT_SHA:-}" ]]; then
+    echo "=== clone mqttium + checkout ${MQTTIUM_GIT_SHA} -> ${MQTTIUM_CLIENT_PATH} ==="
+    rm -rf "$SRC_DIR" "$MQTTIUM_CLIENT_PATH"
+    git clone --filter=blob:none https://github.com/yoch/mqttium.git "$SRC_DIR"
+    git -C "$SRC_DIR" checkout --quiet "${MQTTIUM_GIT_SHA}"
+  else
+    echo "=== clone mqttium@${MQTTIUM_GIT_REF} -> ${SRC_DIR} ==="
+    rm -rf "$SRC_DIR" "$MQTTIUM_CLIENT_PATH"
+    git clone --depth 1 --branch "$MQTTIUM_GIT_REF" https://github.com/yoch/mqttium.git "$SRC_DIR"
+  fi
   pip install --no-cache-dir --force-reinstall --target "$MQTTIUM_CLIENT_PATH" "$SRC_DIR"
+  echo "mqttium source $(git -C "$SRC_DIR" rev-parse --short HEAD)"
 elif [[ -n "$MQTTIUM_CLIENT_PATH" && -f "$MQTTIUM_CLIENT_PATH/pyproject.toml" ]]; then
   echo "=== install mqttium from ${MQTTIUM_CLIENT_PATH} (--target) ==="
   TARGET="${MQTTIUM_CLIENT_PATH}-installed"
@@ -79,6 +95,7 @@ PY
 fi
 
 mkdir -p calibrations logs
+if [[ "${MQTTIUM_SKIP_ARCHIVE:-0}" != "1" ]]; then
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ARCHIVE="${RESULTS_DIR}/_archive_mqttium_${STAMP}"
 mkdir -p "$ARCHIVE"
@@ -90,6 +107,7 @@ for f in "${RESULTS_DIR}"/mqttium-*.json; do
   mv -v "$f" "$ARCHIVE/"
 done
 shopt -u nullglob
+fi
 
 if [[ "${MQTTIUM_PREP_ONLY:-0}" == "1" ]]; then
   echo "PREP_ONLY: install+archive done. Skipping broker/calibrate/run/report."
@@ -98,10 +116,15 @@ fi
 
 python -m mqtt_client_bench.run broker up
 
+CAL_LOAD="calibrations/mqttium-load.json"
+if [[ -n "${MQTTIUM_RUN_LABEL:-}" ]]; then
+  CAL_LOAD="calibrations/${MQTTIUM_RUN_LABEL}-mqttium-load.json"
+fi
+
 echo "=== calibrate native ==="
 python -m mqtt_client_bench.run calibrate --client mqttium --profile standard \
   "${CLIENT_PATH_ARGS[@]}" \
-  --output calibrations/mqttium-load.json | tee logs/calibrate-mqttium.log
+  --output "$CAL_LOAD" | tee "logs/calibrate-mqttium-${MQTTIUM_RUN_LABEL:-default}.log"
 
 if [[ "${MQTTIUM_COMPAT:-0}" == "1" ]]; then
   echo "=== calibrate compat ==="
@@ -131,7 +154,7 @@ if [[ "${MQTTIUM_COMPAT:-0}" == "1" ]]; then
 fi
 
 for client in "${CLIENTS[@]}"; do
-  load="calibrations/${client}-load.json"
+  load="$CAL_LOAD"
   path_args=()
   if [[ "$client" == "mqttium" && -n "$MQTTIUM_CLIENT_PATH" ]]; then
     path_args=(--client-path "$MQTTIUM_CLIENT_PATH")
