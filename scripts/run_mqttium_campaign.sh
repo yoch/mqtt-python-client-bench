@@ -5,7 +5,7 @@
 #   bash scripts/run_mqttium_campaign.sh
 #
 # Environment:
-#   MQTTIUM_VER=1.0.0rc12          PyPI pin when MQTTIUM_CLIENT_PATH is unset
+#   MQTTIUM_VER=1.0.0rc13          PyPI pin when MQTTIUM_CLIENT_PATH is unset
 #   MQTTIUM_CLIENT_PATH=...        Use this checkout via --client-path (skip PyPI)
 #   MQTTIUM_GIT_REF=branch         Clone yoch/mqttium@ref into MQTTIUM_CLIENT_PATH
 #   MQTTIUM_GIT_SHA=commit         Checkout exact commit (overrides branch tip)
@@ -81,7 +81,7 @@ assert hasattr(AsyncClient, "publish_nowait"), "publish_nowait required"
 print("OK", mqttium.__version__, path)
 PY
 else
-  MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc12}"
+  MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc13}"
   echo "=== ensure mqttium==${MQTTIUM_VER} (site-packages, no editable) ==="
   pip install --force-reinstall --no-cache-dir "mqttium==${MQTTIUM_VER}"
   python - <<'PY'
