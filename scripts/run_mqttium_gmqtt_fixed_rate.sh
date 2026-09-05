@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Equal-offer latency campaign: mqttium vs gmqtt at the same absolute rates.
+# Matched-load latency campaign: mqttium vs gmqtt at the same absolute rates.
 #
-# Complements the fraction-of-own-capacity scenarios (application_rtt_qos1,
-# puback_latency_qos1), which are intra-client only. Same host, interleaved
-# matrix, ABBA, and A/A controls at the mid-high contested point.
+# application_rtt_fixed_rate uses shared_load_fraction × C_common =
+# min(client RTT capacities). puback_latency_fixed_rate uses catalogue
+# target_rate values. Per-client load_fraction scenarios are refused.
 #
 # Usage:
 #   bash scripts/run_mqttium_gmqtt_fixed_rate.sh
@@ -46,7 +46,12 @@ PY
 
 python -m mqtt_client_bench.run broker up
 
-# target_rate is absolute — no load profile required.
+for client in mqttium gmqtt; do
+  echo "=== calibrate ${client} ==="
+  python -m mqtt_client_bench.run calibrate --client "$client" --profile standard \
+    --output "calibrations/${client}-load.json" | tee "logs/calibrate-${client}-matched.log"
+done
+
 MATRIX_SCENARIOS=(
   application_rtt_fixed_rate
   puback_latency_fixed_rate
@@ -59,6 +64,7 @@ for s in "${MATRIX_SCENARIOS[@]}"; do
     --scenario "$s" \
     --profile standard \
     --runs "$MATRIX_RUNS" \
+    --load-profile-dir calibrations \
     --output-dir "$OUT" \
     >"logs/matrix-mqttium-gmqtt-${s}.log" 2>&1 || echo "FAILED matrix ${s}" | tee -a logs/mqttium-gmqtt-fixed-rate.log
 done
@@ -74,29 +80,29 @@ for s in "${MATRIX_SCENARIOS[@]}"; do
     >"logs/abba-gmqtt-mqttium-${s}.log" 2>&1 || echo "FAILED ABBA ${s}" | tee -a logs/mqttium-gmqtt-fixed-rate.log
 done
 
-# A/A at the mid-high contested point.
-# application_rtt_fixed_rate expand order: rate then protocol
-#   4 = 15000 MQTTv311
+# A/A at 75 % of C_common, MQTTv311.
+# application_rtt_fixed_rate expand order: fraction then protocol
+#   4 = 0.75 MQTTv311
 # puback_latency_fixed_rate expand order:
 #   6 = 10000 MQTTv311
-echo "==> A/A mqttium application_rtt_fixed_rate 15k/v311 $(date -Is)"
+echo "==> A/A mqttium application_rtt_fixed_rate 75pct/v311 $(date -Is)"
 python -m mqtt_client_bench.run compare \
   --clients mqttium,mqttium \
   --scenario application_rtt_fixed_rate \
   --profile standard \
   --blocks "$AA_BLOCKS" \
   --variant-index 4 \
-  --output "${OUT}/compare-aa-mqttium-application_rtt_fixed_rate-15k-v311.json" \
+  --output "${OUT}/compare-aa-mqttium-application_rtt_fixed_rate-75-v311.json" \
   >"logs/aa-mqttium-application_rtt_fixed_rate.log" 2>&1 || echo "FAILED A/A mqttium RTT" | tee -a logs/mqttium-gmqtt-fixed-rate.log
 
-echo "==> A/A gmqtt application_rtt_fixed_rate 15k/v311 $(date -Is)"
+echo "==> A/A gmqtt application_rtt_fixed_rate 75pct/v311 $(date -Is)"
 python -m mqtt_client_bench.run compare \
   --clients gmqtt,gmqtt \
   --scenario application_rtt_fixed_rate \
   --profile standard \
   --blocks "$AA_BLOCKS" \
   --variant-index 4 \
-  --output "${OUT}/compare-aa-gmqtt-application_rtt_fixed_rate-15k-v311.json" \
+  --output "${OUT}/compare-aa-gmqtt-application_rtt_fixed_rate-75-v311.json" \
   >"logs/aa-gmqtt-application_rtt_fixed_rate.log" 2>&1 || echo "FAILED A/A gmqtt RTT" | tee -a logs/mqttium-gmqtt-fixed-rate.log
 
 echo "==> A/A mqttium puback_latency_fixed_rate 10k/v311 $(date -Is)"
@@ -120,4 +126,4 @@ python -m mqtt_client_bench.run compare \
   >"logs/aa-gmqtt-puback_latency_fixed_rate.log" 2>&1 || echo "FAILED A/A gmqtt PUBACK" | tee -a logs/mqttium-gmqtt-fixed-rate.log
 
 python scripts/summarize_mqttium_gmqtt.py "$OUT" | tee "${OUT}/summary.json"
-echo "FIXED_RATE_DONE $(date -Is)"
+echo "MATCHED_LOAD_DONE $(date -Is)"

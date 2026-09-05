@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from mqtt_client_bench.report.catalog import intra_client_only  # noqa: E402
 from mqtt_client_bench.report.model import load_results  # noqa: E402
 
 PRIORITY = (
@@ -44,13 +45,15 @@ def matrix_table(root: Path) -> dict:
         g = by_client.get("gmqtt", {}).get(scenario)
         mv = m.median_msgs_per_s if m else None
         gv = g.median_msgs_per_s if g else None
-        ratio = (mv / gv) if mv and gv else None
+        comparable = not intra_client_only(scenario)
+        ratio = (mv / gv) if comparable and mv and gv else None
         rows.append(
             {
                 "scenario": scenario,
                 "mqttium": mv,
                 "gmqtt": gv,
                 "mqttium_over_gmqtt": ratio,
+                "cross_client_comparable": comparable,
             }
         )
     detail = {}
@@ -81,6 +84,8 @@ def abba_table(root: Path) -> list:
                 label_bits.append(str(pt["payload"]))
             if pt.get("load_fraction") is not None:
                 label_bits.append(f"load={pt['load_fraction']}")
+            if pt.get("shared_load_fraction") is not None:
+                label_bits.append(f"shared={pt['shared_load_fraction']}")
             if pt.get("target_rate") is not None:
                 label_bits.append(f"rate={pt['target_rate']}")
             rows.append(
@@ -255,8 +260,10 @@ def main() -> int:
         "notes": [
             "ABBA A=gmqtt B=mqttium: median_ratio > 1 means mqttium faster on throughput.",
             "gmqtt refuses QoS2 and max_inflight; those points stay inconclusive.",
-            "application_rtt_qos1 / puback_latency_qos1 are fraction-of-own-capacity: intra-client only, not matched-load latency.",
-            "application_rtt_fixed_rate / puback_latency_fixed_rate are the equal-offer cross-client latency comparisons.",
+            "Capacity (rtt_capacity, pub qos) is cross-client comparable: same workload, different ceilings.",
+            "application_rtt_qos1 / puback_latency_qos1 are NOT CROSS-CLIENT COMPARABLE (per-client load_fraction).",
+            "application_rtt_fixed_rate uses shared_load_fraction × C_common; puback_latency_fixed_rate uses explicit target_rate.",
+            "Unsupported capabilities (gmqtt QoS2, max_inflight) stay N/A: no ratio, no dummy zero.",
         ],
     }
     print(json.dumps(payload, indent=2))

@@ -17,14 +17,21 @@ from ..shell import hero, page_shell
 
 _PROTOCOLS = """
         <ul class="prose">
-          <li><strong>Capacity</strong> — closed loop with a bounded outstanding window. The primary
-          metric is <code>completed_success</code> inside the measure window.</li>
-          <li><strong>Latency</strong> — open loop. Fractions of <em>that client's own</em> capacity
-          (<code>puback_latency_qos1</code>, <code>application_rtt_qos1</code>) answer how the client
-          behaves near its ceiling; they are not a cross-client comparison. Equal absolute offered
-          rates (<code>puback_latency_fixed_rate</code>,
-          <code>application_rtt_fixed_rate</code>) are the public cross-client latency
-          rankings.</li>
+          <li><strong>Capacity</strong> — closed loop, same configuration for every client.
+          The primary metric is <code>completed_success</code> inside the measure window.
+          Different ceilings are the measurement.</li>
+          <li><strong>Matched-load latency</strong> — the same absolute <code>target_rate</code>
+          for every client, either written on the point or resolved once from
+          <code>shared_load_fraction</code> × <code>C_common = min(capacities)</code>.
+          A client that cannot hold the shared point is <code>offer_limited</code>;
+          the rate is never lowered. <code>puback_latency_fixed_rate</code> and
+          <code>application_rtt_fixed_rate</code>.</li>
+          <li><strong>Relative-load characterization</strong> — fractions of <em>that client's
+          own</em> capacity (<code>puback_latency_qos1</code>,
+          <code>application_rtt_qos1</code>). Marked
+          <strong>NOT CROSS-CLIENT COMPARABLE</strong>. <code>run compare</code> /
+          <code>run matrix</code> refuse them so a per-client
+          <code>load_fraction</code> cannot silently become an A/B ranking.</li>
           <li><strong>Integrity</strong> — bounded rate with a sequence header; counts missing,
           duplicate and out-of-order messages. Not a throughput race.</li>
         </ul>"""

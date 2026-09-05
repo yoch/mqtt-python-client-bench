@@ -3633,24 +3633,15 @@ class DualProtocolTests(unittest.TestCase):
             [1000.0, 2500.0, 5000.0, 10000.0],
         )
         self.assertEqual(
-            sorted({float(p["target_rate"]) for p in rtt}),
-            [5000.0, 10000.0, 15000.0, 20000.0],
+            sorted({float(p["shared_load_fraction"]) for p in rtt}),
+            [0.25, 0.50, 0.75, 0.90],
         )
-        for name, points in (
-            ("puback_latency_fixed_rate", puback),
-            ("application_rtt_fixed_rate", rtt),
-        ):
-            self.assertTrue(all("load_fraction" not in p for p in points), name)
-            self.assertEqual({p["protocol"] for p in points}, {"MQTTv311", "MQTTv5"}, name)
-            self.assertEqual(
-                {(p["protocol"], float(p["target_rate"])) for p in points},
-                {
-                    (protocol, rate)
-                    for protocol in ("MQTTv311", "MQTTv5")
-                    for rate in sorted({float(p["target_rate"]) for p in points})
-                },
-                name,
-            )
+        self.assertTrue(all("load_fraction" not in p for p in puback))
+        self.assertTrue(all("load_fraction" not in p for p in rtt))
+        self.assertTrue(all(p.get("target_rate") is None for p in rtt))
+        self.assertEqual({p["protocol"] for p in puback}, {"MQTTv311", "MQTTv5"})
+        self.assertEqual({p["protocol"] for p in rtt}, {"MQTTv311", "MQTTv5"})
+        for name in ("puback_latency_fixed_rate", "application_rtt_fixed_rate"):
             facts = FACTS[name]
             self.assertFalse(facts.intra_client_only, name)
             self.assertTrue(facts.ranked, name)
@@ -3660,6 +3651,7 @@ class DualProtocolTests(unittest.TestCase):
         self.assertEqual(len(frac), 8)
         self.assertTrue(all("load_fraction" in p for p in frac))
         self.assertTrue(all(p.get("target_rate") is None for p in frac))
+        self.assertTrue(all(p.get("shared_load_fraction") is None for p in frac))
 
     def test_payload_sweep_stays_v311_only(self):
         points = expand_scenario(SCENARIO_BY_NAME["pub_payload_sweep_qos0"], "standard")
@@ -4118,6 +4110,120 @@ class DualProtocolTests(unittest.TestCase):
             self.assertIn("comparable only within the same protocol", index)
 
 
+class CrossClientLoadTests(unittest.TestCase):
+    """A cross-client latency point must offer the same absolute workload."""
+
+    def _rtt_profile(self, capacity: float) -> dict:
+        return {
+            "protocol_capacities": {
+                "MQTTv311": {"rtt_capacity_msgs_per_s": capacity, "capacity_msgs_per_s": 50000},
+                "MQTTv5": {"rtt_capacity_msgs_per_s": capacity * 0.9, "capacity_msgs_per_s": 48000},
+            }
+        }
+
+    def test_per_client_load_fraction_is_refused_in_compare_and_matrix(self):
+        from mqtt_client_bench.harness import assert_cross_client_load_legal, run_matrix
+
+        points = expand_scenario(SCENARIO_BY_NAME["application_rtt_qos1"], "standard")
+        with self.assertRaises(ValueError) as ctx:
+            assert_cross_client_load_legal(points, scenario="application_rtt_qos1")
+        self.assertIn("NOT CROSS-CLIENT COMPARABLE", str(ctx.exception))
+        self.assertIn("load_fraction", str(ctx.exception))
+        with self.assertRaises(ValueError):
+            run_matrix("application_rtt_qos1", ["mqttium", "gmqtt"])
+        with self.assertRaises(ValueError):
+            run_matrix("puback_latency_qos1", ["mqttium", "gmqtt"])
+
+    def test_shared_load_uses_min_capacity_for_both_clients(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point, round_shared_target_rate
+
+        point = {
+            "shared_load_fraction": 0.50,
+            "topology": "application_rtt",
+            "protocol": "MQTTv311",
+        }
+        resolved = resolve_shared_load_point(
+            point,
+            {
+                "mqttium": self._rtt_profile(26002.232),
+                "gmqtt": self._rtt_profile(28994.903),
+            },
+            ["mqttium", "gmqtt"],
+        )
+        self.assertEqual(resolved["shared_capacity_msgs_per_s"], 26002.232)
+        self.assertEqual(resolved["target_rate"], round_shared_target_rate(26002.232 * 0.50))
+        self.assertEqual(resolved["target_rate"], 13001.0)
+        self.assertEqual(resolved["shared_capacities"]["mqttium"], 26002.232)
+        self.assertEqual(resolved["shared_capacities"]["gmqtt"], 28994.903)
+        # A 25/75/90 grid is the same C_common for both sides.
+        for frac, expected in ((0.25, 6501.0), (0.75, 19502.0), (0.90, 23402.0)):
+            got = resolve_shared_load_point(
+                {**point, "shared_load_fraction": frac},
+                {
+                    "mqttium": self._rtt_profile(26002.232),
+                    "gmqtt": self._rtt_profile(28994.903),
+                },
+                ["mqttium", "gmqtt"],
+            )
+            self.assertEqual(got["target_rate"], expected, frac)
+            self.assertEqual(got["target_rate"], resolve_shared_load_point(
+                {**point, "shared_load_fraction": frac},
+                {
+                    "gmqtt": self._rtt_profile(28994.903),
+                    "mqttium": self._rtt_profile(26002.232),
+                },
+                ["gmqtt", "mqttium"],
+            )["target_rate"])
+
+    def test_run_point_does_not_resolve_own_capacity_when_cross_client(self):
+        import tempfile
+
+        from mqtt_client_bench.harness import PER_CLIENT_LOAD_FRACTION_REASON, run_point
+
+        point = {
+            "load_fraction": 0.50,
+            "topology": "application_rtt",
+            "protocol": "MQTTv311",
+            "qos_publish": 1,
+            "qos_subscribe": 1,
+        }
+        profile = self._rtt_profile(26000.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_point(
+                point,
+                client="mqttium",
+                host="127.0.0.1",
+                port=1,
+                tls_port=2,
+                profile="smoke",
+                work_dir=Path(tmp),
+                cpusets={},
+                load_profile=profile,
+                cross_client=True,
+            )
+        self.assertEqual(result["status"], "inconclusive")
+        self.assertIn(PER_CLIENT_LOAD_FRACTION_REASON, result["reasons"])
+        self.assertTrue(result.get("non_comparable"))
+        self.assertIsNone((result.get("point") or {}).get("target_rate"))
+
+    def test_explicit_target_rate_is_legal_cross_client(self):
+        from mqtt_client_bench.harness import assert_cross_client_load_legal
+
+        points = expand_scenario(SCENARIO_BY_NAME["puback_latency_fixed_rate"], "standard")
+        assert_cross_client_load_legal(points, scenario="puback_latency_fixed_rate")
+        rtt = expand_scenario(SCENARIO_BY_NAME["application_rtt_fixed_rate"], "standard")
+        assert_cross_client_load_legal(rtt, scenario="application_rtt_fixed_rate")
+
+    def test_missing_calibration_fails_closed(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point
+
+        resolved = resolve_shared_load_point(
+            {"shared_load_fraction": 0.50, "topology": "application_rtt", "protocol": "MQTTv311"},
+            {"mqttium": self._rtt_profile(26000.0)},
+            ["mqttium", "gmqtt"],
+        )
+        self.assertIsNone(resolved.get("target_rate"))
+        self.assertTrue(any("gmqtt" in e for e in resolved["shared_load_error"]))
 
 
 class _FakeSyncOnLoopAdapter:

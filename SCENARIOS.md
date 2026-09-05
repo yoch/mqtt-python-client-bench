@@ -5,19 +5,24 @@ This document describes **what each scenario measures**, how the bench is wired
 itself is the source of truth: `src/mqtt_client_bench/scenarios.py`; the harness
 lives in `harness.py`.
 
-## Measurement model (three protocols, never mixed)
+## Measurement model (never mix these categories)
 
 | Protocol | Question | How load is applied | Primary metric |
 |---|---|---|---|
-| **Capacity** | What throughput does the client sustain? | Closed loop: bounded `outstanding` window, no pacing | `completed_success` / s within `[T0, T1)` |
-| **Latency** | What latency at X % of *its own* capacity, or at a shared absolute rate? | Open loop at calibrated fractions (`load_fraction`) or at a fixed `target_rate` | Latency distribution (PUBACK or application RTT) |
+| **Capacity** | What ceiling does the client sustain? | Closed loop: same config, bounded `outstanding`, no pacing | `completed_success` / s within `[T0, T1)` |
+| **Matched-load latency** | What latency at the same absolute rate? | Shared `target_rate`, or `shared_load_fraction` × `C_common = min(capacities)` | Latency distribution; completion ratio |
+| **Relative-load** | What latency at X % of *its own* capacity? | Per-client `load_fraction` — **NOT CROSS-CLIENT COMPARABLE** | Intra-client latency curve |
 | **Integrity** | Missing / duplicate / out of order? | Bounded rate + sequence header | Integrity counters (not a throughput ranking) |
 
 Calibration (`calibrate`): for each client and **each supported MQTT protocol**,
 a QoS1 publish capacity and an RTT capacity are measured and stored under
-`protocol_capacities`. Open-loop scenarios derive
-`target_rate = capacity[protocol] × load_fraction`. Without a compatible
-calibration profile (same client / version / protocol), fraction points are refused.
+`protocol_capacities`.
+
+- Relative-load (`load_fraction`): `target_rate = capacity[protocol] × load_fraction`
+  for **that client only**. `run compare` / `run matrix` refuse these points.
+- Matched-load (`shared_load_fraction`): `C_common = min(capacities)` across the
+  clients in the run, then the same `target_rate = round(C_common × fraction)`
+  for every client. Without a compatible calibration the point is inconclusive.
 
 Timing profiles (`PROFILE_SPECS`):
 
@@ -230,21 +235,24 @@ Mosquitto 2.1 is single-threaded: do not widen the broker cpuset.
 - **Goal**: open-loop application RTT latency at fractions of **that** RTT capacity.
 - **Topology**: `application_rtt` · fractions `0.50 / 0.75 / 0.90 / 1.00` · tag `dual_protocol`.
 - **Requires**: end-to-end `TCP_NODELAY` (broker + client); otherwise a Nagle artefact of ~84 ms/pair.
-- **Reading**: intra-client only. The 0.50 / 0.75 offered rates already differ
-  by the `rtt_capacity_qos1` ratio, so a throughput or p50 gap here is not
-  proof of matched-load latency (same trap as mqttium PR #180).
+- **Reading**: **NOT CROSS-CLIENT COMPARABLE.** Homogeneous product loop (same
+  library as initiator and responder). `run compare` / `run matrix` refuse this
+  scenario so a per-client `load_fraction` cannot become an A/B ranking.
 - **Refusals**: `awscrt` → `not_implemented:tcp_nodelay`.
 
 ### `application_rtt_fixed_rate`
 
-- **Goal**: application RTT latency at **absolute** offered pair rates, identical for every client.
-- **Topology**: `application_rtt` · rates `5,000 / 10,000 / 15,000 / 20,000` pairs/s · tag `dual_protocol`.
-- **Requires**: nothing — the rate is absolute, so no calibration is involved.
+- **Goal**: matched-load application RTT: one shared grid from
+  `C_common = min(client RTT capacities)`, then 25 / 50 / 75 / 90 % of that
+  ceiling. Every client is offered the same absolute pair rate.
+- **Topology**: `application_rtt` · `shared_load_fraction` `0.25 / 0.50 / 0.75 / 0.90` · tag `dual_protocol`.
+- **Requires**: per-client RTT calibrations. A single shared `--load-profile` is refused.
 - **Reading**: this is the scenario for comparing application RTT *between*
-  clients. Distinct from `rtt_capacity_qos1` (closed-loop ceiling) and from
-  `application_rtt_qos1` (fraction of own capacity).
-- **Refusals**: a client that cannot sustain a rate is `offer_limited`.
-  `awscrt` → `not_implemented:tcp_nodelay`.
+  clients. Homogeneous product loop (two instances of the same library).
+  Distinct from `rtt_capacity_qos1` (ceiling) and `application_rtt_qos1`
+  (NOT CROSS-CLIENT COMPARABLE). If a client cannot hold a shared point, the
+  point is `offer_limited`; the rate is not lowered.
+- **Refusals**: `awscrt` → `not_implemented:tcp_nodelay`.
 
 ---
 
