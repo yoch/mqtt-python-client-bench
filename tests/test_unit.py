@@ -2202,6 +2202,9 @@ class FairnessGateTests(unittest.TestCase):
         # Fraction-of-own-capacity latency is an intra-client question.
         self.assertIn("puback_latency_qos1", _CHART_EXCLUDED_SCENARIOS)
         self.assertIn("application_rtt_qos1", _CHART_EXCLUDED_SCENARIOS)
+        # Equal-offer latency is the public cross-client ranking.
+        self.assertNotIn("puback_latency_fixed_rate", _CHART_EXCLUDED_SCENARIOS)
+        self.assertNotIn("application_rtt_fixed_rate", _CHART_EXCLUDED_SCENARIOS)
 
     def test_cost_per_message_uses_worker_window_cpu(self):
         # CPU must come from the workers' own measure window. Telemetry samples
@@ -3617,6 +3620,46 @@ class DualProtocolTests(unittest.TestCase):
                 },
                 name,
             )
+
+    def test_fixed_rate_latency_is_absolute_and_dual(self):
+        from mqtt_client_bench.report.catalog import FACTS
+
+        puback = expand_scenario(SCENARIO_BY_NAME["puback_latency_fixed_rate"], "standard")
+        rtt = expand_scenario(SCENARIO_BY_NAME["application_rtt_fixed_rate"], "standard")
+        self.assertEqual(len(puback), 8)
+        self.assertEqual(len(rtt), 8)
+        self.assertEqual(
+            sorted({float(p["target_rate"]) for p in puback}),
+            [1000.0, 2500.0, 5000.0, 10000.0],
+        )
+        self.assertEqual(
+            sorted({float(p["target_rate"]) for p in rtt}),
+            [5000.0, 10000.0, 15000.0, 20000.0],
+        )
+        for name, points in (
+            ("puback_latency_fixed_rate", puback),
+            ("application_rtt_fixed_rate", rtt),
+        ):
+            self.assertTrue(all("load_fraction" not in p for p in points), name)
+            self.assertEqual({p["protocol"] for p in points}, {"MQTTv311", "MQTTv5"}, name)
+            self.assertEqual(
+                {(p["protocol"], float(p["target_rate"])) for p in points},
+                {
+                    (protocol, rate)
+                    for protocol in ("MQTTv311", "MQTTv5")
+                    for rate in sorted({float(p["target_rate"]) for p in points})
+                },
+                name,
+            )
+            facts = FACTS[name]
+            self.assertFalse(facts.intra_client_only, name)
+            self.assertTrue(facts.ranked, name)
+            self.assertEqual(facts.direction, "lower", name)
+        # Existing fraction contracts must stay load_fraction-only.
+        frac = expand_scenario(SCENARIO_BY_NAME["application_rtt_qos1"], "standard")
+        self.assertEqual(len(frac), 8)
+        self.assertTrue(all("load_fraction" in p for p in frac))
+        self.assertTrue(all(p.get("target_rate") is None for p in frac))
 
     def test_payload_sweep_stays_v311_only(self):
         points = expand_scenario(SCENARIO_BY_NAME["pub_payload_sweep_qos0"], "standard")

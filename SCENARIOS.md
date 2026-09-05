@@ -10,7 +10,7 @@ lives in `harness.py`.
 | Protocol | Question | How load is applied | Primary metric |
 |---|---|---|---|
 | **Capacity** | What throughput does the client sustain? | Closed loop: bounded `outstanding` window, no pacing | `completed_success` / s within `[T0, T1)` |
-| **Latency** | What latency at X % of *its own* capacity? | Open loop at calibrated fractions (`load_fraction`) | Latency distribution (PUBACK or application RTT) |
+| **Latency** | What latency at X % of *its own* capacity, or at a shared absolute rate? | Open loop at calibrated fractions (`load_fraction`) or at a fixed `target_rate` | Latency distribution (PUBACK or application RTT) |
 | **Integrity** | Missing / duplicate / out of order? | Bounded rate + sequence header | Integrity counters (not a throughput ranking) |
 
 Calibration (`calibrate`): for each client and **each supported MQTT protocol**,
@@ -31,7 +31,7 @@ Timing profiles (`PROFILE_SPECS`):
 A minimal **core** subset is expanded into both `MQTTv311` **and** `MQTTv5`:
 
 - `pub_qos_sweep_telemetry`, `sub_exact_telemetry`
-- `puback_latency_qos1`, `rtt_capacity_qos1`, `application_rtt_qos1`
+- `puback_latency_qos1`, `puback_latency_fixed_rate`, `rtt_capacity_qos1`, `application_rtt_qos1`, `application_rtt_fixed_rate`
 
 Rankings and the HTML matrix use `scenario · protocol` rows — **never** a
 cross-protocol comparison. `aiomqtt3` (v5 only) is compared with peers on the
@@ -230,7 +230,21 @@ Mosquitto 2.1 is single-threaded: do not widen the broker cpuset.
 - **Goal**: open-loop application RTT latency at fractions of **that** RTT capacity.
 - **Topology**: `application_rtt` · fractions `0.50 / 0.75 / 0.90 / 1.00` · tag `dual_protocol`.
 - **Requires**: end-to-end `TCP_NODELAY` (broker + client); otherwise a Nagle artefact of ~84 ms/pair.
+- **Reading**: intra-client only. The 0.50 / 0.75 offered rates already differ
+  by the `rtt_capacity_qos1` ratio, so a throughput or p50 gap here is not
+  proof of matched-load latency (same trap as mqttium PR #180).
 - **Refusals**: `awscrt` → `not_implemented:tcp_nodelay`.
+
+### `application_rtt_fixed_rate`
+
+- **Goal**: application RTT latency at **absolute** offered pair rates, identical for every client.
+- **Topology**: `application_rtt` · rates `5,000 / 10,000 / 15,000 / 20,000` pairs/s · tag `dual_protocol`.
+- **Requires**: nothing — the rate is absolute, so no calibration is involved.
+- **Reading**: this is the scenario for comparing application RTT *between*
+  clients. Distinct from `rtt_capacity_qos1` (closed-loop ceiling) and from
+  `application_rtt_qos1` (fraction of own capacity).
+- **Refusals**: a client that cannot sustain a rate is `offer_limited`.
+  `awscrt` → `not_implemented:tcp_nodelay`.
 
 ---
 

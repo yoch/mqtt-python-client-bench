@@ -67,7 +67,8 @@ Wrappers of Paho/gmqtt (`fastapi-mqtt`, `jmqtt`, …) are intentionally excluded
 | Dual-protocol core (pub qos sweep, sub_exact, puback, RTT) | clients at the **same MQTT protocol** | Expanded as `MQTTv311` and `MQTTv5` rows; never mix protocols in a ranking cell |
 | Other publisher capacity / QoS0–1 | stable clients with matching caps | still MQTTv311-only; QoS2 excluded for gmqtt and aiomqtt3 |
 | `pub_qos1_inflight` | paho, aiomqtt | requires `max_inflight` |
-| Application RTT | same protocol + RTT calibration | fractions of that protocol’s `rtt_capacity`; awscrt refused (no `TCP_NODELAY`) |
+| Application RTT fractions | same protocol, **intra-client only** | `application_rtt_qos1` paces each client at a share of *its* `rtt_capacity`; not a matched-load ranking |
+| Application RTT / PUBACK fixed rate | same protocol + same absolute offer | `application_rtt_fixed_rate` and `puback_latency_fixed_rate`; awscrt refused on RTT (no `TCP_NODELAY`) |
 | `sub_callback_matching` | paho, mqttium, mqttium-compat | native `message_callback_add`; peer-grouped by `io_model` |
 | Fleet idle | sync clients only | async_bridged refused (1 loop/thread per conn) |
 | MQTT v5 properties | paho, gmqtt, aiomqtt, awscrt, zmqtt | amqtt / aiomqtt3 constraints apply |
@@ -328,8 +329,9 @@ docstrings, scenario descriptions, commit messages and report output.
   headroom. Doing so produced a published claim that one client had a 2.95x
   latency floor; measured at a matched absolute rate the ratio was 1.24x, and
   the entire difference was the offered rate. For cross-client latency use
-  `puback_latency_fixed_rate`, which offers every client the same absolute
-  rates and lets a client that cannot sustain one come back inconclusive.
+  `puback_latency_fixed_rate` and `application_rtt_fixed_rate`, which offer
+  every client the same absolute rates and let a client that cannot sustain
+  one come back inconclusive.
 - Core `sub_*` QoS0 exact-topic capacity offers **200k msgs/s** via paced
   `mqtt_hammer --rate 200000`. emqtt-bench cannot hold 150k on one loadgen
   core (`-I` is milliseconds; 150×`I=1` tops out around 100k `$SYS received`

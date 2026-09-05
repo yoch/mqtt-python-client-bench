@@ -79,8 +79,9 @@ _CHART_EXCLUDED_SCENARIOS = frozenset(
         "retained_bootstrap",
         "mqttv5_flow_control",
         # Fraction-of-own-capacity latency is an intra-client question, not a
-        # cross-client ranking. The public latency comparison is
-        # puback_latency_fixed_rate (equal absolute offered rates).
+        # cross-client ranking. The public latency comparisons are
+        # puback_latency_fixed_rate and application_rtt_fixed_rate (equal
+        # absolute offered rates).
         "puback_latency_qos1",
         "application_rtt_qos1",
     }
