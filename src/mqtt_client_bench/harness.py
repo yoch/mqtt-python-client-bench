@@ -928,6 +928,89 @@ def validate_run(
     }
 
 
+# Cross-client latency may only offer the same absolute workload to every
+# client. A per-client load_fraction is intra-client characterization: useful,
+# never a ranking. shared_load_fraction is resolved once from
+# C_common = min(client capacities) so A and B see the same target_rate.
+PER_CLIENT_LOAD_FRACTION_REASON = "per_client_load_fraction_not_cross_client"
+SHARED_LOAD_UNRESOLVED_REASON = "shared_load_fraction_unresolved"
+
+
+def uses_per_client_load_fraction(point: dict) -> bool:
+    """True when the point would resolve a different rate per client's capacity."""
+    return (
+        point.get("load_fraction") is not None
+        and point.get("shared_load_fraction") is None
+        and point.get("target_rate") is None
+    )
+
+
+def uses_shared_load_fraction(point: dict) -> bool:
+    return point.get("shared_load_fraction") is not None
+
+
+def assert_cross_client_load_legal(points: List[dict], *, scenario: str) -> None:
+    """Refuse a compare/matrix that would silently pair unequal offered rates."""
+    if any(uses_per_client_load_fraction(p) for p in points):
+        raise ValueError(
+            f"{scenario} uses per-client load_fraction; that is intra-client "
+            "characterization (NOT CROSS-CLIENT COMPARABLE). Cross-client "
+            "latency must use target_rate or shared_load_fraction so every "
+            "client is offered the same absolute workload."
+        )
+
+
+def round_shared_target_rate(rate: float) -> float:
+    """Deterministic integer msgs/s so A and B cannot drift by rounding."""
+    return float(round(float(rate)))
+
+
+def resolve_shared_load_point(
+    point: dict,
+    calibrations: Dict[str, dict],
+    clients: List[str],
+) -> dict:
+    """Stamp one shared ``target_rate`` from ``C_common = min(capacities)``.
+
+    Missing or non-positive capacities are recorded on the point; ``run_point``
+    then fails closed instead of inventing a rate. The caller's point is not
+    mutated.
+    """
+    resolved = dict(point)
+    frac = resolved.get("shared_load_fraction")
+    if frac is None:
+        return resolved
+    kind = "rtt" if resolved.get("topology") == "application_rtt" else "publish"
+    protocol = str(resolved.get("protocol", "MQTTv311"))
+    unique_clients = list(dict.fromkeys(clients))
+    per_client: Dict[str, float] = {}
+    errors: List[str] = []
+    for name in unique_clients:
+        profile = calibrations.get(name)
+        if not profile:
+            errors.append(f"shared_load_missing_calibration:{name}")
+            continue
+        try:
+            cap = capacity_from_load_profile(profile, protocol=protocol, kind=kind)
+        except ValueError as exc:
+            errors.append(f"{exc}:{name}")
+            continue
+        if cap is None or float(cap) <= 0:
+            errors.append(f"shared_load_missing_capacity:{name}:{protocol}:{kind}")
+            continue
+        per_client[name] = float(cap)
+    if errors or len(per_client) != len(unique_clients):
+        resolved["shared_load_error"] = errors or ["shared_load_incomplete_capacities"]
+        return resolved
+    c_common = min(per_client.values())
+    resolved["target_rate"] = round_shared_target_rate(c_common * float(frac))
+    resolved["shared_capacity_msgs_per_s"] = c_common
+    resolved["shared_capacities"] = per_client
+    resolved["calibration_kind"] = kind
+    resolved["calibration_protocol"] = protocol
+    return resolved
+
+
 def run_point(
     point: dict,
     *,
@@ -942,6 +1025,7 @@ def run_point(
     load_profile: Optional[dict] = None,
     host_profile: Optional[dict] = None,
     managed_broker: bool = True,
+    cross_client: bool = False,
 ) -> dict:
     run_id = make_run_id()
     point = dict(point)
@@ -966,7 +1050,43 @@ def run_point(
             "workers": [],
         }
 
-    if load_profile and point.get("load_fraction") is not None:
+    if cross_client:
+        # Cross-client latency must not resolve load_fraction against this
+        # client's own capacity: that silently offers A and B different rates.
+        if uses_per_client_load_fraction(point):
+            return {
+                "schema_version": 1,
+                "harness_fingerprint": HARNESS_FINGERPRINT,
+                "run_id": run_id,
+                "started_at": started_at,
+                "finished_at": _utc_now(),
+                "host_state": host_state,
+                "point": point,
+                "client": client,
+                "client_path": client_path,
+                "status": "inconclusive",
+                "reasons": [PER_CLIENT_LOAD_FRACTION_REASON],
+                "non_comparable": True,
+                "workers": [],
+            }
+        if point.get("shared_load_fraction") is not None and not point.get("target_rate"):
+            reasons = list(point.get("shared_load_error") or [SHARED_LOAD_UNRESOLVED_REASON])
+            return {
+                "schema_version": 1,
+                "harness_fingerprint": HARNESS_FINGERPRINT,
+                "run_id": run_id,
+                "started_at": started_at,
+                "finished_at": _utc_now(),
+                "host_state": host_state,
+                "point": point,
+                "client": client,
+                "client_path": client_path,
+                "status": "inconclusive",
+                "reasons": reasons,
+                "non_comparable": True,
+                "workers": [],
+            }
+    elif load_profile and point.get("load_fraction") is not None:
         capacity_kind = "rtt" if point.get("topology") == "application_rtt" else "publish"
         protocol = str(point.get("protocol", "MQTTv311"))
         try:
@@ -1952,6 +2072,7 @@ def run_matrix(
         # Used by the pre-launch validation, which needs to prove every role
         # still runs without paying for a full sweep of variants.
         points = [points[variant_index]]
+    assert_cross_client_load_legal(points, scenario=name)
     if network:
         for p in points:
             p["network"] = network
@@ -1993,7 +2114,20 @@ def run_matrix(
     per_client: Dict[str, List[dict]] = {c: [] for c in clients}
     with tempfile.TemporaryDirectory(prefix="mqtt-bench-matrix-") as tmp:
         work_dir = Path(tmp)
+        if any(uses_shared_load_fraction(p) for p in ordered_points):
+            for client in clients:
+                if profiles.get(client) is None:
+                    cal_path = str(work_dir / f"cal-{client}.json")
+                    profiles[client] = calibrate(
+                        cal_path,
+                        client=client,
+                        client_path=client_paths.get(client),
+                        profile="standard" if profile == "standard" else profile,
+                    )
         for point in ordered_points:
+            point = resolve_shared_load_point(
+                point, {c: p for c, p in profiles.items() if p}, clients
+            )
             runs_by_client: Dict[str, List[dict]] = {c: [] for c in clients}
             for run_idx in range(runs):
                 # Rotate so position within the point is counterbalanced.
@@ -2014,6 +2148,7 @@ def run_matrix(
                         load_profile=profiles.get(client),
                         host_profile=host_profile,
                         managed_broker=managed,
+                        cross_client=True,
                     )
                     result["run_index"] = run_idx
                     result["matrix_slot"] = slot
@@ -2518,6 +2653,7 @@ def compare_clients(
     points = expand_scenario(scenario_obj, profile)
     if variant_index is not None:
         points = [points[variant_index]]
+    assert_cross_client_load_legal(points, scenario=scenario)
 
     host_profile = resolve_host_profile(host_profile_path)
     if host_profile is not None:
@@ -2531,9 +2667,26 @@ def compare_clients(
         # it for the whole matrix prevents each fraction from silently getting
         # a different gmqtt baseline and guarantees protocol×client alignment.
         calibrations = {}
-        if any(point.get("load_fraction") is not None for point in points):
+        pair = [baseline_client, candidate_client]
+        if any(uses_shared_load_fraction(point) for point in points):
+            # C_common is min of each client's own capacity. A single shared
+            # --load-profile would silently pin both sides to one library.
+            if shared_load_profile is not None:
+                raise ValueError(
+                    "shared_load_fraction cannot use a single --load-profile; "
+                    "C_common is min of each client's own calibration"
+                )
+            for name in pair:
+                cal_path = str(work_dir / f"cal-{name}.json")
+                calibrations[name] = calibrate(
+                    cal_path,
+                    client=name,
+                    client_path=client_paths.get(name),
+                    profile="standard" if profile == "standard" else profile,
+                )
+        elif any(point.get("load_fraction") is not None for point in points):
             if shared_load_profile is None:
-                for name in (baseline_client, candidate_client):
+                for name in pair:
                     cal_path = str(work_dir / f"cal-{name}.json")
                     calibrations[name] = calibrate(
                         cal_path,
@@ -2545,6 +2698,7 @@ def compare_clients(
                 calibrations[baseline_client] = shared_load_profile
                 calibrations[candidate_client] = shared_load_profile
         for point_idx, point in enumerate(points):
+            point = resolve_shared_load_point(point, calibrations, pair)
             baseline_rates = []
             candidate_rates = []
             slot_rates: List[Optional[float]] = []
@@ -2566,6 +2720,7 @@ def compare_clients(
                     load_profile=calibrations.get(name),
                     host_profile=host_profile,
                     managed_broker=True,
+                    cross_client=True,
                 )
                 result["ab_label"] = label
                 result["slot"] = slot

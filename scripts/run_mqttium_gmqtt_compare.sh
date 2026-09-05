@@ -65,9 +65,7 @@ MATRIX_SCENARIOS=(
   burst_recovery
   e2e_integrity
   rtt_capacity_qos1
-  puback_latency_qos1
   puback_latency_fixed_rate
-  application_rtt_qos1
   application_rtt_fixed_rate
 )
 
@@ -83,15 +81,14 @@ for s in "${MATRIX_SCENARIOS[@]}"; do
     >"logs/matrix-mqttium-gmqtt-${s}.log" 2>&1 || echo "FAILED matrix ${s}" | tee -a logs/mqttium-gmqtt-compare.log
 done
 
-# ABBA: do not pass a shared --load-profile. compare_clients calibrates each
-# client so latency fractions stay on that client's own capacity.
+# ABBA: do not pass a shared --load-profile. Matched-load latency calibrates
+# each client, then offers C_common = min(capacities) × shared_load_fraction.
+# Per-client load_fraction scenarios are refused by the harness.
 ABBA_SCENARIOS=(
   pub_qos_sweep_telemetry
   pub_payload_sweep_qos0
   rtt_capacity_qos1
-  application_rtt_qos1
   application_rtt_fixed_rate
-  puback_latency_qos1
   puback_latency_fixed_rate
 )
 

@@ -354,6 +354,8 @@ _LABEL_AXES = (
     ("topology", "topo"),
     ("inflight", "inflight"),
     ("load_fraction", "load"),
+    ("shared_load_fraction", "shared"),
+    ("target_rate", "rate"),
     ("subscription", "sub"),
     ("topic_topology", "topics"),
     ("callback_filters", "filters"),

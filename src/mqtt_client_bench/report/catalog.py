@@ -234,7 +234,8 @@ FACTS: Dict[str, ScenarioFacts] = {
             "Fractions of each client's own RTT capacity — intra-client only, exactly as for "
             "puback_latency_qos1. The 0.50 / 0.75 offered rates already differ by the "
             "rtt_capacity ratio, so a throughput or p50 gap here is not proof of matched-load "
-            "latency. application_rtt_fixed_rate is the cross-client comparison. Needs "
+            "latency. NOT CROSS-CLIENT COMPARABLE. application_rtt_fixed_rate resolves "
+            "shared_load_fraction once from C_common = min(client RTT capacities). Needs "
             "end-to-end TCP_NODELAY; without it the pair time plateaus around 84 ms on Nagle "
             "rather than on the library.",
         ),
@@ -244,13 +245,15 @@ FACTS: Dict[str, ScenarioFacts] = {
         unit="ms",
         direction=LOWER,
         axis_kind=ORDINAL,
-        axis_label="offered pair rate",
-        question="At the same absolute offered pair rate, whose application RTT comes back soonest?",
+        axis_label="shared fraction of C_common",
+        question="At the same absolute pair rate (a shared fraction of min capacity), whose RTT comes back soonest?",
         caveats=(
-            "The public cross-client application-RTT ranking: every client is offered the same "
-            "absolute pair rate, so the comparison is fair. A client that cannot sustain a rate "
-            "comes back offer_limited rather than slow. Distinct from rtt_capacity_qos1 "
-            "(closed-loop ceiling) and from application_rtt_qos1 (fraction of own capacity).",
+            "Matched-load: C_common = min(client RTT capacities), then 25/50/75/90 % of that "
+            "one ceiling, the same target_rate for every client. Homogeneous product loop "
+            "(initiator and responder are the same library). A client that cannot hold a "
+            "shared point is offer_limited; the offered rate is never lowered to rescue it. "
+            "Distinct from rtt_capacity_qos1 (ceiling) and application_rtt_qos1 "
+            "(NOT CROSS-CLIENT COMPARABLE).",
         ),
     ),
     # --- suite full: catalogued, not yet measured -------------------------
@@ -396,6 +399,7 @@ ORDINAL_AXES = {
     "payload": payload_order,
     "inflight": lambda v: float(v),
     "load_fraction": lambda v: float(v),
+    "shared_load_fraction": lambda v: float(v),
     "target_rate": lambda v: float(v),
     "callback_filters": lambda v: float(v),
     "subscription_count": lambda v: float(v),
