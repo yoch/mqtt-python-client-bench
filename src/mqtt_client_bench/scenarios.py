@@ -364,6 +364,30 @@ SCENARIOS: List[Scenario] = [
         subscribers=1,
         variants=tuple({"load_fraction": f} for f in (0.50, 0.75, 0.90, 1.00)),
     ),
+    Scenario(
+        # Same trap as puback_latency_qos1 / mqttium PR #180: application_rtt_qos1
+        # paces each client at a fraction of ITS OWN RTT capacity, so the 0.50
+        # and 0.75 offered rates already differ by the rtt_capacity ratio. That
+        # answers an intra-client question; it is not a matched-load latency
+        # comparison. This scenario offers every client the same absolute pair
+        # rates. A client that cannot sustain one comes back offer_limited.
+        name="application_rtt_fixed_rate",
+        suite="core",
+        tags=("representative", "dual_protocol"),
+        topology="application_rtt",
+        description=(
+            "Open-loop application RTT latency at absolute offered pair rates, "
+            "identical for every client. Same library drives initiator and "
+            "responder (homogeneous product loop)."
+        ),
+        qos_publish=1,
+        qos_subscribe=1,
+        payload="telemetry256",
+        cadence="loaded75",
+        outstanding=32,
+        subscribers=1,
+        variants=tuple({"target_rate": r} for r in (5000.0, 10000.0, 15000.0, 20000.0)),
+    ),
     # --- full suite ---
     Scenario(
         name="payload_stress",

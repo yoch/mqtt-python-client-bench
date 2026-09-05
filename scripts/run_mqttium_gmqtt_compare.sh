@@ -66,7 +66,9 @@ MATRIX_SCENARIOS=(
   e2e_integrity
   rtt_capacity_qos1
   puback_latency_qos1
+  puback_latency_fixed_rate
   application_rtt_qos1
+  application_rtt_fixed_rate
 )
 
 for s in "${MATRIX_SCENARIOS[@]}"; do
@@ -88,7 +90,9 @@ ABBA_SCENARIOS=(
   pub_payload_sweep_qos0
   rtt_capacity_qos1
   application_rtt_qos1
+  application_rtt_fixed_rate
   puback_latency_qos1
+  puback_latency_fixed_rate
 )
 
 for s in "${ABBA_SCENARIOS[@]}"; do

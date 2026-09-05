@@ -194,7 +194,7 @@ FACTS: Dict[str, ScenarioFacts] = {
             "being held to the same load. Reading these percentiles across clients penalises "
             "the ones with headroom: a published 2.95x latency gap collapsed to 1.24x once "
             "the offered rate was matched. puback_latency_fixed_rate is the cross-client "
-            "comparison; it has not been run yet.",
+            "PUBACK comparison (equal absolute offered rates).",
         ),
     ),
     "puback_latency_fixed_rate": ScenarioFacts(
@@ -232,8 +232,25 @@ FACTS: Dict[str, ScenarioFacts] = {
         intra_client_only=True,
         caveats=(
             "Fractions of each client's own RTT capacity — intra-client only, exactly as for "
-            "puback_latency_qos1. Needs end-to-end TCP_NODELAY; without it the pair time "
-            "plateaus around 84 ms on Nagle rather than on the library.",
+            "puback_latency_qos1. The 0.50 / 0.75 offered rates already differ by the "
+            "rtt_capacity ratio, so a throughput or p50 gap here is not proof of matched-load "
+            "latency. application_rtt_fixed_rate is the cross-client comparison. Needs "
+            "end-to-end TCP_NODELAY; without it the pair time plateaus around 84 ms on Nagle "
+            "rather than on the library.",
+        ),
+    ),
+    "application_rtt_fixed_rate": ScenarioFacts(
+        metric="application round-trip latency",
+        unit="ms",
+        direction=LOWER,
+        axis_kind=ORDINAL,
+        axis_label="offered pair rate",
+        question="At the same absolute offered pair rate, whose application RTT comes back soonest?",
+        caveats=(
+            "The public cross-client application-RTT ranking: every client is offered the same "
+            "absolute pair rate, so the comparison is fair. A client that cannot sustain a rate "
+            "comes back offer_limited rather than slow. Distinct from rtt_capacity_qos1 "
+            "(closed-loop ceiling) and from application_rtt_qos1 (fraction of own capacity).",
         ),
     ),
     # --- suite full: catalogued, not yet measured -------------------------

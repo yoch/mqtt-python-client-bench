@@ -22,8 +22,9 @@ _PROTOCOLS = """
           <li><strong>Latency</strong> — open loop. Fractions of <em>that client's own</em> capacity
           (<code>puback_latency_qos1</code>, <code>application_rtt_qos1</code>) answer how the client
           behaves near its ceiling; they are not a cross-client comparison. Equal absolute offered
-          rates (<code>puback_latency_fixed_rate</code>) are the public cross-client latency
-          ranking.</li>
+          rates (<code>puback_latency_fixed_rate</code>,
+          <code>application_rtt_fixed_rate</code>) are the public cross-client latency
+          rankings.</li>
           <li><strong>Integrity</strong> — bounded rate with a sequence header; counts missing,
           duplicate and out-of-order messages. Not a throughput race.</li>
         </ul>"""
