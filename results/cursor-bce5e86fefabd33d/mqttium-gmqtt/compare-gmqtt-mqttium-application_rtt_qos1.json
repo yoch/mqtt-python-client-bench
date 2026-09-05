@@ -1,0 +1,4031 @@
+{
+  "baseline_client": "gmqtt",
+  "baseline_identity": {
+    "adapter": "gmqtt",
+    "client": "gmqtt",
+    "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+    "client_version": "0.7.0",
+    "completion_mechanism": "callback",
+    "implementation_language": "python",
+    "io_model": "asyncio_bridged",
+    "private_api": {
+      "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+      "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+      "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+    },
+    "stability": "stable",
+    "synthetic_mids": true
+  },
+  "baseline_rates": [
+    14619.437149805191,
+    14620.326001236494,
+    14620.341195246814,
+    14620.320501557022,
+    14620.344779637086,
+    14620.32737675981,
+    14620.340009787933,
+    14617.519222090528,
+    14620.33044446228,
+    14620.256997330933,
+    14618.65672110381,
+    14620.340837041911
+  ],
+  "broker": {
+    "certs": {
+      "ca_crt": "/workspace/certs/ca.crt",
+      "fingerprint": "sha256 Fingerprint=7C:22:C7:DA:18:F8:67:9F:41:A6:DA:E7:E3:38:D6:09:74:8E:07:C7:97:B1:B9:E1:6B:7B:F9:53:09:BF:C5:1E",
+      "server_crt": "/workspace/certs/server.crt",
+      "server_key": "/workspace/certs/server.key"
+    },
+    "config_hash": "9ef0ddcbd81a7e78c862228ed7ad08ae490c5a10fed61b12def800b5679f4aab",
+    "container_name": "workspace-mosquitto-1",
+    "cpuset": "1",
+    "cpuset_observed": "1",
+    "host": "127.0.0.1",
+    "image": "eclipse-mosquitto:2.1.2-alpine@sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797",
+    "image_digest": "eclipse-mosquitto@sha256:6f8d8a947c506f8a2290ec65cd4bd2bc7cb4d43fb5f6271f861cb013e2ef9797",
+    "managed_broker": true,
+    "port": 11883,
+    "tls_port": 11884
+  },
+  "candidate_client": "mqttium",
+  "candidate_identity": {
+    "adapter": "mqttium",
+    "client": "mqttium",
+    "client_module": "/workspace/.venv/lib/python3.12/site-packages/mqttium/__init__.py",
+    "client_version": "1.0.0rc13",
+    "completion_mechanism": "callback",
+    "display_note": "MQTTium AsyncClient (https://pypi.org/project/mqttium/) \u2014 async-native MQTT 3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop (PyPI \u22651.0.0rc11). Native ``message_callback_add`` (rc11). Ranked under --suite experimental. Paho VERSION2 fa\u00e7ade is `mqttium-compat`.",
+    "implementation_language": "python",
+    "io_model": "asyncio_bridged",
+    "private_api": {
+      "AsyncClient.on_publish is None / _direct_qos0_ready": "direct QoS0 transport write is only taken while the library on_publish is unset; the adapter fires the bench callback itself"
+    },
+    "qos0_boundary": "queue",
+    "stability": "experimental",
+    "synthetic_mids": true
+  },
+  "candidate_rates": [
+    13012.196267191946,
+    13012.193967327878,
+    13010.184698643125,
+    13011.525309510389,
+    13011.909906998688,
+    13008.911770997787,
+    13011.946974145078,
+    13010.31548645368,
+    13012.064934026286,
+    13011.743090376047,
+    13008.774774564969,
+    13010.615323538897
+  ],
+  "cooldown_s": 5.0,
+  "cpusets": {
+    "broker": "1",
+    "loadgen": "2",
+    "orch": "3",
+    "sut": "0"
+  },
+  "environment": {
+    "client_versions": {
+      "aiomqtt": "2.5.1",
+      "aiomqtt3": null,
+      "amqtt": "0.12.0",
+      "awscrt": "0.36.2",
+      "gmqtt": "0.7.0",
+      "mqttium": "1.0.0rc13",
+      "paho": "2.1.0",
+      "zmqtt": "0.2.1"
+    },
+    "cpu_count": 4,
+    "cpu_model": "Intel(R) Xeon(R) Processor",
+    "hostname": "cursor",
+    "loadavg": [
+      1.5888671875,
+      1.6064453125,
+      1.5673828125
+    ],
+    "machine": "x86_64",
+    "physical_cpu_groups": [
+      [
+        0
+      ],
+      [
+        1
+      ],
+      [
+        2
+      ],
+      [
+        3
+      ]
+    ],
+    "platform": "Linux-6.12.94+-x86_64-with-glibc2.39",
+    "python": "3.12.3",
+    "scaling_governor": null
+  },
+  "harness_fingerprint": "848b1afd8f0415e5",
+  "loadgen": {
+    "image": "emqx/emqtt-bench:latest@sha256:ae7f2d56cd49b14824c835140c808b093c5e3f2defb3a29b34b17560feb456cd",
+    "image_digest": "emqx/emqtt-bench@sha256:ae7f2d56cd49b14824c835140c808b093c5e3f2defb3a29b34b17560feb456cd"
+  },
+  "order": [
+    "A",
+    "B",
+    "B",
+    "A",
+    "A",
+    "B",
+    "B",
+    "A",
+    "A",
+    "B",
+    "B",
+    "A",
+    "A",
+    "B",
+    "B",
+    "A",
+    "A",
+    "B",
+    "B",
+    "A",
+    "A",
+    "B",
+    "B",
+    "A"
+  ],
+  "point": null,
+  "points": [
+    {
+      "baseline_rates": [
+        14619.437149805191,
+        14620.326001236494,
+        14620.341195246814,
+        14620.320501557022,
+        14620.344779637086,
+        14620.32737675981,
+        14620.340009787933,
+        14617.519222090528,
+        14620.33044446228,
+        14620.256997330933,
+        14618.65672110381,
+        14620.340837041911
+      ],
+      "block_ratios": [
+        0.8900612133006276,
+        0.8898700064241121,
+        0.889782522358323,
+        0.8900494871107825,
+        0.8899804629119354,
+        0.8898748375276656
+      ],
+      "calibrations": {
+        "gmqtt": {
+          "capacity_msgs_per_s": 55952.0,
+          "client": "gmqtt",
+          "client_identity": {
+            "adapter": "gmqtt",
+            "client": "gmqtt",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+            "client_version": "0.7.0",
+            "completion_mechanism": "callback",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+              "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+              "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+            },
+            "stability": "stable",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 55952.0,
+              "fractions": {
+                "0.25": 13988.0,
+                "0.50": 27976.0,
+                "0.75": 41964.0,
+                "0.90": 50356.8,
+                "1.00": 55952.0
+              },
+              "rtt_capacity_msgs_per_s": 29241.184378758124,
+              "rtt_fractions": {
+                "0.25": 7310.296094689531,
+                "0.50": 14620.592189379062,
+                "0.75": 21930.88828406859,
+                "0.90": 26317.065940882312,
+                "1.00": 29241.184378758124
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55242.0,
+              "fractions": {
+                "0.25": 13810.5,
+                "0.50": 27621.0,
+                "0.75": 41431.5,
+                "0.90": 49717.8,
+                "1.00": 55242.0
+              },
+              "rtt_capacity_msgs_per_s": 27805.976556026908,
+              "rtt_fractions": {
+                "0.25": 6951.494139006727,
+                "0.50": 13902.988278013454,
+                "0.75": 20854.482417020183,
+                "0.90": 25025.378900424217,
+                "1.00": 27805.976556026908
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 29241.184378758124
+        },
+        "mqttium": {
+          "capacity_msgs_per_s": 57612.833333333336,
+          "client": "mqttium",
+          "client_identity": {
+            "adapter": "mqttium",
+            "client": "mqttium",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/mqttium/__init__.py",
+            "client_version": "1.0.0rc13",
+            "completion_mechanism": "callback",
+            "display_note": "MQTTium AsyncClient (https://pypi.org/project/mqttium/) \u2014 async-native MQTT 3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop (PyPI \u22651.0.0rc11). Native ``message_callback_add`` (rc11). Ranked under --suite experimental. Paho VERSION2 fa\u00e7ade is `mqttium-compat`.",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "AsyncClient.on_publish is None / _direct_qos0_ready": "direct QoS0 transport write is only taken while the library on_publish is unset; the adapter fires the bench callback itself"
+            },
+            "qos0_boundary": "queue",
+            "stability": "experimental",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 57612.833333333336,
+              "fractions": {
+                "0.25": 14403.208333333334,
+                "0.50": 28806.416666666668,
+                "0.75": 43209.625,
+                "0.90": 51851.55,
+                "1.00": 57612.833333333336
+              },
+              "rtt_capacity_msgs_per_s": 26025.363801404925,
+              "rtt_fractions": {
+                "0.25": 6506.340950351231,
+                "0.50": 13012.681900702462,
+                "0.75": 19519.022851053694,
+                "0.90": 23422.827421264432,
+                "1.00": 26025.363801404925
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55656.666666666664,
+              "fractions": {
+                "0.25": 13914.166666666666,
+                "0.50": 27828.333333333332,
+                "0.75": 41742.5,
+                "0.90": 50091.0,
+                "1.00": 55656.666666666664
+              },
+              "rtt_capacity_msgs_per_s": 24188.168041078283,
+              "rtt_fractions": {
+                "0.25": 6047.042010269571,
+                "0.50": 12094.084020539141,
+                "0.75": 18141.12603080871,
+                "0.90": 21769.351236970455,
+                "1.00": 24188.168041078283
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 26025.363801404925
+        }
+      },
+      "candidate_rates": [
+        13012.196267191946,
+        13012.193967327878,
+        13010.184698643125,
+        13011.525309510389,
+        13011.909906998688,
+        13008.911770997787,
+        13011.946974145078,
+        13010.31548645368,
+        13012.064934026286,
+        13011.743090376047,
+        13008.774774564969,
+        13010.615323538897
+      ],
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A"
+      ],
+      "point": {
+        "cadence": "loaded75",
+        "description": "Open-loop application RTT latency at fractions of that client's RTT capacity. Same library drives initiator and responder (homogeneous product loop).",
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 32,
+        "inflight": 32,
+        "load_fraction": 0.5,
+        "loadgen_clients": 0,
+        "max_queued": 320,
+        "name": "application_rtt_qos1",
+        "network": "localhost",
+        "non_comparable": false,
+        "outstanding": 32,
+        "payload": "telemetry256",
+        "protocol": "MQTTv311",
+        "publishers": 1,
+        "qos_publish": 1,
+        "qos_subscribe": 1,
+        "scenario": "application_rtt_qos1",
+        "subscribers": 1,
+        "subscription": "exact",
+        "suite": "core",
+        "tags": [
+          "representative",
+          "dual_protocol"
+        ],
+        "tls": false,
+        "topic_topology": "single",
+        "topology": "application_rtt",
+        "warmup_s": 3.0
+      },
+      "point_index": 0,
+      "runs": [
+        {
+          "ab_label": "A",
+          "slot": 0,
+          "status": "valid",
+          "primary_msgs_per_s": 14619.437149805191,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 1,
+          "status": "valid",
+          "primary_msgs_per_s": 13012.196267191946,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 2,
+          "status": "valid",
+          "primary_msgs_per_s": 13012.193967327878,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 3,
+          "status": "valid",
+          "primary_msgs_per_s": 14620.326001236494,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 4,
+          "status": "valid",
+          "primary_msgs_per_s": 14620.341195246814,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 5,
+          "status": "valid",
+          "primary_msgs_per_s": 13010.184698643125,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 6,
+          "status": "valid",
+          "primary_msgs_per_s": 13011.525309510389,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 7,
+          "status": "valid",
+          "primary_msgs_per_s": 14620.320501557022,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 8,
+          "status": "valid",
+          "primary_msgs_per_s": 14620.344779637086,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 9,
+          "status": "valid",
+          "primary_msgs_per_s": 13011.909906998688,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 10,
+          "status": "valid",
+          "primary_msgs_per_s": 13008.911770997787,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 11,
+          "status": "valid",
+          "primary_msgs_per_s": 14620.32737675981,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 12,
+          "status": "valid",
+          "primary_msgs_per_s": 14620.340009787933,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 13,
+          "status": "valid",
+          "primary_msgs_per_s": 13011.946974145078,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 14,
+          "status": "valid",
+          "primary_msgs_per_s": 13010.31548645368,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 15,
+          "status": "valid",
+          "primary_msgs_per_s": 14617.519222090528,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 16,
+          "status": "valid",
+          "primary_msgs_per_s": 14620.33044446228,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 17,
+          "status": "valid",
+          "primary_msgs_per_s": 13012.064934026286,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 18,
+          "status": "valid",
+          "primary_msgs_per_s": 13011.743090376047,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 19,
+          "status": "valid",
+          "primary_msgs_per_s": 14620.256997330933,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 20,
+          "status": "valid",
+          "primary_msgs_per_s": 14618.65672110381,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 21,
+          "status": "valid",
+          "primary_msgs_per_s": 13008.774774564969,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 22,
+          "status": "valid",
+          "primary_msgs_per_s": 13010.615323538897,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 23,
+          "status": "valid",
+          "primary_msgs_per_s": 14620.340837041911,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        }
+      ],
+      "slot_rates": [
+        14619.437149805191,
+        13012.196267191946,
+        13012.193967327878,
+        14620.326001236494,
+        14620.341195246814,
+        13010.184698643125,
+        13011.525309510389,
+        14620.320501557022,
+        14620.344779637086,
+        13011.909906998688,
+        13008.911770997787,
+        14620.32737675981,
+        14620.340009787933,
+        13011.946974145078,
+        13010.31548645368,
+        14617.519222090528,
+        14620.33044446228,
+        13012.064934026286,
+        13011.743090376047,
+        14620.256997330933,
+        14618.65672110381,
+        13008.774774564969,
+        13010.615323538897,
+        14620.340837041911
+      ],
+      "verdict": {
+        "absolute_effect_pct": -11.012516247233439,
+        "block_ratios": [
+          0.8900612133006276,
+          0.8898700064241121,
+          0.889782522358323,
+          0.8900494871107825,
+          0.8899804629119354,
+          0.8898748375276656
+        ],
+        "ci_high": -0.10995051288921753,
+        "ci_low": -0.110217477641677,
+        "excludes_zero_effect": true,
+        "median_ratio": 0.8898748375276656,
+        "n_blocks": 6,
+        "verdict": "regression"
+      }
+    },
+    {
+      "baseline_rates": [
+        13900.665695926906,
+        13902.319370755973,
+        13902.737185154228,
+        13902.738045105154,
+        13902.152450569058,
+        13900.494219570604,
+        13902.49193373336,
+        13902.155326349857,
+        13902.663291424335,
+        13902.735704539382,
+        13901.659142376822,
+        13902.658440931891
+      ],
+      "block_ratios": [
+        0.8699872739634711,
+        0.8698634348436904,
+        0.8699733940962667,
+        0.8698988160704039,
+        0.8698745690471202,
+        0.869925660338132
+      ],
+      "calibrations": {
+        "gmqtt": {
+          "capacity_msgs_per_s": 55952.0,
+          "client": "gmqtt",
+          "client_identity": {
+            "adapter": "gmqtt",
+            "client": "gmqtt",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+            "client_version": "0.7.0",
+            "completion_mechanism": "callback",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+              "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+              "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+            },
+            "stability": "stable",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 55952.0,
+              "fractions": {
+                "0.25": 13988.0,
+                "0.50": 27976.0,
+                "0.75": 41964.0,
+                "0.90": 50356.8,
+                "1.00": 55952.0
+              },
+              "rtt_capacity_msgs_per_s": 29241.184378758124,
+              "rtt_fractions": {
+                "0.25": 7310.296094689531,
+                "0.50": 14620.592189379062,
+                "0.75": 21930.88828406859,
+                "0.90": 26317.065940882312,
+                "1.00": 29241.184378758124
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55242.0,
+              "fractions": {
+                "0.25": 13810.5,
+                "0.50": 27621.0,
+                "0.75": 41431.5,
+                "0.90": 49717.8,
+                "1.00": 55242.0
+              },
+              "rtt_capacity_msgs_per_s": 27805.976556026908,
+              "rtt_fractions": {
+                "0.25": 6951.494139006727,
+                "0.50": 13902.988278013454,
+                "0.75": 20854.482417020183,
+                "0.90": 25025.378900424217,
+                "1.00": 27805.976556026908
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 29241.184378758124
+        },
+        "mqttium": {
+          "capacity_msgs_per_s": 57612.833333333336,
+          "client": "mqttium",
+          "client_identity": {
+            "adapter": "mqttium",
+            "client": "mqttium",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/mqttium/__init__.py",
+            "client_version": "1.0.0rc13",
+            "completion_mechanism": "callback",
+            "display_note": "MQTTium AsyncClient (https://pypi.org/project/mqttium/) \u2014 async-native MQTT 3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop (PyPI \u22651.0.0rc11). Native ``message_callback_add`` (rc11). Ranked under --suite experimental. Paho VERSION2 fa\u00e7ade is `mqttium-compat`.",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "AsyncClient.on_publish is None / _direct_qos0_ready": "direct QoS0 transport write is only taken while the library on_publish is unset; the adapter fires the bench callback itself"
+            },
+            "qos0_boundary": "queue",
+            "stability": "experimental",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 57612.833333333336,
+              "fractions": {
+                "0.25": 14403.208333333334,
+                "0.50": 28806.416666666668,
+                "0.75": 43209.625,
+                "0.90": 51851.55,
+                "1.00": 57612.833333333336
+              },
+              "rtt_capacity_msgs_per_s": 26025.363801404925,
+              "rtt_fractions": {
+                "0.25": 6506.340950351231,
+                "0.50": 13012.681900702462,
+                "0.75": 19519.022851053694,
+                "0.90": 23422.827421264432,
+                "1.00": 26025.363801404925
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55656.666666666664,
+              "fractions": {
+                "0.25": 13914.166666666666,
+                "0.50": 27828.333333333332,
+                "0.75": 41742.5,
+                "0.90": 50091.0,
+                "1.00": 55656.666666666664
+              },
+              "rtt_capacity_msgs_per_s": 24188.168041078283,
+              "rtt_fractions": {
+                "0.25": 6047.042010269571,
+                "0.50": 12094.084020539141,
+                "0.75": 18141.12603080871,
+                "0.90": 21769.351236970455,
+                "1.00": 24188.168041078283
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 26025.363801404925
+        }
+      },
+      "candidate_rates": [
+        12093.402255076986,
+        12093.564184193647,
+        12093.576484331456,
+        12093.482721607357,
+        12093.599410114473,
+        12093.060135815374,
+        12093.518658209496,
+        12093.4684592186,
+        12093.573239234962,
+        12093.578091775007,
+        12093.507057573375,
+        12093.410009227788
+      ],
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A"
+      ],
+      "point": {
+        "cadence": "loaded75",
+        "description": "Open-loop application RTT latency at fractions of that client's RTT capacity. Same library drives initiator and responder (homogeneous product loop).",
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 32,
+        "inflight": 32,
+        "load_fraction": 0.5,
+        "loadgen_clients": 0,
+        "max_queued": 320,
+        "name": "application_rtt_qos1",
+        "network": "localhost",
+        "non_comparable": false,
+        "outstanding": 32,
+        "payload": "telemetry256",
+        "protocol": "MQTTv5",
+        "publishers": 1,
+        "qos_publish": 1,
+        "qos_subscribe": 1,
+        "scenario": "application_rtt_qos1",
+        "subscribers": 1,
+        "subscription": "exact",
+        "suite": "core",
+        "tags": [
+          "representative",
+          "dual_protocol"
+        ],
+        "tls": false,
+        "topic_topology": "single",
+        "topology": "application_rtt",
+        "warmup_s": 3.0
+      },
+      "point_index": 1,
+      "runs": [
+        {
+          "ab_label": "A",
+          "slot": 0,
+          "status": "valid",
+          "primary_msgs_per_s": 13900.665695926906,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 1,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.402255076986,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 2,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.564184193647,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 3,
+          "status": "valid",
+          "primary_msgs_per_s": 13902.319370755973,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 4,
+          "status": "valid",
+          "primary_msgs_per_s": 13902.737185154228,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 5,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.576484331456,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 6,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.482721607357,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 7,
+          "status": "valid",
+          "primary_msgs_per_s": 13902.738045105154,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 8,
+          "status": "valid",
+          "primary_msgs_per_s": 13902.152450569058,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 9,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.599410114473,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 10,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.060135815374,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 11,
+          "status": "valid",
+          "primary_msgs_per_s": 13900.494219570604,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 12,
+          "status": "valid",
+          "primary_msgs_per_s": 13902.49193373336,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 13,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.518658209496,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 14,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.4684592186,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 15,
+          "status": "valid",
+          "primary_msgs_per_s": 13902.155326349857,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 16,
+          "status": "valid",
+          "primary_msgs_per_s": 13902.663291424335,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 17,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.573239234962,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 18,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.578091775007,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 19,
+          "status": "valid",
+          "primary_msgs_per_s": 13902.735704539382,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 20,
+          "status": "valid",
+          "primary_msgs_per_s": 13901.659142376822,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 21,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.507057573375,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 22,
+          "status": "valid",
+          "primary_msgs_per_s": 12093.410009227788,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 23,
+          "status": "valid",
+          "primary_msgs_per_s": 13902.658440931891,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        }
+      ],
+      "slot_rates": [
+        13900.665695926906,
+        12093.402255076986,
+        12093.564184193647,
+        13902.319370755973,
+        13902.737185154228,
+        12093.576484331456,
+        12093.482721607357,
+        13902.738045105154,
+        13902.152450569058,
+        12093.599410114473,
+        12093.060135815374,
+        13900.494219570604,
+        13902.49193373336,
+        12093.518658209496,
+        12093.4684592186,
+        13902.155326349857,
+        13902.663291424335,
+        12093.573239234962,
+        12093.578091775007,
+        13902.735704539382,
+        13901.659142376822,
+        12093.507057573375,
+        12093.410009227788,
+        13902.658440931891
+      ],
+      "verdict": {
+        "absolute_effect_pct": -13.010118392959614,
+        "block_ratios": [
+          0.8699872739634711,
+          0.8698634348436904,
+          0.8699733940962667,
+          0.8698988160704039,
+          0.8698745690471202,
+          0.869925660338132
+        ],
+        "ci_high": -0.13002660590373327,
+        "ci_low": -0.13013656515630956,
+        "excludes_zero_effect": true,
+        "median_ratio": 0.8698988160704039,
+        "n_blocks": 6,
+        "verdict": "regression"
+      }
+    },
+    {
+      "baseline_rates": [
+        21929.084704865243,
+        21909.578171800833,
+        21919.023553682193,
+        21923.611183482055,
+        21923.193547825296,
+        21928.020649837137,
+        21928.100606431024,
+        21928.76183865397,
+        21928.819931338207,
+        21919.067045681768,
+        21867.942487373144,
+        21915.93481469295
+      ],
+      "block_ratios": [
+        0.8894892555925834,
+        0.8889247282487591,
+        0.8893187067402933,
+        0.8891024895845788,
+        0.8896355704035418,
+        0.8911599428674593
+      ],
+      "calibrations": {
+        "gmqtt": {
+          "capacity_msgs_per_s": 55952.0,
+          "client": "gmqtt",
+          "client_identity": {
+            "adapter": "gmqtt",
+            "client": "gmqtt",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+            "client_version": "0.7.0",
+            "completion_mechanism": "callback",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+              "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+              "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+            },
+            "stability": "stable",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 55952.0,
+              "fractions": {
+                "0.25": 13988.0,
+                "0.50": 27976.0,
+                "0.75": 41964.0,
+                "0.90": 50356.8,
+                "1.00": 55952.0
+              },
+              "rtt_capacity_msgs_per_s": 29241.184378758124,
+              "rtt_fractions": {
+                "0.25": 7310.296094689531,
+                "0.50": 14620.592189379062,
+                "0.75": 21930.88828406859,
+                "0.90": 26317.065940882312,
+                "1.00": 29241.184378758124
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55242.0,
+              "fractions": {
+                "0.25": 13810.5,
+                "0.50": 27621.0,
+                "0.75": 41431.5,
+                "0.90": 49717.8,
+                "1.00": 55242.0
+              },
+              "rtt_capacity_msgs_per_s": 27805.976556026908,
+              "rtt_fractions": {
+                "0.25": 6951.494139006727,
+                "0.50": 13902.988278013454,
+                "0.75": 20854.482417020183,
+                "0.90": 25025.378900424217,
+                "1.00": 27805.976556026908
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 29241.184378758124
+        },
+        "mqttium": {
+          "capacity_msgs_per_s": 57612.833333333336,
+          "client": "mqttium",
+          "client_identity": {
+            "adapter": "mqttium",
+            "client": "mqttium",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/mqttium/__init__.py",
+            "client_version": "1.0.0rc13",
+            "completion_mechanism": "callback",
+            "display_note": "MQTTium AsyncClient (https://pypi.org/project/mqttium/) \u2014 async-native MQTT 3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop (PyPI \u22651.0.0rc11). Native ``message_callback_add`` (rc11). Ranked under --suite experimental. Paho VERSION2 fa\u00e7ade is `mqttium-compat`.",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "AsyncClient.on_publish is None / _direct_qos0_ready": "direct QoS0 transport write is only taken while the library on_publish is unset; the adapter fires the bench callback itself"
+            },
+            "qos0_boundary": "queue",
+            "stability": "experimental",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 57612.833333333336,
+              "fractions": {
+                "0.25": 14403.208333333334,
+                "0.50": 28806.416666666668,
+                "0.75": 43209.625,
+                "0.90": 51851.55,
+                "1.00": 57612.833333333336
+              },
+              "rtt_capacity_msgs_per_s": 26025.363801404925,
+              "rtt_fractions": {
+                "0.25": 6506.340950351231,
+                "0.50": 13012.681900702462,
+                "0.75": 19519.022851053694,
+                "0.90": 23422.827421264432,
+                "1.00": 26025.363801404925
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55656.666666666664,
+              "fractions": {
+                "0.25": 13914.166666666666,
+                "0.50": 27828.333333333332,
+                "0.75": 41742.5,
+                "0.90": 50091.0,
+                "1.00": 55656.666666666664
+              },
+              "rtt_capacity_msgs_per_s": 24188.168041078283,
+              "rtt_fractions": {
+                "0.25": 6047.042010269571,
+                "0.50": 12094.084020539141,
+                "0.75": 18141.12603080871,
+                "0.90": 21769.351236970455,
+                "1.00": 24188.168041078283
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 26025.363801404925
+        }
+      },
+      "candidate_rates": [
+        19488.33437838264,
+        19500.234255209743,
+        19484.362055935093,
+        19498.403271295923,
+        19497.998374055074,
+        19496.706133569136,
+        19496.328841038936,
+        19500.16189990375,
+        19499.981713898575,
+        19507.649111302595,
+        19487.834377676336,
+        19492.04294419103
+      ],
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A"
+      ],
+      "point": {
+        "cadence": "loaded75",
+        "description": "Open-loop application RTT latency at fractions of that client's RTT capacity. Same library drives initiator and responder (homogeneous product loop).",
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 32,
+        "inflight": 32,
+        "load_fraction": 0.75,
+        "loadgen_clients": 0,
+        "max_queued": 320,
+        "name": "application_rtt_qos1",
+        "network": "localhost",
+        "non_comparable": false,
+        "outstanding": 32,
+        "payload": "telemetry256",
+        "protocol": "MQTTv311",
+        "publishers": 1,
+        "qos_publish": 1,
+        "qos_subscribe": 1,
+        "scenario": "application_rtt_qos1",
+        "subscribers": 1,
+        "subscription": "exact",
+        "suite": "core",
+        "tags": [
+          "representative",
+          "dual_protocol"
+        ],
+        "tls": false,
+        "topic_topology": "single",
+        "topology": "application_rtt",
+        "warmup_s": 3.0
+      },
+      "point_index": 2,
+      "runs": [
+        {
+          "ab_label": "A",
+          "slot": 0,
+          "status": "valid",
+          "primary_msgs_per_s": 21929.084704865243,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 1,
+          "status": "valid",
+          "primary_msgs_per_s": 19488.33437838264,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 2,
+          "status": "valid",
+          "primary_msgs_per_s": 19500.234255209743,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 3,
+          "status": "valid",
+          "primary_msgs_per_s": 21909.578171800833,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 4,
+          "status": "valid",
+          "primary_msgs_per_s": 21919.023553682193,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 5,
+          "status": "valid",
+          "primary_msgs_per_s": 19484.362055935093,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 6,
+          "status": "valid",
+          "primary_msgs_per_s": 19498.403271295923,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 7,
+          "status": "valid",
+          "primary_msgs_per_s": 21923.611183482055,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 8,
+          "status": "valid",
+          "primary_msgs_per_s": 21923.193547825296,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 9,
+          "status": "valid",
+          "primary_msgs_per_s": 19497.998374055074,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 10,
+          "status": "valid",
+          "primary_msgs_per_s": 19496.706133569136,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 11,
+          "status": "valid",
+          "primary_msgs_per_s": 21928.020649837137,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 12,
+          "status": "valid",
+          "primary_msgs_per_s": 21928.100606431024,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 13,
+          "status": "valid",
+          "primary_msgs_per_s": 19496.328841038936,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 14,
+          "status": "valid",
+          "primary_msgs_per_s": 19500.16189990375,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 15,
+          "status": "valid",
+          "primary_msgs_per_s": 21928.76183865397,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 16,
+          "status": "valid",
+          "primary_msgs_per_s": 21928.819931338207,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 17,
+          "status": "valid",
+          "primary_msgs_per_s": 19499.981713898575,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 18,
+          "status": "valid",
+          "primary_msgs_per_s": 19507.649111302595,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 19,
+          "status": "valid",
+          "primary_msgs_per_s": 21919.067045681768,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 20,
+          "status": "valid",
+          "primary_msgs_per_s": 21867.942487373144,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 21,
+          "status": "valid",
+          "primary_msgs_per_s": 19487.834377676336,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 22,
+          "status": "valid",
+          "primary_msgs_per_s": 19492.04294419103,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 23,
+          "status": "valid",
+          "primary_msgs_per_s": 21915.93481469295,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        }
+      ],
+      "slot_rates": [
+        21929.084704865243,
+        19488.33437838264,
+        19500.234255209743,
+        21909.578171800833,
+        21919.023553682193,
+        19484.362055935093,
+        19498.403271295923,
+        21923.611183482055,
+        21923.193547825296,
+        19497.998374055074,
+        19496.706133569136,
+        21928.020649837137,
+        21928.100606431024,
+        19496.328841038936,
+        19500.16189990375,
+        21928.76183865397,
+        21928.819931338207,
+        19499.981713898575,
+        19507.649111302595,
+        21919.067045681768,
+        21867.942487373144,
+        19487.834377676336,
+        19492.04294419103,
+        21915.93481469295
+      ],
+      "verdict": {
+        "absolute_effect_pct": -11.068129325970666,
+        "block_ratios": [
+          0.8894892555925834,
+          0.8889247282487591,
+          0.8893187067402933,
+          0.8891024895845788,
+          0.8896355704035418,
+          0.8911599428674593
+        ],
+        "ci_high": -0.1103644295964582,
+        "ci_low": -0.11107527175124088,
+        "excludes_zero_effect": true,
+        "median_ratio": 0.8893187067402933,
+        "n_blocks": 6,
+        "verdict": "regression"
+      }
+    },
+    {
+      "baseline_rates": [
+        20850.023896861676,
+        20852.493885002088,
+        20852.538878804677,
+        20734.87911390956,
+        20850.679660228558,
+        20827.449943946966,
+        20852.159260685134,
+        20847.814742322866,
+        20849.99553288276,
+        20825.523638697574,
+        20852.119106460315,
+        20850.460887995818
+      ],
+      "block_ratios": [
+        0.8675024765666546,
+        0.8746006071887564,
+        0.8704269702106309,
+        0.8631609077009806,
+        0.8704580600609804,
+        0.8697396251808511
+      ],
+      "calibrations": {
+        "gmqtt": {
+          "capacity_msgs_per_s": 55952.0,
+          "client": "gmqtt",
+          "client_identity": {
+            "adapter": "gmqtt",
+            "client": "gmqtt",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+            "client_version": "0.7.0",
+            "completion_mechanism": "callback",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+              "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+              "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+            },
+            "stability": "stable",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 55952.0,
+              "fractions": {
+                "0.25": 13988.0,
+                "0.50": 27976.0,
+                "0.75": 41964.0,
+                "0.90": 50356.8,
+                "1.00": 55952.0
+              },
+              "rtt_capacity_msgs_per_s": 29241.184378758124,
+              "rtt_fractions": {
+                "0.25": 7310.296094689531,
+                "0.50": 14620.592189379062,
+                "0.75": 21930.88828406859,
+                "0.90": 26317.065940882312,
+                "1.00": 29241.184378758124
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55242.0,
+              "fractions": {
+                "0.25": 13810.5,
+                "0.50": 27621.0,
+                "0.75": 41431.5,
+                "0.90": 49717.8,
+                "1.00": 55242.0
+              },
+              "rtt_capacity_msgs_per_s": 27805.976556026908,
+              "rtt_fractions": {
+                "0.25": 6951.494139006727,
+                "0.50": 13902.988278013454,
+                "0.75": 20854.482417020183,
+                "0.90": 25025.378900424217,
+                "1.00": 27805.976556026908
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 29241.184378758124
+        },
+        "mqttium": {
+          "capacity_msgs_per_s": 57612.833333333336,
+          "client": "mqttium",
+          "client_identity": {
+            "adapter": "mqttium",
+            "client": "mqttium",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/mqttium/__init__.py",
+            "client_version": "1.0.0rc13",
+            "completion_mechanism": "callback",
+            "display_note": "MQTTium AsyncClient (https://pypi.org/project/mqttium/) \u2014 async-native MQTT 3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop (PyPI \u22651.0.0rc11). Native ``message_callback_add`` (rc11). Ranked under --suite experimental. Paho VERSION2 fa\u00e7ade is `mqttium-compat`.",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "AsyncClient.on_publish is None / _direct_qos0_ready": "direct QoS0 transport write is only taken while the library on_publish is unset; the adapter fires the bench callback itself"
+            },
+            "qos0_boundary": "queue",
+            "stability": "experimental",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 57612.833333333336,
+              "fractions": {
+                "0.25": 14403.208333333334,
+                "0.50": 28806.416666666668,
+                "0.75": 43209.625,
+                "0.90": 51851.55,
+                "1.00": 57612.833333333336
+              },
+              "rtt_capacity_msgs_per_s": 26025.363801404925,
+              "rtt_fractions": {
+                "0.25": 6506.340950351231,
+                "0.50": 13012.681900702462,
+                "0.75": 19519.022851053694,
+                "0.90": 23422.827421264432,
+                "1.00": 26025.363801404925
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55656.666666666664,
+              "fractions": {
+                "0.25": 13914.166666666666,
+                "0.50": 27828.333333333332,
+                "0.75": 41742.5,
+                "0.90": 50091.0,
+                "1.00": 55656.666666666664
+              },
+              "rtt_capacity_msgs_per_s": 24188.168041078283,
+              "rtt_fractions": {
+                "0.25": 6047.042010269571,
+                "0.50": 12094.084020539141,
+                "0.75": 18141.12603080871,
+                "0.90": 21769.351236970455,
+                "1.00": 24188.168041078283
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 26025.363801404925
+        }
+      },
+      "candidate_rates": [
+        18087.447367001434,
+        18135.0390838441,
+        18134.737863010763,
+        18135.15395399819,
+        18135.56936176977,
+        18128.77415192333,
+        17995.01869656529,
+        18131.73317514925,
+        18132.86065425051,
+        18127.744906294778,
+        18135.23706653764,
+        18134.47203757348
+      ],
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A"
+      ],
+      "point": {
+        "cadence": "loaded75",
+        "description": "Open-loop application RTT latency at fractions of that client's RTT capacity. Same library drives initiator and responder (homogeneous product loop).",
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 32,
+        "inflight": 32,
+        "load_fraction": 0.75,
+        "loadgen_clients": 0,
+        "max_queued": 320,
+        "name": "application_rtt_qos1",
+        "network": "localhost",
+        "non_comparable": false,
+        "outstanding": 32,
+        "payload": "telemetry256",
+        "protocol": "MQTTv5",
+        "publishers": 1,
+        "qos_publish": 1,
+        "qos_subscribe": 1,
+        "scenario": "application_rtt_qos1",
+        "subscribers": 1,
+        "subscription": "exact",
+        "suite": "core",
+        "tags": [
+          "representative",
+          "dual_protocol"
+        ],
+        "tls": false,
+        "topic_topology": "single",
+        "topology": "application_rtt",
+        "warmup_s": 3.0
+      },
+      "point_index": 3,
+      "runs": [
+        {
+          "ab_label": "A",
+          "slot": 0,
+          "status": "valid",
+          "primary_msgs_per_s": 20850.023896861676,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 1,
+          "status": "valid",
+          "primary_msgs_per_s": 18087.447367001434,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 2,
+          "status": "valid",
+          "primary_msgs_per_s": 18135.0390838441,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 3,
+          "status": "valid",
+          "primary_msgs_per_s": 20852.493885002088,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 4,
+          "status": "valid",
+          "primary_msgs_per_s": 20852.538878804677,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 5,
+          "status": "valid",
+          "primary_msgs_per_s": 18134.737863010763,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 6,
+          "status": "valid",
+          "primary_msgs_per_s": 18135.15395399819,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 7,
+          "status": "valid",
+          "primary_msgs_per_s": 20734.87911390956,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 8,
+          "status": "valid",
+          "primary_msgs_per_s": 20850.679660228558,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 9,
+          "status": "valid",
+          "primary_msgs_per_s": 18135.56936176977,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 10,
+          "status": "valid",
+          "primary_msgs_per_s": 18128.77415192333,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 11,
+          "status": "valid",
+          "primary_msgs_per_s": 20827.449943946966,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 12,
+          "status": "valid",
+          "primary_msgs_per_s": 20852.159260685134,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 13,
+          "status": "valid",
+          "primary_msgs_per_s": 17995.01869656529,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 14,
+          "status": "valid",
+          "primary_msgs_per_s": 18131.73317514925,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 15,
+          "status": "valid",
+          "primary_msgs_per_s": 20847.814742322866,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 16,
+          "status": "valid",
+          "primary_msgs_per_s": 20849.99553288276,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 17,
+          "status": "valid",
+          "primary_msgs_per_s": 18132.86065425051,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 18,
+          "status": "valid",
+          "primary_msgs_per_s": 18127.744906294778,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 19,
+          "status": "valid",
+          "primary_msgs_per_s": 20825.523638697574,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 20,
+          "status": "valid",
+          "primary_msgs_per_s": 20852.119106460315,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 21,
+          "status": "valid",
+          "primary_msgs_per_s": 18135.23706653764,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 22,
+          "status": "valid",
+          "primary_msgs_per_s": 18134.47203757348,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 23,
+          "status": "valid",
+          "primary_msgs_per_s": 20850.460887995818,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        }
+      ],
+      "slot_rates": [
+        20850.023896861676,
+        18087.447367001434,
+        18135.0390838441,
+        20852.493885002088,
+        20852.538878804677,
+        18134.737863010763,
+        18135.15395399819,
+        20734.87911390956,
+        20850.679660228558,
+        18135.56936176977,
+        18128.77415192333,
+        20827.449943946966,
+        20852.159260685134,
+        17995.01869656529,
+        18131.73317514925,
+        20847.814742322866,
+        20849.99553288276,
+        18132.86065425051,
+        18127.744906294778,
+        20825.523638697574,
+        20852.119106460315,
+        18135.23706653764,
+        18134.47203757348,
+        20850.460887995818
+      ],
+      "verdict": {
+        "absolute_effect_pct": -13.026037481914887,
+        "block_ratios": [
+          0.8675024765666546,
+          0.8746006071887564,
+          0.8704269702106309,
+          0.8631609077009806,
+          0.8704580600609804,
+          0.8697396251808511
+        ],
+        "ci_high": -0.12954193993901963,
+        "ci_low": -0.13683909229901936,
+        "excludes_zero_effect": true,
+        "median_ratio": 0.8697396251808511,
+        "n_blocks": 6,
+        "verdict": "regression"
+      }
+    },
+    {
+      "baseline_rates": [],
+      "block_ratios": [],
+      "calibrations": {
+        "gmqtt": {
+          "capacity_msgs_per_s": 55952.0,
+          "client": "gmqtt",
+          "client_identity": {
+            "adapter": "gmqtt",
+            "client": "gmqtt",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+            "client_version": "0.7.0",
+            "completion_mechanism": "callback",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+              "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+              "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+            },
+            "stability": "stable",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 55952.0,
+              "fractions": {
+                "0.25": 13988.0,
+                "0.50": 27976.0,
+                "0.75": 41964.0,
+                "0.90": 50356.8,
+                "1.00": 55952.0
+              },
+              "rtt_capacity_msgs_per_s": 29241.184378758124,
+              "rtt_fractions": {
+                "0.25": 7310.296094689531,
+                "0.50": 14620.592189379062,
+                "0.75": 21930.88828406859,
+                "0.90": 26317.065940882312,
+                "1.00": 29241.184378758124
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55242.0,
+              "fractions": {
+                "0.25": 13810.5,
+                "0.50": 27621.0,
+                "0.75": 41431.5,
+                "0.90": 49717.8,
+                "1.00": 55242.0
+              },
+              "rtt_capacity_msgs_per_s": 27805.976556026908,
+              "rtt_fractions": {
+                "0.25": 6951.494139006727,
+                "0.50": 13902.988278013454,
+                "0.75": 20854.482417020183,
+                "0.90": 25025.378900424217,
+                "1.00": 27805.976556026908
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 29241.184378758124
+        },
+        "mqttium": {
+          "capacity_msgs_per_s": 57612.833333333336,
+          "client": "mqttium",
+          "client_identity": {
+            "adapter": "mqttium",
+            "client": "mqttium",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/mqttium/__init__.py",
+            "client_version": "1.0.0rc13",
+            "completion_mechanism": "callback",
+            "display_note": "MQTTium AsyncClient (https://pypi.org/project/mqttium/) \u2014 async-native MQTT 3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop (PyPI \u22651.0.0rc11). Native ``message_callback_add`` (rc11). Ranked under --suite experimental. Paho VERSION2 fa\u00e7ade is `mqttium-compat`.",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "AsyncClient.on_publish is None / _direct_qos0_ready": "direct QoS0 transport write is only taken while the library on_publish is unset; the adapter fires the bench callback itself"
+            },
+            "qos0_boundary": "queue",
+            "stability": "experimental",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 57612.833333333336,
+              "fractions": {
+                "0.25": 14403.208333333334,
+                "0.50": 28806.416666666668,
+                "0.75": 43209.625,
+                "0.90": 51851.55,
+                "1.00": 57612.833333333336
+              },
+              "rtt_capacity_msgs_per_s": 26025.363801404925,
+              "rtt_fractions": {
+                "0.25": 6506.340950351231,
+                "0.50": 13012.681900702462,
+                "0.75": 19519.022851053694,
+                "0.90": 23422.827421264432,
+                "1.00": 26025.363801404925
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55656.666666666664,
+              "fractions": {
+                "0.25": 13914.166666666666,
+                "0.50": 27828.333333333332,
+                "0.75": 41742.5,
+                "0.90": 50091.0,
+                "1.00": 55656.666666666664
+              },
+              "rtt_capacity_msgs_per_s": 24188.168041078283,
+              "rtt_fractions": {
+                "0.25": 6047.042010269571,
+                "0.50": 12094.084020539141,
+                "0.75": 18141.12603080871,
+                "0.90": 21769.351236970455,
+                "1.00": 24188.168041078283
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 26025.363801404925
+        }
+      },
+      "candidate_rates": [],
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A"
+      ],
+      "point": {
+        "cadence": "loaded75",
+        "description": "Open-loop application RTT latency at fractions of that client's RTT capacity. Same library drives initiator and responder (homogeneous product loop).",
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 32,
+        "inflight": 32,
+        "load_fraction": 0.9,
+        "loadgen_clients": 0,
+        "max_queued": 320,
+        "name": "application_rtt_qos1",
+        "network": "localhost",
+        "non_comparable": false,
+        "outstanding": 32,
+        "payload": "telemetry256",
+        "protocol": "MQTTv311",
+        "publishers": 1,
+        "qos_publish": 1,
+        "qos_subscribe": 1,
+        "scenario": "application_rtt_qos1",
+        "subscribers": 1,
+        "subscription": "exact",
+        "suite": "core",
+        "tags": [
+          "representative",
+          "dual_protocol"
+        ],
+        "tls": false,
+        "topic_topology": "single",
+        "topology": "application_rtt",
+        "warmup_s": 3.0
+      },
+      "point_index": 4,
+      "runs": [
+        {
+          "ab_label": "A",
+          "slot": 0,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23480.833427070604,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 1,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21521.033331620405,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 2,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21528.15958208762,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 3,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23699.833379557487,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 4,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23494.693735714416,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 5,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21457.091751016746,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 6,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21537.671891031823,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 7,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23377.710168290105,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 8,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22983.987220912826,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 9,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21488.57748662587,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 10,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21542.972616284245,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 11,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22941.661636733596,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 12,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22951.353376402814,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 13,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21349.348812482185,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 14,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21482.682983157843,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 15,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22542.334492022037,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 16,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22805.402075014175,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 17,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21508.632532298147,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 18,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21481.14687960029,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 19,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23608.239844747477,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 20,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23681.740266760502,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 21,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21575.451856214513,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 22,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21524.80013497382,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 23,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23625.331139016303,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        }
+      ],
+      "slot_rates": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "verdict": {
+        "absolute_effect_pct": null,
+        "ci_high": null,
+        "ci_low": null,
+        "excludes_zero_effect": false,
+        "median_ratio": null,
+        "n_blocks": 0,
+        "verdict": "inconclusive"
+      }
+    },
+    {
+      "baseline_rates": [],
+      "block_ratios": [],
+      "calibrations": {
+        "gmqtt": {
+          "capacity_msgs_per_s": 55952.0,
+          "client": "gmqtt",
+          "client_identity": {
+            "adapter": "gmqtt",
+            "client": "gmqtt",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+            "client_version": "0.7.0",
+            "completion_mechanism": "callback",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+              "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+              "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+            },
+            "stability": "stable",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 55952.0,
+              "fractions": {
+                "0.25": 13988.0,
+                "0.50": 27976.0,
+                "0.75": 41964.0,
+                "0.90": 50356.8,
+                "1.00": 55952.0
+              },
+              "rtt_capacity_msgs_per_s": 29241.184378758124,
+              "rtt_fractions": {
+                "0.25": 7310.296094689531,
+                "0.50": 14620.592189379062,
+                "0.75": 21930.88828406859,
+                "0.90": 26317.065940882312,
+                "1.00": 29241.184378758124
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55242.0,
+              "fractions": {
+                "0.25": 13810.5,
+                "0.50": 27621.0,
+                "0.75": 41431.5,
+                "0.90": 49717.8,
+                "1.00": 55242.0
+              },
+              "rtt_capacity_msgs_per_s": 27805.976556026908,
+              "rtt_fractions": {
+                "0.25": 6951.494139006727,
+                "0.50": 13902.988278013454,
+                "0.75": 20854.482417020183,
+                "0.90": 25025.378900424217,
+                "1.00": 27805.976556026908
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 29241.184378758124
+        },
+        "mqttium": {
+          "capacity_msgs_per_s": 57612.833333333336,
+          "client": "mqttium",
+          "client_identity": {
+            "adapter": "mqttium",
+            "client": "mqttium",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/mqttium/__init__.py",
+            "client_version": "1.0.0rc13",
+            "completion_mechanism": "callback",
+            "display_note": "MQTTium AsyncClient (https://pypi.org/project/mqttium/) \u2014 async-native MQTT 3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop (PyPI \u22651.0.0rc11). Native ``message_callback_add`` (rc11). Ranked under --suite experimental. Paho VERSION2 fa\u00e7ade is `mqttium-compat`.",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "AsyncClient.on_publish is None / _direct_qos0_ready": "direct QoS0 transport write is only taken while the library on_publish is unset; the adapter fires the bench callback itself"
+            },
+            "qos0_boundary": "queue",
+            "stability": "experimental",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 57612.833333333336,
+              "fractions": {
+                "0.25": 14403.208333333334,
+                "0.50": 28806.416666666668,
+                "0.75": 43209.625,
+                "0.90": 51851.55,
+                "1.00": 57612.833333333336
+              },
+              "rtt_capacity_msgs_per_s": 26025.363801404925,
+              "rtt_fractions": {
+                "0.25": 6506.340950351231,
+                "0.50": 13012.681900702462,
+                "0.75": 19519.022851053694,
+                "0.90": 23422.827421264432,
+                "1.00": 26025.363801404925
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55656.666666666664,
+              "fractions": {
+                "0.25": 13914.166666666666,
+                "0.50": 27828.333333333332,
+                "0.75": 41742.5,
+                "0.90": 50091.0,
+                "1.00": 55656.666666666664
+              },
+              "rtt_capacity_msgs_per_s": 24188.168041078283,
+              "rtt_fractions": {
+                "0.25": 6047.042010269571,
+                "0.50": 12094.084020539141,
+                "0.75": 18141.12603080871,
+                "0.90": 21769.351236970455,
+                "1.00": 24188.168041078283
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 26025.363801404925
+        }
+      },
+      "candidate_rates": [],
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A"
+      ],
+      "point": {
+        "cadence": "loaded75",
+        "description": "Open-loop application RTT latency at fractions of that client's RTT capacity. Same library drives initiator and responder (homogeneous product loop).",
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 32,
+        "inflight": 32,
+        "load_fraction": 0.9,
+        "loadgen_clients": 0,
+        "max_queued": 320,
+        "name": "application_rtt_qos1",
+        "network": "localhost",
+        "non_comparable": false,
+        "outstanding": 32,
+        "payload": "telemetry256",
+        "protocol": "MQTTv5",
+        "publishers": 1,
+        "qos_publish": 1,
+        "qos_subscribe": 1,
+        "scenario": "application_rtt_qos1",
+        "subscribers": 1,
+        "subscription": "exact",
+        "suite": "core",
+        "tags": [
+          "representative",
+          "dual_protocol"
+        ],
+        "tls": false,
+        "topic_topology": "single",
+        "topology": "application_rtt",
+        "warmup_s": 3.0
+      },
+      "point_index": 5,
+      "runs": [
+        {
+          "ab_label": "A",
+          "slot": 0,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22404.90353552829,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 1,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20581.51948917714,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 2,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20577.43731424662,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 3,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22179.659663387953,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 4,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22077.316061525053,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 5,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20471.984223339736,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 6,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20681.556275863946,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 7,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22011.028434158277,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 8,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21908.98420364664,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 9,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20477.577172978425,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 10,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20445.13889365396,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 11,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22254.995270307154,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 12,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22398.64603940568,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 13,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20612.07401370866,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 14,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20673.324149247448,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 15,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22278.001727157556,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 16,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22293.989269151658,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 17,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20675.3157524618,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 18,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20650.442287153663,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 19,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22438.41693007892,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 20,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22478.410487193472,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 21,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20654.62554330065,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 22,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20628.979604812295,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 23,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22176.95539630465,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        }
+      ],
+      "slot_rates": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "verdict": {
+        "absolute_effect_pct": null,
+        "ci_high": null,
+        "ci_low": null,
+        "excludes_zero_effect": false,
+        "median_ratio": null,
+        "n_blocks": 0,
+        "verdict": "inconclusive"
+      }
+    },
+    {
+      "baseline_rates": [],
+      "block_ratios": [],
+      "calibrations": {
+        "gmqtt": {
+          "capacity_msgs_per_s": 55952.0,
+          "client": "gmqtt",
+          "client_identity": {
+            "adapter": "gmqtt",
+            "client": "gmqtt",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+            "client_version": "0.7.0",
+            "completion_mechanism": "callback",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+              "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+              "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+            },
+            "stability": "stable",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 55952.0,
+              "fractions": {
+                "0.25": 13988.0,
+                "0.50": 27976.0,
+                "0.75": 41964.0,
+                "0.90": 50356.8,
+                "1.00": 55952.0
+              },
+              "rtt_capacity_msgs_per_s": 29241.184378758124,
+              "rtt_fractions": {
+                "0.25": 7310.296094689531,
+                "0.50": 14620.592189379062,
+                "0.75": 21930.88828406859,
+                "0.90": 26317.065940882312,
+                "1.00": 29241.184378758124
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55242.0,
+              "fractions": {
+                "0.25": 13810.5,
+                "0.50": 27621.0,
+                "0.75": 41431.5,
+                "0.90": 49717.8,
+                "1.00": 55242.0
+              },
+              "rtt_capacity_msgs_per_s": 27805.976556026908,
+              "rtt_fractions": {
+                "0.25": 6951.494139006727,
+                "0.50": 13902.988278013454,
+                "0.75": 20854.482417020183,
+                "0.90": 25025.378900424217,
+                "1.00": 27805.976556026908
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 29241.184378758124
+        },
+        "mqttium": {
+          "capacity_msgs_per_s": 57612.833333333336,
+          "client": "mqttium",
+          "client_identity": {
+            "adapter": "mqttium",
+            "client": "mqttium",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/mqttium/__init__.py",
+            "client_version": "1.0.0rc13",
+            "completion_mechanism": "callback",
+            "display_note": "MQTTium AsyncClient (https://pypi.org/project/mqttium/) \u2014 async-native MQTT 3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop (PyPI \u22651.0.0rc11). Native ``message_callback_add`` (rc11). Ranked under --suite experimental. Paho VERSION2 fa\u00e7ade is `mqttium-compat`.",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "AsyncClient.on_publish is None / _direct_qos0_ready": "direct QoS0 transport write is only taken while the library on_publish is unset; the adapter fires the bench callback itself"
+            },
+            "qos0_boundary": "queue",
+            "stability": "experimental",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 57612.833333333336,
+              "fractions": {
+                "0.25": 14403.208333333334,
+                "0.50": 28806.416666666668,
+                "0.75": 43209.625,
+                "0.90": 51851.55,
+                "1.00": 57612.833333333336
+              },
+              "rtt_capacity_msgs_per_s": 26025.363801404925,
+              "rtt_fractions": {
+                "0.25": 6506.340950351231,
+                "0.50": 13012.681900702462,
+                "0.75": 19519.022851053694,
+                "0.90": 23422.827421264432,
+                "1.00": 26025.363801404925
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55656.666666666664,
+              "fractions": {
+                "0.25": 13914.166666666666,
+                "0.50": 27828.333333333332,
+                "0.75": 41742.5,
+                "0.90": 50091.0,
+                "1.00": 55656.666666666664
+              },
+              "rtt_capacity_msgs_per_s": 24188.168041078283,
+              "rtt_fractions": {
+                "0.25": 6047.042010269571,
+                "0.50": 12094.084020539141,
+                "0.75": 18141.12603080871,
+                "0.90": 21769.351236970455,
+                "1.00": 24188.168041078283
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 26025.363801404925
+        }
+      },
+      "candidate_rates": [],
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A"
+      ],
+      "point": {
+        "cadence": "loaded75",
+        "description": "Open-loop application RTT latency at fractions of that client's RTT capacity. Same library drives initiator and responder (homogeneous product loop).",
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 32,
+        "inflight": 32,
+        "load_fraction": 1.0,
+        "loadgen_clients": 0,
+        "max_queued": 320,
+        "name": "application_rtt_qos1",
+        "network": "localhost",
+        "non_comparable": false,
+        "outstanding": 32,
+        "payload": "telemetry256",
+        "protocol": "MQTTv311",
+        "publishers": 1,
+        "qos_publish": 1,
+        "qos_subscribe": 1,
+        "scenario": "application_rtt_qos1",
+        "subscribers": 1,
+        "subscription": "exact",
+        "suite": "core",
+        "tags": [
+          "representative",
+          "dual_protocol"
+        ],
+        "tls": false,
+        "topic_topology": "single",
+        "topology": "application_rtt",
+        "warmup_s": 3.0
+      },
+      "point_index": 6,
+      "runs": [
+        {
+          "ab_label": "A",
+          "slot": 0,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 24032.9693329449,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 1,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21866.189000837476,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 2,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21661.1164737002,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 3,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23447.61481617542,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 4,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23387.40463583365,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 5,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21491.795159173325,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 6,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21523.822982170746,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 7,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23878.785599964933,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 8,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23878.70698313207,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 9,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21693.8432221702,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 10,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21684.71945887645,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 11,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23895.63222038794,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 12,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23753.618908059867,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 13,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21767.698827726792,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 14,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21781.71481348277,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 15,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23884.2892827268,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 16,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23781.12398186551,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 17,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21607.339036867914,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 18,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21689.582532917328,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 19,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23839.627565725612,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 20,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23552.153428418624,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 21,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21485.397707999233,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 22,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21653.637276336587,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 23,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23524.221528587088,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        }
+      ],
+      "slot_rates": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "verdict": {
+        "absolute_effect_pct": null,
+        "ci_high": null,
+        "ci_low": null,
+        "excludes_zero_effect": false,
+        "median_ratio": null,
+        "n_blocks": 0,
+        "verdict": "inconclusive"
+      }
+    },
+    {
+      "baseline_rates": [],
+      "block_ratios": [],
+      "calibrations": {
+        "gmqtt": {
+          "capacity_msgs_per_s": 55952.0,
+          "client": "gmqtt",
+          "client_identity": {
+            "adapter": "gmqtt",
+            "client": "gmqtt",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/gmqtt/__init__.py",
+            "client_version": "0.7.0",
+            "completion_mechanism": "callback",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "Client._connection.publish": "public publish() returns None, dropping the packet id needed to map PUBACK -> synthetic mid (QoS>=1 only)",
+              "Client._persistent_storage.push_message_nowait": "mirrors what public publish() does for QoS>=1",
+              "Client._remove_message_from_query": "only hook that fires on PUBACK/PUBCOMP; gmqtt has no on_publish callback"
+            },
+            "stability": "stable",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 55952.0,
+              "fractions": {
+                "0.25": 13988.0,
+                "0.50": 27976.0,
+                "0.75": 41964.0,
+                "0.90": 50356.8,
+                "1.00": 55952.0
+              },
+              "rtt_capacity_msgs_per_s": 29241.184378758124,
+              "rtt_fractions": {
+                "0.25": 7310.296094689531,
+                "0.50": 14620.592189379062,
+                "0.75": 21930.88828406859,
+                "0.90": 26317.065940882312,
+                "1.00": 29241.184378758124
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55242.0,
+              "fractions": {
+                "0.25": 13810.5,
+                "0.50": 27621.0,
+                "0.75": 41431.5,
+                "0.90": 49717.8,
+                "1.00": 55242.0
+              },
+              "rtt_capacity_msgs_per_s": 27805.976556026908,
+              "rtt_fractions": {
+                "0.25": 6951.494139006727,
+                "0.50": 13902.988278013454,
+                "0.75": 20854.482417020183,
+                "0.90": 25025.378900424217,
+                "1.00": 27805.976556026908
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 29241.184378758124
+        },
+        "mqttium": {
+          "capacity_msgs_per_s": 57612.833333333336,
+          "client": "mqttium",
+          "client_identity": {
+            "adapter": "mqttium",
+            "client": "mqttium",
+            "client_module": "/workspace/.venv/lib/python3.12/site-packages/mqttium/__init__.py",
+            "client_version": "1.0.0rc13",
+            "completion_mechanism": "callback",
+            "display_note": "MQTTium AsyncClient (https://pypi.org/project/mqttium/) \u2014 async-native MQTT 3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop (PyPI \u22651.0.0rc11). Native ``message_callback_add`` (rc11). Ranked under --suite experimental. Paho VERSION2 fa\u00e7ade is `mqttium-compat`.",
+            "implementation_language": "python",
+            "io_model": "asyncio_bridged",
+            "private_api": {
+              "AsyncClient.on_publish is None / _direct_qos0_ready": "direct QoS0 transport write is only taken while the library on_publish is unset; the adapter fires the bench callback itself"
+            },
+            "qos0_boundary": "queue",
+            "stability": "experimental",
+            "synthetic_mids": true
+          },
+          "protocol_capacities": {
+            "MQTTv311": {
+              "capacity_msgs_per_s": 57612.833333333336,
+              "fractions": {
+                "0.25": 14403.208333333334,
+                "0.50": 28806.416666666668,
+                "0.75": 43209.625,
+                "0.90": 51851.55,
+                "1.00": 57612.833333333336
+              },
+              "rtt_capacity_msgs_per_s": 26025.363801404925,
+              "rtt_fractions": {
+                "0.25": 6506.340950351231,
+                "0.50": 13012.681900702462,
+                "0.75": 19519.022851053694,
+                "0.90": 23422.827421264432,
+                "1.00": 26025.363801404925
+              }
+            },
+            "MQTTv5": {
+              "capacity_msgs_per_s": 55656.666666666664,
+              "fractions": {
+                "0.25": 13914.166666666666,
+                "0.50": 27828.333333333332,
+                "0.75": 41742.5,
+                "0.90": 50091.0,
+                "1.00": 55656.666666666664
+              },
+              "rtt_capacity_msgs_per_s": 24188.168041078283,
+              "rtt_fractions": {
+                "0.25": 6047.042010269571,
+                "0.50": 12094.084020539141,
+                "0.75": 18141.12603080871,
+                "0.90": 21769.351236970455,
+                "1.00": 24188.168041078283
+              }
+            }
+          },
+          "rtt_capacity_msgs_per_s": 26025.363801404925
+        }
+      },
+      "candidate_rates": [],
+      "order": [
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A",
+        "A",
+        "B",
+        "B",
+        "A"
+      ],
+      "point": {
+        "cadence": "loaded75",
+        "description": "Open-loop application RTT latency at fractions of that client's RTT capacity. Same library drives initiator and responder (homogeneous product loop).",
+        "drain_s": 6.0,
+        "duration_s": 12.0,
+        "effective_inflight_window": 32,
+        "inflight": 32,
+        "load_fraction": 1.0,
+        "loadgen_clients": 0,
+        "max_queued": 320,
+        "name": "application_rtt_qos1",
+        "network": "localhost",
+        "non_comparable": false,
+        "outstanding": 32,
+        "payload": "telemetry256",
+        "protocol": "MQTTv5",
+        "publishers": 1,
+        "qos_publish": 1,
+        "qos_subscribe": 1,
+        "scenario": "application_rtt_qos1",
+        "subscribers": 1,
+        "subscription": "exact",
+        "suite": "core",
+        "tags": [
+          "representative",
+          "dual_protocol"
+        ],
+        "tls": false,
+        "topic_topology": "single",
+        "topology": "application_rtt",
+        "warmup_s": 3.0
+      },
+      "point_index": 7,
+      "runs": [
+        {
+          "ab_label": "A",
+          "slot": 0,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22506.035396453724,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 1,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20931.608863217632,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 2,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20775.561479172815,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 3,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22174.850254818546,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 4,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22964.196759483417,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 5,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21076.66130263801,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 6,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21065.226099737272,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 7,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22952.331591925955,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 8,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22962.65055838276,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 9,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20739.311084550976,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 10,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20954.694992185436,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 11,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 23014.341156647883,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 12,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22935.521052867607,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 13,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21004.326122671842,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 14,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20992.500341329185,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 15,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22519.531934151844,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 16,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22312.610957098696,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 17,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20924.65608926179,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 18,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20839.366709524827,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 19,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 21919.723058822085,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "A",
+          "slot": 20,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22364.062732333932,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        },
+        {
+          "ab_label": "B",
+          "slot": 21,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20840.18077663736,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "B",
+          "slot": 22,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 20935.88595549072,
+          "non_comparable": false,
+          "reason": null,
+          "client": "mqttium"
+        },
+        {
+          "ab_label": "A",
+          "slot": 23,
+          "status": "inconclusive",
+          "primary_msgs_per_s": 22376.882722817547,
+          "non_comparable": false,
+          "reason": null,
+          "client": "gmqtt"
+        }
+      ],
+      "slot_rates": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "verdict": {
+        "absolute_effect_pct": null,
+        "ci_high": null,
+        "ci_low": null,
+        "excludes_zero_effect": false,
+        "median_ratio": null,
+        "n_blocks": 0,
+        "verdict": "inconclusive"
+      }
+    }
+  ],
+  "profile": "standard",
+  "runs": [
+    {
+      "ab_label": "A",
+      "slot": 0,
+      "status": "valid",
+      "primary_msgs_per_s": 14619.437149805191,
+      "client": "gmqtt"
+    },
+    {
+      "ab_label": "B",
+      "slot": 1,
+      "status": "valid",
+      "primary_msgs_per_s": 13012.196267191946,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "B",
+      "slot": 2,
+      "status": "valid",
+      "primary_msgs_per_s": 13012.193967327878,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "A",
+      "slot": 3,
+      "status": "valid",
+      "primary_msgs_per_s": 14620.326001236494,
+      "client": "gmqtt"
+    },
+    {
+      "ab_label": "A",
+      "slot": 4,
+      "status": "valid",
+      "primary_msgs_per_s": 14620.341195246814,
+      "client": "gmqtt"
+    },
+    {
+      "ab_label": "B",
+      "slot": 5,
+      "status": "valid",
+      "primary_msgs_per_s": 13010.184698643125,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "B",
+      "slot": 6,
+      "status": "valid",
+      "primary_msgs_per_s": 13011.525309510389,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "A",
+      "slot": 7,
+      "status": "valid",
+      "primary_msgs_per_s": 14620.320501557022,
+      "client": "gmqtt"
+    },
+    {
+      "ab_label": "A",
+      "slot": 8,
+      "status": "valid",
+      "primary_msgs_per_s": 14620.344779637086,
+      "client": "gmqtt"
+    },
+    {
+      "ab_label": "B",
+      "slot": 9,
+      "status": "valid",
+      "primary_msgs_per_s": 13011.909906998688,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "B",
+      "slot": 10,
+      "status": "valid",
+      "primary_msgs_per_s": 13008.911770997787,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "A",
+      "slot": 11,
+      "status": "valid",
+      "primary_msgs_per_s": 14620.32737675981,
+      "client": "gmqtt"
+    },
+    {
+      "ab_label": "A",
+      "slot": 12,
+      "status": "valid",
+      "primary_msgs_per_s": 14620.340009787933,
+      "client": "gmqtt"
+    },
+    {
+      "ab_label": "B",
+      "slot": 13,
+      "status": "valid",
+      "primary_msgs_per_s": 13011.946974145078,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "B",
+      "slot": 14,
+      "status": "valid",
+      "primary_msgs_per_s": 13010.31548645368,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "A",
+      "slot": 15,
+      "status": "valid",
+      "primary_msgs_per_s": 14617.519222090528,
+      "client": "gmqtt"
+    },
+    {
+      "ab_label": "A",
+      "slot": 16,
+      "status": "valid",
+      "primary_msgs_per_s": 14620.33044446228,
+      "client": "gmqtt"
+    },
+    {
+      "ab_label": "B",
+      "slot": 17,
+      "status": "valid",
+      "primary_msgs_per_s": 13012.064934026286,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "B",
+      "slot": 18,
+      "status": "valid",
+      "primary_msgs_per_s": 13011.743090376047,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "A",
+      "slot": 19,
+      "status": "valid",
+      "primary_msgs_per_s": 14620.256997330933,
+      "client": "gmqtt"
+    },
+    {
+      "ab_label": "A",
+      "slot": 20,
+      "status": "valid",
+      "primary_msgs_per_s": 14618.65672110381,
+      "client": "gmqtt"
+    },
+    {
+      "ab_label": "B",
+      "slot": 21,
+      "status": "valid",
+      "primary_msgs_per_s": 13008.774774564969,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "B",
+      "slot": 22,
+      "status": "valid",
+      "primary_msgs_per_s": 13010.615323538897,
+      "client": "mqttium"
+    },
+    {
+      "ab_label": "A",
+      "slot": 23,
+      "status": "valid",
+      "primary_msgs_per_s": 14620.340837041911,
+      "client": "gmqtt"
+    }
+  ],
+  "scenario": "application_rtt_qos1",
+  "schema_version": 1,
+  "verdict": {
+    "points": [
+      {
+        "index": 0,
+        "verdict": "regression"
+      },
+      {
+        "index": 1,
+        "verdict": "regression"
+      },
+      {
+        "index": 2,
+        "verdict": "regression"
+      },
+      {
+        "index": 3,
+        "verdict": "regression"
+      },
+      {
+        "index": 4,
+        "verdict": "inconclusive"
+      },
+      {
+        "index": 5,
+        "verdict": "inconclusive"
+      },
+      {
+        "index": 6,
+        "verdict": "inconclusive"
+      },
+      {
+        "index": 7,
+        "verdict": "inconclusive"
+      }
+    ],
+    "verdict": "multi_point"
+  }
+}
