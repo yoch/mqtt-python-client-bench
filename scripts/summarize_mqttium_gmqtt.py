@@ -31,9 +31,11 @@ def qos_rate(doc, qos: int, proto: str):
 def matrix_table(root: Path) -> dict:
     by_client: dict = {}
     for d in load_results(root, reference=None):
+        if d.client not in ("mqttium", "gmqtt") or not d.scenario:
+            continue
         by_client.setdefault(d.client, {})[d.scenario] = d
     rows = []
-    scenarios = sorted({s for docs in by_client.values() for s in docs})
+    scenarios = sorted({s for docs in by_client.values() for s in docs if s})
     ordered = [s for s in PRIORITY if s in scenarios] + [s for s in scenarios if s not in PRIORITY]
     for scenario in ordered:
         m = by_client.get("mqttium", {}).get(scenario)
