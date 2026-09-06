@@ -270,6 +270,22 @@ Mosquitto 2.1 is single-threaded: do not widen the broker cpuset.
   Distinct from `rtt_capacity_qos1` (ceiling) and `application_rtt_qos1`
   (NOT CROSS-CLIENT COMPARABLE). If a client cannot hold a shared point, the
   point is `offer_limited`; the rate is not lowered.
+- **ABBA / A/A**: `run compare` alternates ABBA and BAAB so each client
+  occupies the same number of inner and outer slots when the block count is
+  even. The published ratio is always candidate / baseline. The centre is
+  the geometric mean of the two designs, so a pure position effect that
+  maps to `r` and `1/r` recentres on 1. Same-client A/A is a fail-closed
+  official gate: `|effect| ≤ 3 %` and a CI compatible with ratio 1. Default
+  official A/A variants are 25 % MQTTv311 (index 0) and 75 % MQTTv311
+  (index 4).
+- **90 % of closed-loop RTT capacity is often not a sustainable open-loop
+  offer.** A client can complete ~C pairs/s when it is allowed to back-pressure
+  itself; offering `0.90 × C_common` as an open-loop `target_rate` can still
+  miss slots. Those runs are `inconclusive` (`open_loop_backpressure_misses`).
+  Do not lower `MATCHED_LOAD_BACKPRESSURE_MAX` (0.2 %) to manufacture a
+  ranking. A 1-run smoke `C_common` can overestimate the official 5/5 median;
+  that is not a reason to change `rtt_capacity_qos1`. A 90 % point that
+  cannot hold the offer stays unpublished.
 - **Refusals**: `awscrt` → `not_implemented:tcp_nodelay`.
 
 ---

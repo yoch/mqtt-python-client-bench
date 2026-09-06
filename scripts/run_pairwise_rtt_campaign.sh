@@ -11,9 +11,16 @@
 # Previous three-way ARM results (Paho-sized C_common, bridged RTT) are
 # historical / asyncio_bridged / not evidence of a native asyncio ranking.
 #
+# Official ranking uses ABBA/BAAB counterbalancing and a geometric
+# centre so a position effect cannot become a client "improvement".
+# Same-client A/A is fail-closed on the standard profile
+# (|effect| <= 3 % and CI compatible with ratio 1). Default A/A
+# variants are 25 % and 75 % MQTTv311 (indexes 0,4).
+#
 # Usage:
 #   bash scripts/run_pairwise_rtt_campaign.sh
 #   PROFILE=smoke bash scripts/run_pairwise_rtt_campaign.sh   # functional only
+#   bash scripts/run_targeted_aa_validation.sh                  # A/A recheck
 #   BENCH_BROKER=127.0.0.1:11883 BENCH_BROKER_PID=$pid \\
 #     bash scripts/run_pairwise_rtt_campaign.sh
 set -euo pipefail
@@ -33,10 +40,21 @@ ABBA_BLOCKS="${ABBA_BLOCKS:-6}"
 AA_BLOCKS="${AA_BLOCKS:-6}"
 RUN_ABBA="${RUN_ABBA:-1}"
 RUN_AA="${RUN_AA:-1}"
+RUN_LOAD_MATRIX="${RUN_LOAD_MATRIX:-1}"
+RUN_ASYNCIO_PAIR="${RUN_ASYNCIO_PAIR:-1}"
+RUN_SYNC_REFERENCE_PAIR="${RUN_SYNC_REFERENCE_PAIR:-1}"
 # Empty = every expanded point. Smoke may set e.g. 0,1 (25% v311 and 25% v5).
 ABBA_VARIANT_INDEXES="${ABBA_VARIANT_INDEXES:-}"
-# expand order: fraction then protocol → index 4 is 75% MQTTv311.
-AA_VARIANT_INDEX="${AA_VARIANT_INDEX:-4}"
+# expand order: fraction then protocol → 0 = 25% MQTTv311, 4 = 75% MQTTv311.
+# AA_VARIANT_INDEX remains a one-point override when AA_VARIANT_INDEXES is unset.
+AA_VARIANT_INDEXES="${AA_VARIANT_INDEXES:-${AA_VARIANT_INDEX:-0,4}}"
+if [ -z "${AA_CONTROL_ENFORCE:-}" ]; then
+  if [ "$PROFILE" = "standard" ]; then
+    AA_CONTROL_ENFORCE=1
+  else
+    AA_CONTROL_ENFORCE=0
+  fi
+fi
 
 if [ "${CLIENTS:-}" = "mqttium,gmqtt,paho" ] || [ "${CLIENTS:-}" = "mqttium,paho,gmqtt" ]; then
   echo "three-way CLIENTS= is refused: Paho must not size the asyncio grid" >&2
@@ -125,15 +143,19 @@ print(json.dumps(payload, indent=2, default=str))
 PY
 
   echo "==> [$label] matched-load application RTT ($pair)"
-  python -m mqtt_client_bench.run matrix \
-    --clients "$pair" \
-    --scenario application_rtt_fixed_rate \
-    --profile "$PROFILE" \
-    --runs "$MATRIX_RUNS" \
-    "${BROKER_ARGS[@]}" \
-    --load-profile-dir "$cal_dir" \
-    --output-dir "$pair_dir" \
-    >"$LOG_DIR/matrix-${label}-application_rtt_fixed_rate.log" 2>&1
+  if [ "$RUN_LOAD_MATRIX" = "1" ]; then
+    python -m mqtt_client_bench.run matrix \
+      --clients "$pair" \
+      --scenario application_rtt_fixed_rate \
+      --profile "$PROFILE" \
+      --runs "$MATRIX_RUNS" \
+      "${BROKER_ARGS[@]}" \
+      --load-profile-dir "$cal_dir" \
+      --output-dir "$pair_dir" \
+      >"$LOG_DIR/matrix-${label}-application_rtt_fixed_rate.log" 2>&1
+  else
+    echo "==> [$label] skipping matched-load matrix (RUN_LOAD_MATRIX=0)"
+  fi
 
   if [ "$RUN_ABBA" = "1" ]; then
     echo "==> [$label] ABBA $pair application_rtt_fixed_rate blocks=${ABBA_BLOCKS}"
@@ -167,36 +189,62 @@ PY
   if [ "$RUN_AA" = "1" ]; then
     local a_client="${pair%%,*}"
     local b_client="${pair#*,}"
-    echo "==> [$label] A/A ${a_client} variant=${AA_VARIANT_INDEX}"
-    python -m mqtt_client_bench.run compare \
-      --clients "${a_client},${a_client}" \
-      --scenario application_rtt_fixed_rate \
-      --profile "$PROFILE" \
-      --blocks "$AA_BLOCKS" \
-      --variant-index "$AA_VARIANT_INDEX" \
-      "${BROKER_ARGS[@]}" \
-      --load-profile-dir "$cal_dir/aa" \
-      --output "${pair_dir}/compare-aa-${a_client}-application_rtt_fixed_rate-v${AA_VARIANT_INDEX}.json" \
-      >"$LOG_DIR/aa-${label}-${a_client}-v${AA_VARIANT_INDEX}.log" 2>&1
-    echo "==> [$label] A/A ${b_client} variant=${AA_VARIANT_INDEX}"
-    python -m mqtt_client_bench.run compare \
-      --clients "${b_client},${b_client}" \
-      --scenario application_rtt_fixed_rate \
-      --profile "$PROFILE" \
-      --blocks "$AA_BLOCKS" \
-      --variant-index "$AA_VARIANT_INDEX" \
-      "${BROKER_ARGS[@]}" \
-      --load-profile-dir "$cal_dir/aa" \
-      --output "${pair_dir}/compare-aa-${b_client}-application_rtt_fixed_rate-v${AA_VARIANT_INDEX}.json" \
-      >"$LOG_DIR/aa-${label}-${b_client}-v${AA_VARIANT_INDEX}.log" 2>&1
+    IFS=',' read -ra aa_idxs <<< "$AA_VARIANT_INDEXES"
+    for idx in "${aa_idxs[@]}"; do
+      idx="${idx// /}"
+      [ -n "$idx" ] || continue
+      echo "==> [$label] A/A ${a_client} variant=${idx}"
+      python -m mqtt_client_bench.run compare \
+        --clients "${a_client},${a_client}" \
+        --scenario application_rtt_fixed_rate \
+        --profile "$PROFILE" \
+        --blocks "$AA_BLOCKS" \
+        --variant-index "$idx" \
+        "${BROKER_ARGS[@]}" \
+        --load-profile-dir "$cal_dir/aa" \
+        --output "${pair_dir}/compare-aa-${a_client}-application_rtt_fixed_rate-v${idx}.json" \
+        >"$LOG_DIR/aa-${label}-${a_client}-v${idx}.log" 2>&1
+      if [ "$a_client" != "$b_client" ]; then
+        echo "==> [$label] A/A ${b_client} variant=${idx}"
+        python -m mqtt_client_bench.run compare \
+          --clients "${b_client},${b_client}" \
+          --scenario application_rtt_fixed_rate \
+          --profile "$PROFILE" \
+          --blocks "$AA_BLOCKS" \
+          --variant-index "$idx" \
+          "${BROKER_ARGS[@]}" \
+          --load-profile-dir "$cal_dir/aa" \
+          --output "${pair_dir}/compare-aa-${b_client}-application_rtt_fixed_rate-v${idx}.json" \
+          >"$LOG_DIR/aa-${label}-${b_client}-v${idx}.log" 2>&1
+      fi
+    done
   fi
 }
 
-run_pair "mqttium,gmqtt" "asyncio"
-run_pair "mqttium,paho" "sync_reference"
+[ "$RUN_ASYNCIO_PAIR" = "1" ] && run_pair "mqttium,gmqtt" "asyncio"
+[ "$RUN_SYNC_REFERENCE_PAIR" = "1" ] && run_pair "mqttium,paho" "sync_reference"
 
 python -m mqtt_client_bench.run results archive --input "$OUT/asyncio" --archive "$ARCHIVE_DIR/asyncio" || true
 python -m mqtt_client_bench.run results archive --input "$OUT/sync_reference" --archive "$ARCHIVE_DIR/sync_reference" || true
 python scripts/persist_pairwise_evidence.py "$OUT" --output "$OUT/pairwise-run-table.json"
 
-echo "PAIRWISE_NATIVE_RTT_DONE profile=${PROFILE} out=${OUT}"
+python - "$OUT" "$AA_CONTROL_ENFORCE" "$RUN_AA" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+from mqtt_client_bench.pairwise import enforce_aa_controls
+
+root = Path(sys.argv[1])
+enforce = sys.argv[2] == "1"
+run_aa = sys.argv[3] == "1"
+if not run_aa:
+    raise SystemExit(0)
+try:
+    payload = enforce_aa_controls(root, enforce=enforce, require_files=enforce)
+except ValueError as exc:
+    raise SystemExit(str(exc)) from exc
+print(json.dumps(payload, indent=2, default=str))
+PY
+
+echo "PAIRWISE_NATIVE_RTT_DONE profile=${PROFILE} out=${OUT} aa_indexes=${AA_VARIANT_INDEXES} aa_enforce=${AA_CONTROL_ENFORCE}"

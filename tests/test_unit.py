@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import sys
@@ -66,18 +67,27 @@ from mqtt_client_bench.metrics import (  # noqa: E402
     LATENCY_P50_METRIC,
     THROUGHPUT_METRIC,
     abba_block_ratios,
+    abba_block_records,
     abba_observation_usable,
     abba_order,
+    abba_position_counts,
+    balanced_geometric_ratio,
     compare_verdict,
     compare_verdict_from_block_ratios,
     comparison_spec,
     comparison_value,
+    geometric_mean,
     integrity_counts,
     latency_summary,
     median,
     percentile,
     sanitize_number,
     summarize_valid_runs,
+)
+from mqtt_client_bench.pairwise import (  # noqa: E402
+    OFFICIAL_AA_VARIANT_INDEXES,
+    evaluate_aa_control,
+    enforce_aa_controls,
 )
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, estimate_suite, expand_scenario, list_scenarios  # noqa: E402
 from mqtt_client_bench.sampling import (  # noqa: E402
@@ -129,21 +139,34 @@ class MetricsTests(unittest.TestCase):
 
     def test_abba_order(self):
         self.assertEqual(abba_order(1), ["A", "B", "B", "A"])
+        self.assertEqual(abba_order(2), ["A", "B", "B", "A", "B", "A", "A", "B"])
+        self.assertEqual(abba_order(3), ["A", "B", "B", "A", "B", "A", "A", "B", "A", "B", "B", "A"])
         self.assertEqual(len(abba_order(4)), 16)
         self.assertEqual(abba_order(4).count("A"), 8)
         self.assertEqual(abba_order(4).count("B"), 8)
+        counts = abba_position_counts(abba_order(4))
+        self.assertEqual(counts["A"]["inner"], counts["B"]["inner"])
+        self.assertEqual(counts["A"]["outer"], counts["B"]["outer"])
+        self.assertEqual(counts["A"]["inner"], counts["A"]["outer"])
 
     def test_abba_block_ratios_deterministic(self):
         order = abba_order(2)
-        # A=100, B=110, B=110, A=100  => ratio 1.1 twice
-        rates = [100.0, 110.0, 110.0, 100.0, 100.0, 110.0, 110.0, 100.0]
+        # A=100, B=110 regardless of slot, so both designs yield 1.1
+        rates = [110.0 if label == "B" else 100.0 for label in order]
         ratios = abba_block_ratios(order, rates)
         self.assertEqual(ratios, [1.1, 1.1])
-        verdict = compare_verdict_from_block_ratios(ratios, min_effect_pct=3.0, seed=1)
+        records = abba_block_records(order, rates)
+        self.assertEqual([rec["design"] for rec in records], ["ABBA", "BAAB"])
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, designs=[rec["design"] for rec in records]
+        )
         self.assertEqual(verdict["verdict"], "improvement")
         self.assertEqual(verdict["comparison_direction"], HIGHER_IS_BETTER)
+        self.assertEqual(verdict["estimator"], "balanced_geometric_mean")
         # Incomplete block with None is dropped.
-        self.assertEqual(abba_block_ratios(order, [100.0, None, 110.0, 100.0] + rates[4:]), [1.1])
+        incomplete = list(rates)
+        incomplete[1] = None
+        self.assertEqual(abba_block_ratios(order, incomplete), [1.1])
 
     def test_application_rtt_compare_uses_latency_p50_lower_is_better(self):
         spec = comparison_spec("application_rtt_fixed_rate")
@@ -4631,6 +4654,128 @@ class CrossClientLoadTests(unittest.TestCase):
         self.assertIsNone(under.get("target_rate_override"))
 
 
+class AbbaCounterbalanceTests(unittest.TestCase):
+    """ABBA/BAAB must not turn a slot effect into a client improvement."""
+
+    def _values(self, order, *, outer=0.40, inner=0.24, b_scale=1.0):
+        values = []
+        for i, label in enumerate(order):
+            base = outer if (i % 4) in (0, 3) else inner
+            values.append(base * b_scale if label == "B" else base)
+        return values
+
+    def test_even_blocks_give_equal_inner_outer_slots(self):
+        for blocks in (2, 4, 6):
+            order = abba_order(blocks)
+            counts = abba_position_counts(order)
+            self.assertEqual(order.count("A"), order.count("B"), blocks)
+            self.assertEqual(counts["A"]["inner"], counts["B"]["inner"], blocks)
+            self.assertEqual(counts["A"]["outer"], counts["B"]["outer"], blocks)
+            self.assertEqual(counts["A"]["inner"], counts["A"]["outer"], blocks)
+
+    def test_ratio_is_always_candidate_over_baseline(self):
+        order = abba_order(2)
+        rates = [2.0 if label == "B" else 1.0 for label in order]
+        records = abba_block_records(order, rates)
+        self.assertEqual([rec["design"] for rec in records], ["ABBA", "BAAB"])
+        self.assertEqual([rec["ratio"] for rec in records], [2.0, 2.0])
+
+    def test_pure_slot_effect_has_no_client_effect(self):
+        order = abba_order(2)
+        values = self._values(order, outer=0.40, inner=0.24, b_scale=1.0)
+        records = abba_block_records(order, values)
+        ratios = [rec["ratio"] for rec in records]
+        designs = [rec["design"] for rec in records]
+        self.assertAlmostEqual(ratios[0], 0.24 / 0.40)
+        self.assertAlmostEqual(ratios[1], 0.40 / 0.24)
+        centre = balanced_geometric_ratio(ratios, designs)
+        self.assertAlmostEqual(centre, 1.0)
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertEqual(verdict["verdict"], "inconclusive")
+        self.assertAlmostEqual(verdict["median_ratio"], 1.0)
+        self.assertAlmostEqual(verdict["geometric_ratio"], 1.0)
+        self.assertLess(abs(verdict["absolute_effect_pct"]), 0.01)
+        self.assertFalse(verdict["excludes_zero_effect"])
+
+    def test_odd_blocks_two_stage_mean_still_recentres(self):
+        order = abba_order(3)
+        values = self._values(order, outer=0.40, inner=0.24)
+        records = abba_block_records(order, values)
+        ratios = [rec["ratio"] for rec in records]
+        designs = [rec["design"] for rec in records]
+        self.assertEqual(designs, ["ABBA", "BAAB", "ABBA"])
+        arithmetic = median(ratios)
+        self.assertLess(arithmetic, 0.7)
+        centre = balanced_geometric_ratio(ratios, designs)
+        self.assertAlmostEqual(centre, 1.0)
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertEqual(verdict["verdict"], "inconclusive")
+        self.assertAlmostEqual(verdict["median_ratio"], 1.0)
+
+    def test_true_plus_10_percent_client_latency_is_regression(self):
+        order = abba_order(2)
+        values = self._values(order, outer=0.40, inner=0.24, b_scale=1.10)
+        records = abba_block_records(order, values)
+        ratios = [rec["ratio"] for rec in records]
+        designs = [rec["design"] for rec in records]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertAlmostEqual(verdict["median_ratio"], 1.10, places=5)
+        self.assertEqual(verdict["verdict"], "regression")
+        self.assertGreater(verdict["absolute_effect_pct"], 9.0)
+
+    def test_true_minus_10_percent_client_latency_is_improvement(self):
+        order = abba_order(2)
+        values = self._values(order, outer=0.40, inner=0.24, b_scale=0.90)
+        records = abba_block_records(order, values)
+        ratios = [rec["ratio"] for rec in records]
+        designs = [rec["design"] for rec in records]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertAlmostEqual(verdict["median_ratio"], 0.90, places=5)
+        self.assertEqual(verdict["verdict"], "improvement")
+        self.assertLess(verdict["absolute_effect_pct"], -9.0)
+
+    def test_log_domain_is_symmetric_under_inversion(self):
+        ratios = [0.6, 1.0 / 0.6]
+        centre = geometric_mean(ratios)
+        inverted = geometric_mean([1.0 / r for r in ratios])
+        self.assertAlmostEqual(centre, 1.0)
+        self.assertAlmostEqual(centre * inverted, 1.0)
+        self.assertAlmostEqual(geometric_mean(ratios) * geometric_mean([1.0 / r for r in ratios]), 1.0)
+
+    def test_unbalanced_abba_only_still_exposes_slot_bias(self):
+        order = ["A", "B", "B", "A"]
+        values = self._values(order, outer=0.40, inner=0.24)
+        records = abba_block_records(order, values)
+        ratios = [rec["ratio"] for rec in records]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER,
+            designs=[rec["design"] for rec in records],
+        )
+        self.assertAlmostEqual(verdict["median_ratio"], 0.6)
+        self.assertEqual(verdict["verdict"], "improvement")
+
+    def test_official_aa_indexes_are_25_and_75_v311(self):
+        points = expand_scenario(SCENARIO_BY_NAME["application_rtt_fixed_rate"], "standard")
+        self.assertEqual(OFFICIAL_AA_VARIANT_INDEXES, (0, 4))
+        self.assertEqual(points[0]["shared_load_fraction"], 0.25)
+        self.assertEqual(points[0]["protocol"], "MQTTv311")
+        self.assertEqual(points[4]["shared_load_fraction"], 0.75)
+        self.assertEqual(points[4]["protocol"], "MQTTv311")
+        targeted = (ROOT / "scripts/run_targeted_aa_validation.sh").read_text()
+        self.assertIn('AA_VARIANT_INDEXES="${AA_VARIANT_INDEXES:-0,4}"', targeted)
+        self.assertIn('AA_BLOCKS="${AA_BLOCKS:-2}"', targeted)
+        self.assertIn('AA_CONTROL_ENFORCE="${AA_CONTROL_ENFORCE:-1}"', targeted)
+        self.assertIn("RUN_SYNC_REFERENCE_PAIR", targeted)
+
+
 class NativeRttDriveTests(unittest.TestCase):
     """application_rtt must take the native path when the library has one."""
 
@@ -4688,6 +4833,11 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertTrue(row["io_model"])
         self.assertTrue(row["completion_mechanism"])
         self.assertEqual(row["client"], "mqttium")
+        self.assertEqual(row["io_model"], "asyncio_bridged")
+        self.assertEqual(row["adapter_io_model"], row["io_model"])
+        self.assertEqual(row["publish_path"], "native_async")
+        self.assertEqual(row["rtt_publish_path"], "native_async")
+        self.assertNotEqual(row["io_model"], row["publish_path"])
 
     def test_extract_run_row_keeps_offer_and_path(self):
         from mqtt_client_bench.archive import extract_run_row
@@ -4854,6 +5004,47 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertEqual(summaries[0]["block_ratios"], [1.08, 1.07])
         self.assertEqual(summaries[0]["comparison_metric"], "latency_p50_ms")
         self.assertEqual(summaries[0]["comparison_direction"], "lower_is_better")
+        self.assertEqual(summaries[0]["publish_path_baseline"], "native_async")
+        self.assertEqual(summaries[0]["publish_path_candidate"], "native_async")
+
+    def test_compare_summary_falls_back_to_run_publish_path(self):
+        from mqtt_client_bench.archive import extract_compare_summaries
+
+        doc = {
+            "scenario": "application_rtt_fixed_rate",
+            "baseline_client": "mqttium",
+            "candidate_client": "paho",
+            "baseline_identity": {"io_model": "asyncio_bridged"},
+            "candidate_identity": {"io_model": "sync"},
+            "points": [
+                {
+                    "point": {"protocol": "MQTTv311", "shared_load_fraction": 0.25},
+                    "verdict": {
+                        "verdict": "inconclusive",
+                        "n_blocks": 2,
+                        "block_ratios": [1.0, 1.0],
+                        "median_ratio": 1.0,
+                    },
+                    "runs": [
+                        {
+                            "client": "mqttium",
+                            "publish_path": "native_async",
+                            "client_identity": {"publish_path": "native_async"},
+                        },
+                        {
+                            "client": "paho",
+                            "publish_path": "sync_facade",
+                            "client_identity": {"publish_path": "sync_facade"},
+                        },
+                    ],
+                }
+            ],
+        }
+        summaries = extract_compare_summaries(doc)
+        self.assertEqual(summaries[0]["publish_path_baseline"], "native_async")
+        self.assertEqual(summaries[0]["publish_path_candidate"], "sync_facade")
+        self.assertEqual(summaries[0]["adapter_io_model_baseline"], "asyncio_bridged")
+        self.assertEqual(summaries[0]["adapter_io_model_candidate"], "sync")
 
     def test_require_native_raises_on_silent_facade(self):
         from mqtt_client_bench.roles.rtt_drive import (
@@ -4880,8 +5071,12 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertNotIn("--clients mqttium,gmqtt,paho", official)
         self.assertIn('--clients "$pair"', official)
         self.assertIn("write_official_rtt_calibrations", official)
-        self.assertIn('AA_VARIANT_INDEX="${AA_VARIANT_INDEX:-4}"', official)
+        self.assertIn('AA_VARIANT_INDEXES="${AA_VARIANT_INDEXES:-${AA_VARIANT_INDEX:-0,4}}"', official)
         self.assertIn("ABBA_VARIANT_INDEXES", official)
+        self.assertIn("AA_CONTROL_ENFORCE", official)
+        self.assertIn("enforce_aa_controls", official)
+        self.assertIn("RUN_LOAD_MATRIX", official)
+        self.assertIn("run_targeted_aa_validation.sh", official)
         self.assertIn('--load-profile-dir "$cal_dir/aa"', official)
         self.assertIn("SUPERSEDED", legacy)
         self.assertIn("run_pairwise_rtt_campaign.sh", legacy)
@@ -4895,6 +5090,12 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertIn('GMQTT_VER: "0.7.0"', workflow)
         self.assertIn('PAHO_VER: "2.1.0"', workflow)
         self.assertIn("ABBA_VARIANT_INDEXES=0,1", workflow)
+        self.assertIn("AA_VARIANT_INDEXES=0", workflow)
+        self.assertIn("AA_VARIANT_INDEXES=0,4", workflow)
+        self.assertIn("aa-validation", workflow)
+        self.assertIn("run_targeted_aa_validation.sh", workflow)
+        self.assertIn("AA_CONTROL_ENFORCE=1", workflow)
+        self.assertIn("AA_BLOCKS=2", workflow)
         self.assertIn("BENCH_BROKER_PID", workflow)
         self.assertIn("echo \"BENCH_BROKER_PID=$pid\"", workflow)
         official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
@@ -5191,6 +5392,132 @@ class PairwiseCapacityGateTests(unittest.TestCase):
         inspected = official_rtt_capacity_block(block, "gmqtt", required_valid=5)
         self.assertTrue(any("non_native_rtt_path" in e for e in inspected["errors"]))
         self.assertIsNone(inspected["capacity_msgs_per_s"])
+
+
+class AaControlGateTests(unittest.TestCase):
+    """Same-client A/A must fail closed before an official ranking is published."""
+
+    def _compare_doc(
+        self,
+        *,
+        same_client=True,
+        effect_pct=-39.52,
+        excludes_zero=True,
+        n_blocks=1,
+        fraction=0.25,
+        protocol="MQTTv311",
+        ratio=None,
+    ):
+        if ratio is None:
+            ratio = 1.0 + (effect_pct / 100.0)
+        return {
+            "baseline_client": "mqttium",
+            "candidate_client": "mqttium" if same_client else "gmqtt",
+            "points": [
+                {
+                    "point": {
+                        "shared_load_fraction": fraction,
+                        "protocol": protocol,
+                        "target_rate": 3889,
+                    },
+                    "verdict": {
+                        "verdict": "improvement" if excludes_zero else "inconclusive",
+                        "median_ratio": ratio,
+                        "ci_low": -0.41 if excludes_zero else -0.02,
+                        "ci_high": -0.38 if excludes_zero else 0.02,
+                        "excludes_zero_effect": excludes_zero,
+                        "absolute_effect_pct": effect_pct,
+                        "n_blocks": n_blocks,
+                        "block_designs": ["ABBA"] if n_blocks == 1 else ["ABBA", "BAAB"],
+                    },
+                }
+            ],
+        }
+
+    def test_non_neutral_aa_fails_closed(self):
+        control = evaluate_aa_control(self._compare_doc())
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("abs_effect", control["aa_control_reason"])
+        self.assertAlmostEqual(control["aa_absolute_effect_pct"], -39.52)
+        self.assertEqual(control["aa_variant"]["shared_load_fraction"], 0.25)
+        self.assertEqual(control["aa_variant"]["protocol"], "MQTTv311")
+
+    def test_huge_effect_with_wide_ci_still_fails(self):
+        control = evaluate_aa_control(
+            self._compare_doc(effect_pct=-39.52, excludes_zero=False, ratio=0.60)
+        )
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("abs_effect", control["aa_control_reason"])
+
+    def test_neutral_aa_allows_continuation(self):
+        control = evaluate_aa_control(
+            self._compare_doc(
+                effect_pct=-0.16,
+                excludes_zero=False,
+                n_blocks=2,
+                ratio=0.9984,
+            )
+        )
+        self.assertIs(control["aa_control_pass"], True)
+        self.assertEqual(control["aa_control_reason"], "neutral")
+
+    def test_ci_excluding_zero_fails_even_if_effect_is_small(self):
+        control = evaluate_aa_control(
+            self._compare_doc(effect_pct=2.0, excludes_zero=True, n_blocks=6, ratio=1.02)
+        )
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("ci_excludes_zero", control["aa_control_reason"])
+
+    def test_ab_compare_is_not_an_aa_gate(self):
+        control = evaluate_aa_control(self._compare_doc(same_client=False))
+        self.assertIsNone(control["aa_control_pass"])
+        self.assertEqual(control["aa_control_reason"], "not_same_client")
+
+    def test_official_enforce_raises_on_non_neutral_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "compare-aa-mqttium-application_rtt_fixed_rate-v0.json"
+            path.write_text(json.dumps(self._compare_doc()) + "\n", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                enforce_aa_controls(root, enforce=True, require_files=True)
+            self.assertIn("A/A control failed", str(ctx.exception))
+            recorded = enforce_aa_controls(root, enforce=False, require_files=True)
+            self.assertFalse(recorded["ok"])
+            self.assertEqual(recorded["n_files"], 1)
+
+    def test_official_enforce_passes_neutral_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "compare-aa-mqttium-application_rtt_fixed_rate-v0.json"
+            path.write_text(
+                json.dumps(
+                    self._compare_doc(
+                        effect_pct=0.4,
+                        excludes_zero=False,
+                        n_blocks=2,
+                        ratio=1.004,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            payload = enforce_aa_controls(root, enforce=True, require_files=True)
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["reports"][0]["aa_control_pass"])
+
+    def test_missing_aa_files_fail_when_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                enforce_aa_controls(tmp, enforce=True, require_files=True)
+
+    def test_campaign_script_defaults_cover_25_and_75(self):
+        official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
+        self.assertIn("0,4", official)
+        self.assertIn("AA_VARIANT_INDEXES", official)
+        self.assertIn("enforce_aa_controls", official)
+        workflow = (ROOT / "scripts/github/benchmark-matched-load-arm64.yml").read_text()
+        self.assertIn("AbbaCounterbalanceTests", workflow)
+        self.assertIn("AaControlGateTests", workflow)
 
 
 class _FakeSyncOnLoopAdapter:
