@@ -17,6 +17,10 @@
 # incomplete block all fail. Default A/A variants are 25 % and 75 %
 # MQTTv311 (indexes 0,4). Targeted ARM validation uses AA_BLOCKS=4.
 #
+# PROFILE=standard refuses weakened overrides (RUN_AA=0, AA_CONTROL_ENFORCE=0,
+# AA_BLOCKS<6 or odd, missing variant 0 or 4) before any measurement. Smoke
+# and targeted paths may keep AA_BLOCKS=4 and skip ranking.
+#
 # Usage:
 #   bash scripts/run_pairwise_rtt_campaign.sh
 #   PROFILE=smoke bash scripts/run_pairwise_rtt_campaign.sh   # functional only
@@ -60,6 +64,24 @@ if [ "${CLIENTS:-}" = "mqttium,gmqtt,paho" ] || [ "${CLIENTS:-}" = "mqttium,paho
   echo "three-way CLIENTS= is refused: Paho must not size the asyncio grid" >&2
   exit 2
 fi
+
+python - "$PROFILE" "$RUN_AA" "$AA_CONTROL_ENFORCE" "$AA_BLOCKS" "$AA_VARIANT_INDEXES" <<'PY'
+import json
+import sys
+
+from mqtt_client_bench.pairwise import validate_official_pairwise_policy
+
+payload = validate_official_pairwise_policy(
+    profile=sys.argv[1],
+    run_aa=sys.argv[2],
+    aa_control_enforce=sys.argv[3],
+    aa_blocks=sys.argv[4],
+    aa_variant_indexes=sys.argv[5],
+)
+if not payload["ok"]:
+    raise SystemExit(";".join(payload["violations"]))
+print(json.dumps(payload))
+PY
 
 echo "=== pin exact measured versions ==="
 pip install --force-reinstall --no-cache-dir \
@@ -241,16 +263,28 @@ persist_evidence() {
 }
 
 enforce_aa() {
-  python - "$OUT" "$AA_CONTROL_ENFORCE" "$RUN_AA" <<'PY'
+  python - "$OUT" "$AA_CONTROL_ENFORCE" "$RUN_AA" "$PROFILE" "$AA_BLOCKS" "$AA_VARIANT_INDEXES" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-from mqtt_client_bench.pairwise import enforce_aa_controls
+from mqtt_client_bench.pairwise import (
+    enforce_aa_controls,
+    validate_official_pairwise_policy,
+)
 
 root = Path(sys.argv[1])
 enforce = sys.argv[2] == "1"
 run_aa = sys.argv[3] == "1"
+policy = validate_official_pairwise_policy(
+    profile=sys.argv[4],
+    run_aa=sys.argv[3],
+    aa_control_enforce=sys.argv[2],
+    aa_blocks=sys.argv[5],
+    aa_variant_indexes=sys.argv[6],
+)
+if not policy["ok"]:
+    raise SystemExit(";".join(policy["violations"]))
 if not run_aa:
     raise SystemExit(0)
 try:
@@ -272,6 +306,15 @@ fi
 persist_evidence
 enforce_aa
 echo "AA_GATE_PASSED profile=${PROFILE} aa_indexes=${AA_VARIANT_INDEXES} aa_blocks=${AA_BLOCKS}"
+
+python - <<'PY'
+from mqtt_client_bench.pairwise import continue_to_ab_ranking
+
+# Reached only if enforce_aa exited 0 (set -e). Standard ranking is forbidden
+# unless that A/A gate passed.
+if not continue_to_ab_ranking(True):
+    raise SystemExit("ab_ranking_refused_after_aa")
+PY
 
 if [ "$RUN_ABBA" = "1" ] || [ "$RUN_LOAD_MATRIX" = "1" ]; then
   [ "$RUN_ASYNCIO_PAIR" = "1" ] && run_ranking "mqttium,gmqtt" "asyncio"

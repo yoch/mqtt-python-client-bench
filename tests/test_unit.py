@@ -86,9 +86,14 @@ from mqtt_client_bench.metrics import (  # noqa: E402
     summarize_valid_runs,
 )
 from mqtt_client_bench.pairwise import (  # noqa: E402
+    OFFICIAL_AA_BLOCKS,
     OFFICIAL_AA_VARIANT_INDEXES,
+    ab_compare_outputs,
+    continue_to_ab_ranking,
     evaluate_aa_control,
     enforce_aa_controls,
+    maybe_run_ab_ranking_after_aa,
+    validate_official_pairwise_policy,
 )
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, estimate_suite, expand_scenario, list_scenarios  # noqa: E402
 from mqtt_client_bench.sampling import (  # noqa: E402
@@ -4758,6 +4763,21 @@ class AbbaCounterbalanceTests(unittest.TestCase):
         self.assertEqual(verdict["verdict"], "regression")
         self.assertGreater(verdict["absolute_effect_pct"], 9.0)
         self.assertTrue(verdict["ci_available"])
+        self.assertEqual(verdict["comparison_direction"], LOWER_IS_BETTER)
+
+    def test_two_noisy_pair_units_ci_contains_zero(self):
+        ratios = [0.97, 1.03, 1.00, 1.01]
+        designs = ["ABBA", "BAAB", "ABBA", "BAAB"]
+        units = complementary_pair_units(ratios, designs)
+        self.assertEqual(len(units), 2)
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertTrue(verdict["ci_available"])
+        self.assertLessEqual(verdict["ci_low"], 0.0)
+        self.assertGreaterEqual(verdict["ci_high"], 0.0)
+        self.assertFalse(verdict["excludes_zero_effect"])
+        self.assertEqual(verdict["verdict"], "inconclusive")
 
     def test_true_minus_10_percent_client_latency_is_improvement(self):
         order = abba_order(4)
@@ -5102,12 +5122,22 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertIn('run_capacity "mqttium,paho"', official)
         self.assertIn('run_aa "mqttium,gmqtt"', official)
         self.assertIn("AA_GATE_PASSED", official)
+        self.assertIn("validate_official_pairwise_policy", official)
+        self.assertIn("continue_to_ab_ranking", official)
+        self.assertLess(
+            official.find("validate_official_pairwise_policy"),
+            official.find('run_capacity "mqttium,gmqtt"'),
+        )
         self.assertLess(
             official.find('run_aa "mqttium,gmqtt"'),
             official.find('run_ranking "mqttium,gmqtt"'),
         )
         self.assertLess(
             official.find("AA_GATE_PASSED"),
+            official.find('run_ranking "mqttium,gmqtt"'),
+        )
+        self.assertLess(
+            official.find("continue_to_ab_ranking"),
             official.find('run_ranking "mqttium,gmqtt"'),
         )
         self.assertNotIn("--clients mqttium,gmqtt,paho", official)
@@ -5708,6 +5738,71 @@ class AaControlGateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 enforce_aa_controls(tmp, enforce=True, require_files=True)
 
+    def test_failed_aa_gate_does_not_run_ranking_or_write_ab_compares(self):
+        called = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "compare-aa-mqttium-application_rtt_fixed_rate-v0.json"
+            path.write_text(json.dumps(self._compare_doc()) + "\n", encoding="utf-8")
+
+            def rank():
+                called.append("rank")
+                (root / "compare-asyncio-application_rtt_fixed_rate.json").write_text(
+                    "{}\n", encoding="utf-8"
+                )
+
+            with self.assertRaises(ValueError):
+                maybe_run_ab_ranking_after_aa(root, enforce=True, rank=rank)
+            self.assertEqual(called, [])
+            self.assertFalse(continue_to_ab_ranking(False))
+            self.assertEqual(ab_compare_outputs(root), [])
+
+    def test_unenforced_failed_aa_still_does_not_rank(self):
+        called = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "compare-aa-mqttium-application_rtt_fixed_rate-v0.json"
+            path.write_text(json.dumps(self._compare_doc()) + "\n", encoding="utf-8")
+            result = maybe_run_ab_ranking_after_aa(
+                root, enforce=False, rank=lambda: called.append("rank")
+            )
+            self.assertFalse(result["ranked"])
+            self.assertEqual(called, [])
+            self.assertEqual(result["ab_outputs"], [])
+            self.assertEqual(ab_compare_outputs(root), [])
+
+    def test_passing_aa_gate_may_run_ranking(self):
+        called = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "compare-aa-mqttium-application_rtt_fixed_rate-v0.json"
+            path.write_text(
+                json.dumps(
+                    self._compare_doc(
+                        effect_pct=0.4,
+                        excludes_zero=False,
+                        n_blocks=4,
+                        ratio=1.004,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            def rank():
+                called.append("rank")
+                (root / "compare-asyncio-application_rtt_fixed_rate.json").write_text(
+                    "{}\n", encoding="utf-8"
+                )
+
+            result = maybe_run_ab_ranking_after_aa(root, enforce=True, rank=rank)
+            self.assertTrue(result["ranked"])
+            self.assertEqual(called, ["rank"])
+            self.assertEqual(
+                result["ab_outputs"],
+                ["compare-asyncio-application_rtt_fixed_rate.json"],
+            )
+
     def test_campaign_script_defaults_cover_25_and_75(self):
         official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
         self.assertIn("0,4", official)
@@ -5717,6 +5812,161 @@ class AaControlGateTests(unittest.TestCase):
         workflow = (ROOT / "scripts/github/benchmark-matched-load-arm64.yml").read_text()
         self.assertIn("AbbaCounterbalanceTests", workflow)
         self.assertIn("AaControlGateTests", workflow)
+
+
+class OfficialPairwisePolicyTests(unittest.TestCase):
+    """PROFILE=standard cannot disable or shrink the official A/A gate."""
+
+    def _policy(self, **kwargs):
+        values = {
+            "profile": "standard",
+            "run_aa": "1",
+            "aa_control_enforce": "1",
+            "aa_blocks": OFFICIAL_AA_BLOCKS,
+            "aa_variant_indexes": "0,4",
+        }
+        values.update(kwargs)
+        return validate_official_pairwise_policy(**values)
+
+    def test_standard_run_aa_zero_fails(self):
+        payload = self._policy(run_aa="0")
+        self.assertFalse(payload["ok"])
+        self.assertIn("official_policy_violation:RUN_AA=0", payload["violations"])
+
+    def test_standard_aa_control_enforce_zero_fails(self):
+        payload = self._policy(aa_control_enforce="0")
+        self.assertFalse(payload["ok"])
+        self.assertIn(
+            "official_policy_violation:AA_CONTROL_ENFORCE=0", payload["violations"]
+        )
+
+    def test_standard_aa_blocks_too_small_fails(self):
+        payload = self._policy(aa_blocks=4)
+        self.assertFalse(payload["ok"])
+        self.assertIn("official_policy_violation:AA_BLOCKS=4", payload["violations"])
+
+    def test_standard_aa_blocks_odd_fails(self):
+        payload = self._policy(aa_blocks=5)
+        self.assertFalse(payload["ok"])
+        self.assertIn(
+            "official_policy_violation:AA_BLOCKS_odd=5", payload["violations"]
+        )
+        self.assertIn("official_policy_violation:AA_BLOCKS=5", payload["violations"])
+
+    def test_standard_missing_variant_0_fails(self):
+        payload = self._policy(aa_variant_indexes="4")
+        self.assertFalse(payload["ok"])
+        self.assertIn(
+            "official_policy_violation:missing_AA_variant:0", payload["violations"]
+        )
+
+    def test_standard_missing_variant_4_fails(self):
+        payload = self._policy(aa_variant_indexes="0")
+        self.assertFalse(payload["ok"])
+        self.assertIn(
+            "official_policy_violation:missing_AA_variant:4", payload["violations"]
+        )
+
+    def test_standard_correct_policy_passes(self):
+        payload = self._policy()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["official"])
+        self.assertEqual(payload["violations"], [])
+
+    def test_standard_does_not_silently_raise_blocks(self):
+        payload = self._policy(aa_blocks=4)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(OFFICIAL_AA_BLOCKS, 6)
+        self.assertIn("official_policy_violation:AA_BLOCKS=4", payload["violations"])
+        self.assertNotIn("AA_BLOCKS=6", "".join(payload["violations"]))
+
+    def test_smoke_run_abba_zero_is_allowed(self):
+        payload = self._policy(profile="smoke", run_aa="1", aa_blocks=4)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["official"])
+
+    def test_smoke_aa_blocks_four_is_allowed(self):
+        payload = validate_official_pairwise_policy(
+            profile="smoke",
+            run_aa="1",
+            aa_control_enforce="1",
+            aa_blocks=4,
+            aa_variant_indexes="0,4",
+        )
+        self.assertTrue(payload["ok"])
+
+    def test_targeted_aa_path_is_allowed(self):
+        payload = validate_official_pairwise_policy(
+            profile="smoke",
+            run_aa="1",
+            aa_control_enforce="1",
+            aa_blocks=4,
+            aa_variant_indexes="0,4",
+        )
+        targeted = (ROOT / "scripts/run_targeted_aa_validation.sh").read_text()
+        self.assertTrue(payload["ok"])
+        self.assertIn('AA_BLOCKS="${AA_BLOCKS:-4}"', targeted)
+        self.assertIn('RUN_ABBA="${RUN_ABBA:-0}"', targeted)
+        self.assertIn('RUN_LOAD_MATRIX="${RUN_LOAD_MATRIX:-0}"', targeted)
+
+    def test_campaign_script_validates_policy_before_capacity(self):
+        official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
+        self.assertIn("validate_official_pairwise_policy", official)
+        self.assertLess(
+            official.find("validate_official_pairwise_policy"),
+            official.find("=== pin exact measured versions ==="),
+        )
+        self.assertLess(
+            official.find("=== pin exact measured versions ==="),
+            official.find("run_capacity"),
+        )
+
+    def test_campaign_policy_snippet_exits_on_standard_bypass(self):
+        snippet = (
+            "import json, sys\n"
+            "from mqtt_client_bench.pairwise import validate_official_pairwise_policy\n"
+            "payload = validate_official_pairwise_policy(\n"
+            "    profile=sys.argv[1], run_aa=sys.argv[2],\n"
+            "    aa_control_enforce=sys.argv[3], aa_blocks=sys.argv[4],\n"
+            "    aa_variant_indexes=sys.argv[5],\n"
+            ")\n"
+            "if not payload['ok']:\n"
+            "    raise SystemExit(';'.join(payload['violations']))\n"
+            "print(json.dumps(payload))\n"
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(SRC)
+        fail = subprocess.run(
+            [sys.executable, "-", "standard", "0", "1", "6", "0,4"],
+            input=snippet,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertNotEqual(fail.returncode, 0)
+        self.assertIn(
+            "official_policy_violation:RUN_AA=0", fail.stderr + fail.stdout
+        )
+        ok = subprocess.run(
+            [sys.executable, "-", "standard", "1", "1", "6", "0,4"],
+            input=snippet,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(ok.returncode, 0)
+        smoke = subprocess.run(
+            [sys.executable, "-", "smoke", "1", "0", "4", "0,4"],
+            input=snippet,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(smoke.returncode, 0)
+
 
 
 class _FakeSyncOnLoopAdapter:
