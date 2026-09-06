@@ -134,10 +134,12 @@ _LIMITS = """
           complementary blocks are one experimental unit in the log domain;
           the centre is their geometric mean so a slot effect that maps to
           <code>r</code> and <code>1/r</code> does not become a client
-          improvement. A CI needs at least two units (four blocks).
-          Same-client A/A is fail-closed at 3&nbsp;%, a CI that contains
-          ratio 1, both designs, and complete requested blocks, and it runs
-          before any A/B ranking. 90&nbsp;% of closed-loop RTT capacity is
+          improvement. Same-client A/A fail-closes on completeness, on a
+          centre bias of at most 3&nbsp;%, and on pair-unit stability of at
+          most 3&nbsp;% (the same precision used to publish an A/B effect).
+          A CI that contains zero is not the gate: a precise 1&nbsp;% bias
+          may exclude zero, and a huge symmetric swing may cover it.
+          A/A runs before any A/B ranking. 90&nbsp;% of closed-loop RTT capacity is
           not assumed to be a sustainable open-loop offer;
           <code>MATCHED_LOAD_BACKPRESSURE_MAX</code> stays 0.2&nbsp;%.</li>
           <li>The ARM three-way grid that sized <code>C_common</code> with Paho

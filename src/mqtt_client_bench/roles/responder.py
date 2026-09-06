@@ -17,7 +17,9 @@ import time
 from mqtt_client_bench.adapters.registry import adapter_identity
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
 from mqtt_client_bench.roles.rtt_drive import (
+    adapter_library_snapshot,
     drive_identity,
+    process_runtime_snapshot,
     require_native_for_async_peer,
     select_rtt_drive,
 )
@@ -163,16 +165,22 @@ def _run_facade(cfg, plan, identity, state, request_topic, response_topic, qos, 
     # Stay alive for measure+drain.
     alive = float(cfg.get("duration_s", 3)) + float(cfg.get("drain_s", 2)) + 2
     time.sleep(alive)
+    runtime_end = process_runtime_snapshot()
+    library = adapter_library_snapshot(adapter)
     adapter.disconnect()
     adapter.loop_stop()
+    payload = {
+        "ok": True,
+        "role": "responder",
+        **responder_result_fields(state, pending_at_end=0),
+        "runtime": {"process_end": runtime_end},
+        **identity,
+    }
+    if library is not None:
+        payload["runtime"]["library"] = library
     write_json(
         cfg["result_path"],
-        {
-            "ok": True,
-            "role": "responder",
-            **responder_result_fields(state, pending_at_end=0),
-            **identity,
-        },
+        payload,
     )
     return 0
 
@@ -264,15 +272,21 @@ def _run_native(cfg, plan, identity, state, request_topic, response_topic, qos, 
             if still:
                 await asyncio.gather(*still, return_exceptions=True)
         pending_at_end = len(state["pending"]) + cancelled
+        runtime_end = process_runtime_snapshot()
+        library = adapter_library_snapshot(adapter)
         await adapter.disconnect()
+        payload = {
+            "ok": True,
+            "role": "responder",
+            **responder_result_fields(state, pending_at_end=pending_at_end),
+            "runtime": {"process_end": runtime_end},
+            **identity,
+        }
+        if library is not None:
+            payload["runtime"]["library"] = library
         write_json(
             cfg["result_path"],
-            {
-                "ok": True,
-                "role": "responder",
-                **responder_result_fields(state, pending_at_end=pending_at_end),
-                **identity,
-            },
+            payload,
         )
         return 0
 

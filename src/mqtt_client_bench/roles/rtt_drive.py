@@ -13,6 +13,9 @@ client is diagnostic only and must be recorded as ``sync_facade``.
 
 from __future__ import annotations
 
+import gc
+import resource
+
 from mqtt_client_bench.adapters.registry import (
     adapter_identity,
     create_adapter,
@@ -85,3 +88,56 @@ def require_native_for_async_peer(client: str, plan: dict) -> None:
             f"{client} has a native async adapter but application_rtt selected "
             f"{plan.get('publish_path')!r}; that run is not a native RTT ranking"
         )
+
+
+def process_runtime_snapshot() -> dict:
+    """GC and rusage counters. Call off the publish hot path."""
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    stats = gc.get_stats()
+    return {
+        "gc_count": [int(value) for value in gc.get_count()],
+        "gc_collections": [int(item.get("collections", 0)) for item in stats],
+        "ru_nvcsw": int(usage.ru_nvcsw),
+        "ru_nivcsw": int(usage.ru_nivcsw),
+        "ru_utime_s": float(usage.ru_utime),
+        "ru_stime_s": float(usage.ru_stime),
+        "ru_maxrss_kb": int(usage.ru_maxrss),
+    }
+
+
+def process_runtime_delta(start: dict, end: dict) -> dict:
+    """Subtract two ``process_runtime_snapshot`` payloads."""
+    delta = {}
+    for key in ("ru_nvcsw", "ru_nivcsw", "ru_utime_s", "ru_stime_s"):
+        if key in start and key in end:
+            delta[key] = end[key] - start[key]
+    start_gc = list(start.get("gc_collections") or [])
+    end_gc = list(end.get("gc_collections") or [])
+    if start_gc and end_gc and len(start_gc) == len(end_gc):
+        delta["gc_collections"] = [finish - begin for begin, finish in zip(start_gc, end_gc)]
+    return delta
+
+
+def adapter_library_snapshot(adapter) -> dict | None:
+    """Optional post-window library counters. Missing method → None."""
+    reader = getattr(adapter, "library_runtime_snapshot", None)
+    if not callable(reader):
+        return None
+    try:
+        payload = reader()
+    except Exception:  # noqa: BLE001
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def measure_runtime_report(adapter, start: dict, end: dict) -> dict:
+    """Bundle process deltas plus any library snapshot for the result JSON."""
+    payload = {
+        "measure_start": start,
+        "measure_end": end,
+        "measure_delta": process_runtime_delta(start, end),
+    }
+    library = adapter_library_snapshot(adapter)
+    if library is not None:
+        payload["library"] = library
+    return payload

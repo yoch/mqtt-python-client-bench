@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import json
+import math
 import os
 import re
 import subprocess
@@ -13,6 +14,7 @@ import threading
 import time
 import sys
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
@@ -86,14 +88,22 @@ from mqtt_client_bench.metrics import (  # noqa: E402
     summarize_valid_runs,
 )
 from mqtt_client_bench.pairwise import (  # noqa: E402
+    AA_CONTROL_MAX_PAIR_UNIT_ABS_PCT,
     OFFICIAL_AA_BLOCKS,
     OFFICIAL_AA_VARIANT_INDEXES,
+    aa_stability_pct,
     ab_compare_outputs,
     continue_to_ab_ranking,
     evaluate_aa_control,
     enforce_aa_controls,
     maybe_run_ab_ranking_after_aa,
+    pair_unit_effect_pcts,
     validate_official_pairwise_policy,
+)
+from mqtt_client_bench.roles.rtt_drive import (  # noqa: E402
+    adapter_library_snapshot,
+    process_runtime_delta,
+    process_runtime_snapshot,
 )
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, estimate_suite, expand_scenario, list_scenarios  # noqa: E402
 from mqtt_client_bench.sampling import (  # noqa: E402
@@ -5485,6 +5495,7 @@ class AaControlGateTests(unittest.TestCase):
         ci_available=None,
         blocks_requested=None,
         order=None,
+        pair_units=None,
     ):
         if ratio is None:
             ratio = 1.0 + (effect_pct / 100.0)
@@ -5503,6 +5514,8 @@ class AaControlGateTests(unittest.TestCase):
             order = abba_order(n_blocks) if n_blocks else []
         if blocks_requested is None:
             blocks_requested = n_blocks
+        if pair_units is None and ratio is not None and n_blocks >= 2:
+            pair_units = [ratio] * max(1, n_blocks // 2)
         return {
             "baseline_client": "mqttium",
             "candidate_client": "mqttium" if same_client else "gmqtt",
@@ -5526,6 +5539,8 @@ class AaControlGateTests(unittest.TestCase):
                         "absolute_effect_pct": effect_pct,
                         "n_blocks": n_blocks,
                         "block_designs": designs,
+                        "pair_units": pair_units or [],
+                        "n_pair_units": len(pair_units or []),
                     },
                 }
             ],
@@ -5589,7 +5604,7 @@ class AaControlGateTests(unittest.TestCase):
         self.assertIs(control["aa_control_pass"], False)
         self.assertIn("missing_design", control["aa_control_reason"])
 
-    def test_missing_ci_fails(self):
+    def test_missing_ci_is_not_a_fail_when_bias_and_stability_ok(self):
         control = evaluate_aa_control(
             self._compare_doc(
                 n_blocks=4,
@@ -5598,8 +5613,8 @@ class AaControlGateTests(unittest.TestCase):
                 ci_available=False,
             )
         )
-        self.assertIs(control["aa_control_pass"], False)
-        self.assertIn("ci_unavailable", control["aa_control_reason"])
+        self.assertIs(control["aa_control_pass"], True)
+        self.assertEqual(control["aa_control_reason"], "neutral")
         self.assertFalse(control["aa_ci_available"])
 
     def test_incomplete_block_fails(self):
@@ -5665,10 +5680,7 @@ class AaControlGateTests(unittest.TestCase):
         doc["points"][0]["verdict"] = {**verdict, "block_designs": designs}
         control = evaluate_aa_control(doc)
         self.assertIs(control["aa_control_pass"], False)
-        self.assertTrue(
-            "abs_effect" in control["aa_control_reason"]
-            or "ci_excludes_zero" in control["aa_control_reason"]
-        )
+        self.assertIn("abs_effect", control["aa_control_reason"])
 
     def test_neutral_aa_allows_continuation(self):
         control = evaluate_aa_control(
@@ -5682,19 +5694,109 @@ class AaControlGateTests(unittest.TestCase):
         self.assertIs(control["aa_control_pass"], True)
         self.assertEqual(control["aa_control_reason"], "neutral")
 
-    def test_ci_excluding_zero_fails_even_if_effect_is_small(self):
+    def test_ci_excluding_zero_is_not_a_fail_for_small_stable_bias(self):
         control = evaluate_aa_control(
             self._compare_doc(
-                effect_pct=2.0,
+                effect_pct=-1.17,
                 excludes_zero=True,
-                n_blocks=6,
-                ratio=1.02,
+                n_blocks=4,
+                ratio=0.9883,
+                pair_units=[0.9828, 0.9939],
                 ci_low=0.01,
                 ci_high=0.03,
             )
         )
+        self.assertIs(control["aa_control_pass"], True)
+        self.assertEqual(control["aa_control_reason"], "neutral")
+        self.assertTrue(control["aa_ci"]["excludes_zero_effect"])
+
+    def _from_pair_units(self, pair_units, **kwargs):
+        centre = geometric_mean(pair_units)
+        effect = (centre - 1.0) * 100.0
+        return self._compare_doc(
+            effect_pct=effect,
+            ratio=centre,
+            pair_units=list(pair_units),
+            n_blocks=4,
+            excludes_zero=False,
+            **kwargs,
+        )
+
+    def test_case_a_gmqtt_like_small_stable_bias_passes(self):
+        units = [0.9828, 0.9939]
+        control = evaluate_aa_control(self._from_pair_units(units))
+        self.assertAlmostEqual(control["aa_bias_pct"], -1.1667, places=2)
+        self.assertLess(abs(control["aa_bias_pct"]), 3.0)
+        self.assertLess(control["aa_stability_pct"], 3.0)
+        self.assertIs(control["aa_control_pass"], True)
+
+    def test_case_b_old_mqttium_zero_center_must_fail_stability(self):
+        units = [1.2877, 0.7773]
+        control = evaluate_aa_control(self._from_pair_units(units))
+        self.assertLess(abs(control["aa_bias_pct"]), 0.2)
+        self.assertGreater(control["aa_stability_pct"], 20.0)
         self.assertIs(control["aa_control_pass"], False)
-        self.assertIn("ci_excludes_zero", control["aa_control_reason"])
+        self.assertIn("unstable_pair_units", control["aa_control_reason"])
+
+    def test_case_c_final_mqttium_25_fails(self):
+        control = evaluate_aa_control(self._from_pair_units([1.2736, 1.0795]))
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertTrue(
+            "abs_effect" in control["aa_control_reason"]
+            or "unstable_pair_units" in control["aa_control_reason"]
+        )
+
+    def test_case_d_final_mqttium_75_fails(self):
+        control = evaluate_aa_control(self._from_pair_units([1.0681, 1.1842]))
+        self.assertIs(control["aa_control_pass"], False)
+
+    def test_case_e_stable_exact_neutral_passes(self):
+        control = evaluate_aa_control(self._from_pair_units([1.0, 1.0]))
+        self.assertIs(control["aa_control_pass"], True)
+        self.assertEqual(control["aa_control_reason"], "neutral")
+        self.assertEqual(control["aa_stability_pct"], 0.0)
+
+    def test_case_f_stable_4_to_5_pct_bias_fails(self):
+        control = evaluate_aa_control(self._from_pair_units([1.04, 1.05]))
+        self.assertGreater(abs(control["aa_bias_pct"]), 3.0)
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("abs_effect", control["aa_control_reason"])
+
+    def test_case_gmqtt_75_final_is_unstable_not_healthy(self):
+        control = evaluate_aa_control(self._from_pair_units([1.0978, 0.9672]))
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("unstable_pair_units", control["aa_control_reason"])
+        self.assertGreater(control["aa_stability_pct"], 3.0)
+
+    def test_log_domain_inversion_preserves_stability_and_abs_bias(self):
+        units = [0.9828, 0.9939]
+        forward = evaluate_aa_control(self._from_pair_units(units))
+        inverted = evaluate_aa_control(self._from_pair_units([1.0 / u for u in units]))
+        self.assertAlmostEqual(forward["aa_stability_pct"], inverted["aa_stability_pct"], places=10)
+        log_fwd = math.log(1.0 + forward["aa_bias_pct"] / 100.0)
+        log_inv = math.log(1.0 + inverted["aa_bias_pct"] / 100.0)
+        self.assertAlmostEqual(log_fwd, -log_inv, places=10)
+        self.assertEqual(forward["aa_control_pass"], inverted["aa_control_pass"])
+        self.assertEqual(AA_CONTROL_MAX_PAIR_UNIT_ABS_PCT, 3.0)
+
+    def test_arm_sensitivity_margins_do_not_choose_a_threshold_to_pass_mqttium(self):
+        """Document ±2/±3/±5 bias-only vs the combined gate. 3 % stays."""
+        cases = {
+            "final_gmqtt_25": (-1.1667, [0.9828, 0.9939]),
+            "old_mqttium_25": (0.0466, [1.2877, 0.7773]),
+            "final_mqttium_25": (17.2533, [1.2736, 1.0795]),
+            "final_mqttium_75": (12.4660, [1.0681, 1.1842]),
+            "old_mqttium_75": (9.0520, [1.0736, 1.1077]),
+            "final_gmqtt_75": (3.0448, [1.0978, 0.9672]),
+        }
+        for name, (bias, units) in cases.items():
+            stability = aa_stability_pct(units)
+            combined_3 = abs(bias) <= 3.0 and stability <= 3.0
+            if name == "final_gmqtt_25":
+                self.assertTrue(combined_3, name)
+            else:
+                self.assertFalse(combined_3, name)
+            self.assertEqual(pair_unit_effect_pcts(units)[0], (units[0] - 1.0) * 100.0)
 
     def test_ab_compare_is_not_an_aa_gate(self):
         control = evaluate_aa_control(self._compare_doc(same_client=False))
@@ -5812,6 +5914,57 @@ class AaControlGateTests(unittest.TestCase):
         workflow = (ROOT / "scripts/github/benchmark-matched-load-arm64.yml").read_text()
         self.assertIn("AbbaCounterbalanceTests", workflow)
         self.assertIn("AaControlGateTests", workflow)
+
+
+class RttRuntimeDiagTests(unittest.TestCase):
+    """Post-window GC/rusage and mqttium stats() must not sit on the hot path."""
+
+    def test_process_runtime_delta_subtracts_counters(self):
+        start = process_runtime_snapshot()
+        self.assertIn("ru_nvcsw", start)
+        self.assertIn("gc_collections", start)
+        end = dict(start)
+        end["ru_nvcsw"] = int(start["ru_nvcsw"]) + 7
+        end["ru_nivcsw"] = int(start["ru_nivcsw"]) + 2
+        end["gc_collections"] = [int(value) + 1 for value in start["gc_collections"]]
+        delta = process_runtime_delta(start, end)
+        self.assertEqual(delta["ru_nvcsw"], 7)
+        self.assertEqual(delta["ru_nivcsw"], 2)
+        self.assertEqual(delta["gc_collections"], [1] * len(start["gc_collections"]))
+
+    def test_adapter_without_snapshot_is_none(self):
+        self.assertIsNone(adapter_library_snapshot(object()))
+
+    def test_mqttium_library_snapshot_jsonifies_public_stats(self):
+        @dataclass
+        class _Effects:
+            inline_effects: int
+            enqueued: int
+
+        @dataclass
+        class _Stats:
+            effects: _Effects
+
+        class _Client:
+            def stats(self):
+                return _Stats(_Effects(12, 3))
+
+        adapter = MqttiumAsyncAdapter()
+        adapter._client = _Client()
+        snap = adapter.library_runtime_snapshot()
+        self.assertEqual(snap["effects"]["inline_effects"], 12)
+        self.assertEqual(snap["effects"]["enqueued"], 3)
+
+    def test_native_rtt_roles_snapshot_after_t1(self):
+        initiator = (ROOT / "src/mqtt_client_bench/roles/rtt_initiator.py").read_text()
+        responder = (ROOT / "src/mqtt_client_bench/roles/responder.py").read_text()
+        self.assertIn("measure_runtime_report", initiator)
+        self.assertIn("adapter_library_snapshot", responder)
+        send_loop = initiator.split("async def _send_loop_async")[1].split(
+            "if __name__"
+        )[0]
+        self.assertNotIn("process_runtime_snapshot", send_loop)
+        self.assertNotIn("library_runtime_snapshot", send_loop)
 
 
 class OfficialPairwisePolicyTests(unittest.TestCase):

@@ -11,8 +11,8 @@ matched-load / ABBA machinery can be exercised. They never size an official
 
 Same-client A/A is a fail-closed publication gate, not a decorative verdict.
 Capacity, then A/A, then enforce. Ranking ABBA A/B runs only after the
-control passes. A missing CI, a single complementary pair, or an
-incomplete block all fail closed.
+control passes. Completeness fail-closes; equivalence is practical bias
+and pair-unit stability (both 3 %), not a CI that happens to contain zero.
 
 ``PROFILE=standard`` cannot weaken those invariants through environment
 overrides. ``validate_official_pairwise_policy`` is the auditable check;
@@ -25,7 +25,11 @@ import json
 import math
 from pathlib import Path
 
-from mqtt_client_bench.metrics import sanitize_number, summarize_runs
+from mqtt_client_bench.metrics import (
+    complementary_pair_units,
+    sanitize_number,
+    summarize_runs,
+)
 
 
 REQUIRED_OFFICIAL_CAPACITY_RUNS = 5
@@ -312,9 +316,20 @@ def _pair_common_capacities(all_caps: dict, clients: list[str] | tuple[str, ...]
 # (representative load). expand_scenario crosses fraction then protocol.
 OFFICIAL_AA_VARIANT_INDEXES = (0, 4)
 OFFICIAL_AA_BLOCKS = 6
+# Practical A/A margins share the published ranking precision (min_effect_pct).
+# They are not fitted to make a particular ARM run pass. Bias is the
+# geometric-mean pair-unit effect; stability is the largest |pair-unit
+# effect|. A bootstrap CI with n=2 is descriptive only and is not a gate.
 AA_CONTROL_MAX_ABS_EFFECT_PCT = 3.0
+AA_CONTROL_MAX_PAIR_UNIT_ABS_PCT = 3.0
 MIN_AA_BLOCKS = 4
 MIN_AA_REPLICATIONS_PER_DESIGN = 2
+MIN_AA_PAIR_UNITS = 2
+# Targeted ARM validation keeps 4 blocks (2 pair units): enough to split
+# bias from stability, not enough for a bootstrap CI. Official stays at 6
+# blocks (3 pair units). Eight or twelve blocks would still be too small
+# for TOST and would multiply A/A slot time (~19 min observed for four
+# 4-block controls) without making the interval inferential.
 
 
 def _canonical_flag(value) -> str:
@@ -435,20 +450,73 @@ def _design_counts(designs: list) -> dict:
     return counts
 
 
+def pair_unit_effect_pcts(pair_units: list) -> list:
+    """Log-ratio pair units as percent effects around 1."""
+    effects = []
+    for unit in pair_units or []:
+        if unit is None:
+            continue
+        value = float(unit)
+        if value <= 0:
+            continue
+        effects.append((value - 1.0) * 100.0)
+    return effects
+
+
+def aa_stability_pct(pair_units: list):
+    """Largest multiplicative pair-unit deviation from 1, as percent.
+
+    Uses ``exp(|ln u|) - 1`` so inverting every unit (A↔B swap) leaves
+    the stability unchanged. ``|u-1|`` is not log-symmetric.
+    """
+    deviations = []
+    for unit in pair_units or []:
+        if unit is None:
+            continue
+        value = float(unit)
+        if value <= 0:
+            continue
+        deviations.append(math.exp(abs(math.log(value))) - 1.0)
+    if not deviations:
+        return None
+    return max(deviations) * 100.0
+
+
+def _verdict_pair_units(verdict: dict) -> list:
+    raw = list(verdict.get("pair_units") or [])
+    cleaned = [float(u) for u in raw if u is not None and float(u) > 0]
+    if cleaned:
+        return cleaned
+    ratios = list(verdict.get("block_ratios") or [])
+    designs = list(verdict.get("block_designs") or [])
+    if ratios and designs and len(ratios) == len(designs):
+        return complementary_pair_units(ratios, designs)
+    return []
+
+
 def evaluate_aa_control(
     doc: dict,
     *,
     max_abs_effect_pct: float = AA_CONTROL_MAX_ABS_EFFECT_PCT,
+    max_pair_unit_abs_pct: float = AA_CONTROL_MAX_PAIR_UNIT_ABS_PCT,
     min_blocks: int = MIN_AA_BLOCKS,
     min_replications_per_design: int = MIN_AA_REPLICATIONS_PER_DESIGN,
+    min_pair_units: int = MIN_AA_PAIR_UNITS,
 ) -> dict:
-    """Fail-closed gate for a same-client compare document.
+    """Fail-closed A/A gate: practical bias and pair-unit stability.
 
-    Pass requires every requested block to be complete, both designs
-    present with at least ``min_replications_per_design`` each, a real
-    CI that contains ratio 1, and an absolute effect at most
-    ``max_abs_effect_pct``. A missing CI is a failure, never a silent
-    ``excludes_zero_effect=false``.
+    Completeness still fail-closes (requested blocks, both designs, enough
+    replications, enough complementary units). Equivalence is **not**
+    "CI contains zero": a precise −1 % bias may exclude zero and still be
+    smaller than the published ranking precision, while a huge symmetric
+    swing can cover zero and must never pass. The gate is:
+
+    * ``abs(center effect) <= max_abs_effect_pct``
+    * ``max |pair-unit effect| <= max_pair_unit_abs_pct``
+
+    Both default to 3 %, the same ``min_effect_pct`` used to publish an
+    A/B improvement or regression. A missing CI is recorded, never a
+    pass/fail criterion.
     """
     baseline = doc.get("baseline_client")
     candidate = doc.get("candidate_client")
@@ -469,6 +537,9 @@ def evaluate_aa_control(
     complete = int(first.get("n_blocks") or 0) if points else 0
     designs = list(first.get("block_designs") or [])
     counts = _design_counts(designs)
+    first_units = _verdict_pair_units(first) if points else []
+    first_effects = pair_unit_effect_pcts(first_units)
+    first_stability = aa_stability_pct(first_units)
     ci_low = first.get("ci_low") if points else None
     ci_high = first.get("ci_high") if points else None
     explicit_ci = first.get("ci_available") if points else None
@@ -480,6 +551,11 @@ def evaluate_aa_control(
         "aa_control_pass": False,
         "aa_control_reason": None,
         "aa_absolute_effect_pct": first.get("absolute_effect_pct") if points else None,
+        "aa_bias_pct": first.get("absolute_effect_pct") if points else None,
+        "aa_stability_pct": sanitize_number(first_stability),
+        "aa_pair_unit_effects_pct": [sanitize_number(v) for v in first_effects],
+        "aa_n_pair_units": len(first_units),
+        "aa_gate": "bias_and_stability",
         "aa_ci": {
             "ci_low": ci_low,
             "ci_high": ci_high,
@@ -515,13 +591,8 @@ def evaluate_aa_control(
         point_order = list(block.get("order") or order)
         if point_requested is None and point_order:
             point_requested = len(point_order) // 4
-        point_ci_low = verdict.get("ci_low")
-        point_ci_high = verdict.get("ci_high")
-        point_ci_available = verdict.get("ci_available")
-        if point_ci_available is None:
-            point_ci_available = point_ci_low is not None and point_ci_high is not None
-        if point_ci_available is False or point_ci_low is None or point_ci_high is None:
-            point_ci_available = False
+        units = _verdict_pair_units(verdict)
+        stability = aa_stability_pct(units)
         if point_requested is not None and n_blocks != int(point_requested):
             reasons.append(
                 f"point{index}:incomplete_blocks:{n_blocks}/{point_requested}"
@@ -540,16 +611,22 @@ def evaluate_aa_control(
                 f"point{index}:insufficient_replication:"
                 f"ABBA={point_counts['ABBA']},BAAB={point_counts['BAAB']}"
             )
-        if not point_ci_available:
-            reasons.append(f"point{index}:ci_unavailable")
-        else:
-            if not (float(point_ci_low) <= 0.0 <= float(point_ci_high)):
-                reasons.append(f"point{index}:ci_excludes_zero")
+        if len(units) < min_pair_units:
+            reasons.append(
+                f"point{index}:insufficient_pair_units:{len(units)}/{min_pair_units}"
+            )
         if effect is None:
             reasons.append(f"point{index}:missing_effect")
         elif abs(float(effect)) > max_abs_effect_pct:
             reasons.append(
                 f"point{index}:abs_effect_{float(effect):.4f}_exceeds_{max_abs_effect_pct}"
+            )
+        if stability is None:
+            reasons.append(f"point{index}:missing_stability")
+        elif float(stability) > max_pair_unit_abs_pct:
+            reasons.append(
+                f"point{index}:unstable_pair_units:maxabs_{float(stability):.4f}"
+                f"_exceeds_{max_pair_unit_abs_pct}"
             )
     if reasons:
         payload["aa_control_pass"] = False

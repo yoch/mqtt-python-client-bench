@@ -211,6 +211,9 @@ def extract_run_row(run: dict, *, document: dict | None = None) -> dict:
         "echo_errors": responder.get("echo_errors"),
         "pending_at_end": responder.get("pending_at_end"),
         "echo_unaccounted": responder.get("echo_unaccounted"),
+        "runtime_measure_delta": (worker.get("runtime") or {}).get("measure_delta"),
+        "library_effects": ((worker.get("runtime") or {}).get("library") or {}).get("effects"),
+        "library_writer": ((worker.get("runtime") or {}).get("library") or {}).get("writer"),
         "non_comparable": run.get("non_comparable"),
     }
 
@@ -316,6 +319,11 @@ def extract_compare_summaries(doc: dict) -> list:
                 "aa_blocks_complete": doc.get("aa_blocks_complete"),
                 "aa_design_counts": doc.get("aa_design_counts"),
                 "aa_ci_available": doc.get("aa_ci_available"),
+                "aa_bias_pct": doc.get("aa_bias_pct"),
+                "aa_stability_pct": doc.get("aa_stability_pct"),
+                "aa_pair_unit_effects_pct": doc.get("aa_pair_unit_effects_pct"),
+                "aa_gate": doc.get("aa_gate"),
+                "aa_n_pair_units": doc.get("aa_n_pair_units"),
             }
         )
     return summaries

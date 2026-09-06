@@ -13,8 +13,9 @@
 #
 # Same-client A/A is a fail-closed publication gate, not a decorative verdict.
 # Capacity, then A/A, then enforce. Ranking ABBA A/B runs only after the
-# control passes. A missing CI, a single complementary pair, or an
-# incomplete block all fail. Default A/A variants are 25 % and 75 %
+# control passes. Completeness, practical bias, and pair-unit stability
+# fail closed. A bootstrap CI with two pair units is not an equivalence
+# test. Default A/A variants are 25 % and 75 %
 # MQTTv311 (indexes 0,4). Targeted ARM validation uses AA_BLOCKS=4.
 #
 # PROFILE=standard refuses weakened overrides (RUN_AA=0, AA_CONTROL_ENFORCE=0,
