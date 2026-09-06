@@ -38,6 +38,12 @@ if [ "$PROFILE" = "standard" ]; then
   exit 2
 fi
 
+gov="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true)"
+if [ "$gov" != "performance" ]; then
+  echo "pacer-causal requires scaling_governor=performance (got ${gov:-missing})" >&2
+  exit 1
+fi
+
 echo "=== pin exact measured versions ==="
 pip install --force-reinstall --no-cache-dir \
   "mqttium==${MQTTIUM_VER}" \

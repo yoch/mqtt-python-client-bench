@@ -16,10 +16,12 @@ from mqtt_client_bench.adapters.registry import adapter_identity
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
 from mqtt_client_bench.pacing import (
     DEFAULT_PACER_SPIN_NS,
+    DEFAULT_PACER_STARTUP_GUARD_NS,
     PaceRecorder,
     PaceToken,
     PacerClient,
     bind_receiver_socket,
+    choose_absolute_start_ns,
     drain_datagrams,
     interval_ns_for_rate,
     resolve_pacer_mode,
@@ -283,10 +285,15 @@ def _begin_measure_instrumentation(cfg, state, target_rate, duration_s):
     """Measure-window only: in-loop stays the control; both modes get traces."""
     mode = resolve_pacer_mode(cfg, target_rate)
     interval_ns = interval_ns_for_rate(target_rate) if target_rate and target_rate > 0 else 0
+    expected = float(target_rate or 0.0) * float(duration_s or 0.0)
     recorder = None
     if interval_ns > 0:
-        recorder = PaceRecorder(mode=mode, target_rate=target_rate, target_interval_ns=interval_ns)
-    expected = float(target_rate or 0.0) * float(duration_s or 0.0)
+        recorder = PaceRecorder(
+            mode=mode,
+            target_rate=target_rate,
+            target_interval_ns=interval_ns,
+            expected_tokens=expected,
+        )
     max_points = int(cfg.get("temporal_trace_max_points") or DEFAULT_TEMPORAL_TRACE_POINTS)
     tracer = None
     if interval_ns > 0 and max_points > 0:
@@ -330,17 +337,36 @@ def _open_pacer(cfg, target_rate):
     return client, sock, mode
 
 
-def _start_pacer_phase(pacer_client, target_rate, duration_s) -> None:
+def _start_pacer_phase(pacer_client, target_rate, duration_s, recorder=None):
     if pacer_client is None or not target_rate:
-        return
-    pacer_client.start_phase(
-        interval_ns=interval_ns_for_rate(target_rate),
-        duration_ns=max(1, int(float(duration_s) * 1_000_000_000.0)),
+        return None
+    interval_ns = interval_ns_for_rate(target_rate)
+    duration_ns = max(1, int(float(duration_s) * 1_000_000_000.0))
+    absolute_start_ns = choose_absolute_start_ns(
+        time.monotonic_ns(), DEFAULT_PACER_STARTUP_GUARD_NS
     )
+    until_ns = absolute_start_ns + duration_ns
+    if recorder is not None:
+        recorder.set_window(absolute_start_ns, until_ns, interval_ns)
+    pacer_client.start_phase(
+        absolute_start_ns=absolute_start_ns,
+        interval_ns=interval_ns,
+        duration_ns=duration_ns,
+    )
+    return until_ns
 
 
-def _recv_token_sync(sock, until) -> PaceToken | None:
-    remaining = until - time.perf_counter()
+def _phase_expired(until, until_ns) -> bool:
+    if until_ns is not None:
+        return time.monotonic_ns() >= int(until_ns)
+    return time.perf_counter() >= until
+
+
+def _recv_token_sync(sock, until, until_ns=None) -> PaceToken | None:
+    if until_ns is not None:
+        remaining = (int(until_ns) - time.monotonic_ns()) / 1_000_000_000.0
+    else:
+        remaining = until - time.perf_counter()
     if remaining <= 0:
         return None
     sock.settimeout(min(0.05, max(remaining, 0.0)))
@@ -351,8 +377,11 @@ def _recv_token_sync(sock, until) -> PaceToken | None:
     return unpack_token(data)
 
 
-async def _recv_token_async(loop, sock, until) -> PaceToken | None:
-    remaining = until - time.perf_counter()
+async def _recv_token_async(loop, sock, until, until_ns=None) -> PaceToken | None:
+    if until_ns is not None:
+        remaining = (int(until_ns) - time.monotonic_ns()) / 1_000_000_000.0
+    else:
+        remaining = until - time.perf_counter()
     if remaining <= 0:
         return None
     try:
@@ -426,7 +455,7 @@ def _run_facade(
 
         gc.collect()
         state["phase"] = "warmup"
-        _start_pacer_phase(pacer_client, target_rate, warmup_s)
+        warmup_until_ns = _start_pacer_phase(pacer_client, target_rate, warmup_s)
         # Warmup correlations live in a disjoint high range so late responses cannot
         # collide with measure-window correlations.
         _send_loop(
@@ -441,6 +470,7 @@ def _run_facade(
             sequence_start=1 << 40,
             pacer_mode=pacer_mode,
             pacer_sock=pacer_sock,
+            until_ns=warmup_until_ns,
         )
         if pacer_sock is not None:
             drain_datagrams(pacer_sock)
@@ -460,7 +490,9 @@ def _run_facade(
         recorder, tracer, pacer_mode, _interval_ns = _begin_measure_instrumentation(
             cfg, state, target_rate, duration_s
         )
-        _start_pacer_phase(pacer_client, target_rate, duration_s)
+        measure_until_ns = _start_pacer_phase(
+            pacer_client, target_rate, duration_s, recorder
+        )
         runtime_start = process_runtime_snapshot()
         t0 = time.perf_counter()
         _send_loop(
@@ -475,6 +507,7 @@ def _run_facade(
             sequence_start=0,
             pacer_mode=pacer_mode,
             pacer_sock=pacer_sock,
+            until_ns=measure_until_ns,
         )
         t1 = time.perf_counter()
         runtime = measure_runtime_report(adapter, runtime_start, process_runtime_snapshot())
@@ -589,7 +622,7 @@ def _run_native(
 
             gc.collect()
             state["phase"] = "warmup"
-            _start_pacer_phase(pacer_client, target_rate, warmup_s)
+            warmup_until_ns = _start_pacer_phase(pacer_client, target_rate, warmup_s)
             await _send_loop_async(
                 adapter,
                 state,
@@ -603,6 +636,7 @@ def _run_native(
                 sync_on_loop=plan["publish_sync_on_loop"],
                 pacer_mode=pacer_mode,
                 pacer_sock=pacer_sock,
+                until_ns=warmup_until_ns,
             )
             if pacer_sock is not None:
                 drain_datagrams(pacer_sock)
@@ -622,7 +656,9 @@ def _run_native(
             recorder, tracer, pacer_mode, _interval_ns = _begin_measure_instrumentation(
                 cfg, state, target_rate, duration_s
             )
-            _start_pacer_phase(pacer_client, target_rate, duration_s)
+            measure_until_ns = _start_pacer_phase(
+                pacer_client, target_rate, duration_s, recorder
+            )
             runtime_start = process_runtime_snapshot()
             t0 = time.perf_counter()
             await _send_loop_async(
@@ -638,6 +674,7 @@ def _run_native(
                 sync_on_loop=plan["publish_sync_on_loop"],
                 pacer_mode=pacer_mode,
                 pacer_sock=pacer_sock,
+                until_ns=measure_until_ns,
             )
             t1 = time.perf_counter()
             runtime = measure_runtime_report(adapter, runtime_start, process_runtime_snapshot())
@@ -692,6 +729,7 @@ def _send_loop(
     *,
     pacer_mode: str = "in_loop",
     pacer_sock=None,
+    until_ns=None,
 ):
     interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0
     open_loop = interval > 0
@@ -705,11 +743,11 @@ def _send_loop(
     token_index = 0
     anchor_ns = time.perf_counter_ns()
     external = open_loop and pacer_mode == "external" and pacer_sock is not None
-    while time.perf_counter() < until:
+    while not _phase_expired(until, until_ns):
         token = None
         receiver_ns = 0
         if external:
-            token = _recv_token_sync(pacer_sock, until)
+            token = _recv_token_sync(pacer_sock, until, until_ns)
             if token is None:
                 continue
             receiver_ns = time.monotonic_ns()
@@ -814,6 +852,7 @@ async def _send_loop_async(
     sync_on_loop: bool,
     pacer_mode: str = "in_loop",
     pacer_sock=None,
+    until_ns=None,
 ):
     """Native twin of ``_send_loop``: same offer contract, no thread crossing.
 
@@ -836,11 +875,11 @@ async def _send_loop_async(
     slot_free = asyncio.Event()
     state["slot_free"] = slot_free
     loop = asyncio.get_running_loop()
-    while time.perf_counter() < until:
+    while not _phase_expired(until, until_ns):
         token = None
         receiver_ns = 0
         if external:
-            token = await _recv_token_async(loop, pacer_sock, until)
+            token = await _recv_token_async(loop, pacer_sock, until, until_ns)
             if token is None:
                 continue
             receiver_ns = time.monotonic_ns()
