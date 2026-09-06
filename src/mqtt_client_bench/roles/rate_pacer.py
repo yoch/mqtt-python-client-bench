@@ -23,6 +23,7 @@ from mqtt_client_bench.pacing import (
     ExternalRatePacer,
     SNDBUF_BYTES,
     SystemClock,
+    absolute_start_ns_from_start_command,
     datagram_send_fn,
 )
 
@@ -64,7 +65,11 @@ def _run(socket_path: str, stats_path: str, default_spin_ns: int) -> int:
         interval_ns = int(cmd["interval_ns"])
         duration_ns = int(cmd["duration_ns"])
         spin_ns = int(cmd.get("spin_ns") or default_spin_ns)
-        start_ns = clock.monotonic_ns()
+        try:
+            start_ns = absolute_start_ns_from_start_command(cmd)
+        except ValueError as exc:
+            _send({"ok": False, "error": str(exc)})
+            continue
         pacer = ExternalRatePacer(
             interval_ns=interval_ns,
             start_ns=start_ns,
@@ -77,6 +82,8 @@ def _run(socket_path: str, stats_path: str, default_spin_ns: int) -> int:
         summary = recorder.summary(duration_s=duration_ns / 1_000_000_000.0)
         summary["start_ns"] = start_ns
         summary["until_ns"] = until_ns
+        summary["phase_start_ns"] = start_ns
+        summary["first_scheduled_deadline_ns"] = start_ns
         summary["pid"] = os.getpid()
         write_json(stats_path, summary)
     return 0

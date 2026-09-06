@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import socket
 import sys
-import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -15,18 +14,30 @@ if str(SRC) not in sys.path:
 
 from mqtt_client_bench.harness import validate_run
 from mqtt_client_bench.pacing import (
+    DEFAULT_PACE_SAMPLE_LIMIT,
     DEFAULT_PACER_SPIN_NS,
+    DEFAULT_PACER_STARTUP_GUARD_NS,
     ExternalRatePacer,
     FakeClock,
     PACER_STIMULUS_INVALID,
+    PACE_SAMPLE_COLUMNS,
     PaceRecorder,
     PaceToken,
-    datagram_send_fn,
+    STIMULUS_DUPLICATE,
+    STIMULUS_EMITTED_VS_SCHEDULED,
+    STIMULUS_INTERNAL_GAP,
+    STIMULUS_PREFIX_LOSS,
+    STIMULUS_RECEIVED_VS_EMITTED,
+    STIMULUS_SEND_FAILURE,
+    STIMULUS_SUFFIX_LOSS,
+    absolute_start_ns_from_start_command,
+    choose_absolute_start_ns,
     interval_ns_for_rate,
     pack_token,
     pacer_stimulus_reasons,
     resolve_pacer_mode,
     stimulus_invalid_reasons,
+    tokens_expected_in_window,
     unpack_token,
 )
 from mqtt_client_bench.pairwise import (
@@ -154,7 +165,7 @@ class NoSutFeedbackTests(unittest.TestCase):
         self.assertFalse(pacer.recorder.stimulus_valid())
         self.assertEqual(
             stimulus_invalid_reasons(pacer.recorder.summary()),
-            [PACER_STIMULUS_INVALID],
+            [STIMULUS_SEND_FAILURE],
         )
 
 
@@ -235,7 +246,9 @@ class ValidatePacerStimulusTests(unittest.TestCase):
         }
         out = validate_run(point, [worker], None, [])
         self.assertEqual(out["status"], "inconclusive")
-        self.assertIn(PACER_STIMULUS_INVALID, out["reasons"])
+        self.assertTrue(
+            any(reason.startswith(PACER_STIMULUS_INVALID) for reason in out["reasons"])
+        )
 
     def test_in_loop_gap_is_not_the_external_gate(self):
         point = {
@@ -283,31 +296,175 @@ class InLoopSourceTests(unittest.TestCase):
         self.assertIn("PROFILE=standard", src)
         self.assertIn("NO OFFICIAL RANKING", src)
         self.assertIn("temporal_trace", src)
+        self.assertIn("pacer-causal requires scaling_governor=performance", src)
+        self.assertIn("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor", src)
 
 
-class DatagramDropTests(unittest.TestCase):
-    def test_nonblocking_send_drop_on_full_buffer(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = str(Path(tmp) / "pacer.sock")
-            recv = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-            recv.bind(path)
-            recv.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256)
-            send = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-            send.setblocking(False)
-            send.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 256)
-            fn = datagram_send_fn(send, path)
-            drops = 0
-            for seq in range(10_000):
-                token = PaceToken(seq, seq, seq)
-                if not fn(token):
-                    drops += 1
-                    break
-            recv.close()
-            send.close()
-            # A tiny buffer should refuse at least one datagram. If the OS
-            # still accepted 10k, the drop path is still unit-tested by
-            # NoSutFeedbackTests.test_ipc_drop_counts_and_invalidates.
-            self.assertGreaterEqual(drops, 0)
+class TokenCompletenessTests(unittest.TestCase):
+    def _recorder(self, expected=4):
+        rec = PaceRecorder(mode="external", target_rate=1000.0, target_interval_ns=1_000_000)
+        rec.set_window(0, expected * 1_000_000, 1_000_000)
+        self.assertEqual(rec.tokens_expected_in_measure_window, expected)
+        return rec
+
+    def _feed(self, rec, sequences, *, emitted=None):
+        for seq in sequences:
+            rec.record_receiver(PaceToken(seq, seq * 1_000_000, seq * 1_000_000 + 1), seq * 1_000_000 + 2)
+        n = rec.tokens_expected_in_measure_window or 0
+        rec.tokens_scheduled = n if emitted is None else int(emitted)
+        rec.tokens_emitted = n if emitted is None else int(emitted)
+        rec.token_send_failures = 0
+
+    def test_internal_gap_fails(self):
+        rec = self._recorder()
+        self._feed(rec, [0, 1, 3])
+        reasons = rec.completeness_reasons()
+        self.assertIn(STIMULUS_INTERNAL_GAP, reasons)
+        self.assertFalse(rec.stimulus_valid())
+
+    def test_suffix_loss_fails_without_following_sequence(self):
+        rec = self._recorder()
+        self._feed(rec, [0, 1, 2])
+        reasons = rec.completeness_reasons()
+        self.assertIn(STIMULUS_SUFFIX_LOSS, reasons)
+        self.assertIn(STIMULUS_RECEIVED_VS_EMITTED, reasons)
+        self.assertFalse(rec.stimulus_valid())
+
+    def test_prefix_loss_fails(self):
+        rec = self._recorder()
+        self._feed(rec, [1, 2, 3])
+        reasons = rec.completeness_reasons()
+        self.assertIn(STIMULUS_PREFIX_LOSS, reasons)
+        self.assertNotIn(STIMULUS_SUFFIX_LOSS, reasons)
+        self.assertFalse(rec.stimulus_valid())
+
+    def test_duplicate_fails(self):
+        rec = self._recorder()
+        self._feed(rec, [0, 1, 1, 2, 3])
+        reasons = rec.completeness_reasons()
+        self.assertIn(STIMULUS_DUPLICATE, reasons)
+        self.assertFalse(rec.stimulus_valid())
+
+    def test_exact_complete_sequence_passes(self):
+        rec = self._recorder()
+        self._feed(rec, [0, 1, 2, 3])
+        self.assertEqual(rec.completeness_reasons(), [])
+        self.assertTrue(rec.stimulus_valid())
+        summary = rec.summary()
+        self.assertEqual(summary["stimulus_invalid_reasons"], [])
+        self.assertTrue(summary["stimulus_valid"])
+
+    def test_emitted_vs_scheduled_accounting_fails(self):
+        rec = self._recorder()
+        self._feed(rec, [0, 1, 2, 3], emitted=4)
+        rec.tokens_scheduled = 5
+        rec.token_send_failures = 0
+        self.assertIn(STIMULUS_EMITTED_VS_SCHEDULED, rec.completeness_reasons())
+
+    def test_persists_exact_reason(self):
+        rec = self._recorder()
+        self._feed(rec, [0, 1, 2])
+        summary = rec.summary()
+        self.assertIn(STIMULUS_SUFFIX_LOSS, summary["stimulus_invalid_reasons"])
+        self.assertTrue(
+            all(item.startswith(PACER_STIMULUS_INVALID) for item in summary["stimulus_invalid_reasons"])
+        )
+
+
+class PaceRecorderMemoryTests(unittest.TestCase):
+    def test_memory_is_capped_after_many_tokens(self):
+        rec = PaceRecorder(
+            mode="in_loop",
+            target_rate=10_000.0,
+            target_interval_ns=100_000,
+            max_samples=DEFAULT_PACE_SAMPLE_LIMIT,
+        )
+        baseline = rec.memory_bytes()
+        self.assertEqual(baseline, DEFAULT_PACE_SAMPLE_LIMIT * len(PACE_SAMPLE_COLUMNS) * 8)
+        for i in range(100_000):
+            token = PaceToken(i, i * 100_000, i * 100_000)
+            rec.record_receiver(token, i * 100_000, None)
+            rec.note_receiver_to_publish(i * 100_000, i * 100_000 + 50)
+        self.assertEqual(rec.memory_bytes(), baseline)
+        self.assertLessEqual(rec.sample_count(), DEFAULT_PACE_SAMPLE_LIMIT)
+        self.assertEqual(rec.tokens_received, 100_000)
+        self.assertEqual(rec.catch_up_events, 0)
+
+
+class AbsoluteStartTests(unittest.TestCase):
+    def test_startup_guard_is_explicit_milliseconds(self):
+        self.assertEqual(DEFAULT_PACER_STARTUP_GUARD_NS, 5_000_000)
+        self.assertEqual(choose_absolute_start_ns(10, 5_000_000), 5_000_010)
+
+    def test_start_command_requires_absolute_start(self):
+        with self.assertRaises(ValueError):
+            absolute_start_ns_from_start_command({"interval_ns": 1000})
+        self.assertEqual(absolute_start_ns_from_start_command({"absolute_start_ns": 42}), 42)
+
+    def test_no_emission_before_absolute_start(self):
+        clock = FakeClock(0)
+        sent = []
+
+        def send(token: PaceToken) -> bool:
+            sent.append((clock.now_ns, token))
+            return True
+
+        pacer = ExternalRatePacer(
+            interval_ns=1_000,
+            start_ns=10_000,
+            spin_ns=0,
+            clock=clock,
+            send_fn=send,
+        )
+        pacer.emit_one()
+        self.assertGreaterEqual(sent[0][0], 10_000)
+        self.assertGreaterEqual(sent[0][1].pacer_emission_ns, 10_000)
+        self.assertEqual(sent[0][1].scheduled_deadline_ns, 10_000)
+        self.assertGreaterEqual(clock.now_ns, 10_000)
+
+    def test_rate_pacer_uses_command_start_not_now(self):
+        src = (ROOT / "src/mqtt_client_bench/roles/rate_pacer.py").read_text()
+        self.assertIn("absolute_start_ns_from_start_command", src)
+        self.assertNotIn("start_ns = clock.monotonic_ns()", src)
+        initiator = (ROOT / "src/mqtt_client_bench/roles/rtt_initiator.py").read_text()
+        self.assertIn("choose_absolute_start_ns", initiator)
+        self.assertIn("DEFAULT_PACER_STARTUP_GUARD_NS", initiator)
+
+    def test_window_token_count_matches_emit_until(self):
+        self.assertEqual(tokens_expected_in_window(0, 10_000, 1_000), 10)
+        clock = FakeClock(0)
+        pacer = ExternalRatePacer(
+            interval_ns=1_000,
+            start_ns=0,
+            spin_ns=0,
+            clock=clock,
+            send_fn=lambda token: True,
+        )
+        rec = pacer.emit_until(10_000)
+        self.assertEqual(rec.tokens_scheduled, 10)
+        self.assertEqual(rec.tokens_expected_in_measure_window, 10)
+
+
+class InLoopRecorderCostTests(unittest.TestCase):
+    def test_in_loop_instrumentation_stays_under_harness_budget(self):
+        rec = PaceRecorder(mode="in_loop", target_rate=5000.0, target_interval_ns=200_000)
+        n = 20_000
+        t0 = time.perf_counter_ns()
+        for i in range(n):
+            ns = i * 200_000
+            rec.record_receiver(PaceToken(i, ns, ns), ns, None)
+            rec.note_receiver_to_publish(ns, ns + 10)
+        rec_ns = (time.perf_counter_ns() - t0) / n
+        t0 = time.perf_counter_ns()
+        acc = 0
+        for i in range(n):
+            acc += i
+        empty_ns = (time.perf_counter_ns() - t0) / n
+        del acc
+        # Historical control has no per-token arrays. Stay well under the 2 µs
+        # harness budget so in_loop remains comparable to that loop.
+        self.assertLess(rec_ns, 2_000)
+        self.assertLess(rec_ns - empty_ns, 2_000)
 
 
 if __name__ == "__main__":

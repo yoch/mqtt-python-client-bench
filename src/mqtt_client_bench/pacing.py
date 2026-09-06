@@ -26,9 +26,19 @@ Semantics
 * Sleep then spin: coarse sleep until ``spin_ns`` remains, then a short busy
   wait. Default ``spin_ns`` is 50 µs. Do not spin the whole interval.
 * IPC backpressure: a send that would block is a drop. The pacer does not
-  wait for the SUT. ``token_send_failures > 0`` or a sequence gap invalidates
-  the stimulus (``pacer_stimulus_invalid``). Lateness percentiles are
-  reported, not gated.
+  wait for the SUT. External pacing is valid only when the measure window
+  saw the complete token sequence: no prefix loss, internal gap, suffix
+  loss, or duplicate, ``tokens_emitted == tokens_scheduled -
+  token_send_failures``, and ``tokens_received == tokens_emitted``. A lost
+  last token fails even with no following sequence number. Exact reasons
+  are persisted as ``pacer_stimulus_invalid:<kind>``. Lateness percentiles
+  are reported, not gated.
+* Absolute start: the initiator chooses ``absolute_start_ns =
+  monotonic_ns() + startup_guard_ns`` after the receive socket is bound,
+  then sends that deadline in START. The pacer uses
+  ``deadline(n) = absolute_start_ns + n * interval_ns`` and must not emit
+  before ``absolute_start_ns``. The guard is a few milliseconds; it is
+  not tuned from ARM results.
 * Catch-up event: token *n* is emitted at or after ``deadline(n+1)`` — at
   least one later scheduled deadline has already elapsed.
 * Microburst emission: successive emission interval ``< 0.5 * target
@@ -52,12 +62,25 @@ from typing import Callable, Iterable, List, Optional, Sequence
 
 from mqtt_client_bench.metrics import percentile
 from mqtt_client_bench.paths import PROJECT_ROOT
+from mqtt_client_bench.temporal_trace import DEFAULT_TEMPORAL_TRACE_POINTS, trace_stride
 
 PACER_MODES = ("in_loop", "external")
 DEFAULT_PACER_MODE = "in_loop"
 # Coarse-sleep / busy-wait handover. 50 µs is well above a typical
 # ``time.sleep`` residual on Linux and well below a 200 µs / 5 kHz slot.
 DEFAULT_PACER_SPIN_NS = 50_000
+# Initiator-chosen lead before deadline(0). Milliseconds, explicit, not
+# fitted to a campaign result. The receive loop must be armed before this
+# instant; the pacer must not emit earlier.
+DEFAULT_PACER_STARTUP_GUARD_NS = 5_000_000
+DEFAULT_PACE_SAMPLE_LIMIT = DEFAULT_TEMPORAL_TRACE_POINTS
+PACE_SAMPLE_COLUMNS = (
+    "lateness_ns",
+    "emission_interval_ns",
+    "receiver_interval_ns",
+    "emission_to_receiver_ns",
+    "receiver_to_publish_ns",
+)
 TOKEN_MAGIC = b"PACE"
 # magic(4) sequence(u32) scheduled_deadline_ns(u64) pacer_emission_ns(u64)
 TOKEN_STRUCT = struct.Struct("<4sIQQ")
@@ -65,6 +88,13 @@ TOKEN_SIZE = TOKEN_STRUCT.size
 MICROBURST_FRACTION = 0.5
 CLOSED_LOOP_CADENCES = ("capacity", "burst", "microburst", "batch64")
 PACER_STIMULUS_INVALID = "pacer_stimulus_invalid"
+STIMULUS_PREFIX_LOSS = f"{PACER_STIMULUS_INVALID}:prefix_loss"
+STIMULUS_SUFFIX_LOSS = f"{PACER_STIMULUS_INVALID}:suffix_loss"
+STIMULUS_INTERNAL_GAP = f"{PACER_STIMULUS_INVALID}:internal_gap"
+STIMULUS_DUPLICATE = f"{PACER_STIMULUS_INVALID}:duplicate"
+STIMULUS_SEND_FAILURE = f"{PACER_STIMULUS_INVALID}:send_failure"
+STIMULUS_EMITTED_VS_SCHEDULED = f"{PACER_STIMULUS_INVALID}:emitted_vs_scheduled"
+STIMULUS_RECEIVED_VS_EMITTED = f"{PACER_STIMULUS_INVALID}:received_vs_emitted"
 SNDBUF_BYTES = 1 << 20
 RCVBUF_BYTES = 1 << 20
 
@@ -178,20 +208,114 @@ def _ns_percentiles(values: Sequence[int]) -> dict:
     }
 
 
-def _intervals(timestamps: Sequence[int]) -> List[int]:
-    return [timestamps[i] - timestamps[i - 1] for i in range(1, len(timestamps))]
+def tokens_expected_in_window(start_ns: int, until_ns: int, interval_ns: int) -> int:
+    """Count ``n >= 0`` such that ``start_ns + n * interval_ns < until_ns``."""
+    if interval_ns <= 0 or until_ns <= start_ns:
+        return 0
+    return (int(until_ns) - int(start_ns) - 1) // int(interval_ns) + 1
+
+
+def choose_absolute_start_ns(
+    now_ns: int, guard_ns: int = DEFAULT_PACER_STARTUP_GUARD_NS
+) -> int:
+    if guard_ns < 0:
+        raise ValueError("startup_guard_ns must be >= 0")
+    return int(now_ns) + int(guard_ns)
+
+
+def absolute_start_ns_from_start_command(cmd: dict) -> int:
+    raw = cmd.get("absolute_start_ns")
+    if raw is None:
+        raise ValueError("missing_absolute_start_ns")
+    return int(raw)
+
+
+class PaceTraceSampler:
+    """Every-Nth signed deltas, hard-capped, preallocated.
+
+    Same shape as ``TemporalTraceSampler``: integer modulo plus a store into a
+    buffer allocated once. Percentiles come from these samples; O(1) counters
+    stay outside. The SUT hot path must not grow arrays with every token.
+    """
+
+    __slots__ = (
+        "max_points",
+        "stride",
+        "seen",
+        "sampled_tokens",
+        "last_was_sampled",
+        "_cols",
+        "_counts",
+    )
+
+    def __init__(
+        self,
+        max_points: int = DEFAULT_PACE_SAMPLE_LIMIT,
+        stride: int = 1,
+    ) -> None:
+        if max_points < 0:
+            raise ValueError("max_points must be >= 0")
+        if stride < 1:
+            raise ValueError("stride must be >= 1")
+        self.max_points = int(max_points)
+        self.stride = int(stride)
+        self.seen = 0
+        self.sampled_tokens = 0
+        self.last_was_sampled = False
+        self._cols = {
+            name: array("q", [0] * self.max_points) if self.max_points else array("q")
+            for name in PACE_SAMPLE_COLUMNS
+        }
+        self._counts = {name: 0 for name in PACE_SAMPLE_COLUMNS}
+
+    def begin_token(self) -> bool:
+        idx = self.seen
+        self.seen += 1
+        if self.max_points <= 0 or idx % self.stride != 0:
+            self.last_was_sampled = False
+            return False
+        if self.sampled_tokens >= self.max_points:
+            self.last_was_sampled = False
+            return False
+        self.sampled_tokens += 1
+        self.last_was_sampled = True
+        return True
+
+    def store(self, column: str, value: int) -> None:
+        if not self.last_was_sampled:
+            return
+        n = self._counts[column]
+        if n >= self.max_points:
+            return
+        self._cols[column][n] = int(value)
+        self._counts[column] = n + 1
+
+    def values(self, column: str) -> array:
+        return self._cols[column][: self._counts[column]]
+
+    def sample_count(self) -> int:
+        return self.sampled_tokens
+
+    def memory_bytes(self) -> int:
+        return sum(col.buffer_info()[1] * col.itemsize for col in self._cols.values())
 
 
 class PaceRecorder:
-    """Bounded in-process telemetry for one measure window.
+    """SUT-minimal, bounded telemetry for one measure window.
 
-    Raw samples stay in ``array('q')`` and are reduced to percentiles before
-    the result is written. Catch-up / microburst counters are the diagnostic
-    that p50-of-rate cannot show.
+    Per-token work on the initiator is O(1) counters plus an every-Nth store
+    into a preallocated sampler. Unbounded timestamp arrays are forbidden:
+    they would make the in_loop control a different event loop than the
+    historical ``asyncio.sleep`` harness.
+
+    Emission lateness for ``external`` mode is collected in the pacer
+    process (``side="pacer"``) and merged into the summary. Catch-up /
+    microburst counters are the diagnostic that p50-of-rate cannot show.
     """
 
     __slots__ = (
         "mode",
+        "side",
         "target_rate",
         "target_interval_ns",
         "tokens_scheduled",
@@ -200,18 +324,23 @@ class PaceRecorder:
         "token_send_failures",
         "sequence_gaps",
         "last_sequence",
+        "first_sequence",
+        "tokens_expected_in_measure_window",
+        "phase_start_ns",
+        "first_scheduled_deadline_ns",
+        "first_emission_ns",
+        "first_receiver_ns",
         "catch_up_events",
         "microburst_emissions",
         "n_bursts",
         "max_burst_size",
-        "_lateness",
-        "_emission_times",
-        "_receiver_times",
-        "_emission_to_receiver",
-        "_receiver_to_publish",
+        "_sampler",
+        "_last_emission_ns",
+        "_last_receiver_ns",
         "_burst_run",
         "invalid_tokens",
         "_pacer_side",
+        "_sequence_flags",
     )
 
     def __init__(
@@ -220,8 +349,12 @@ class PaceRecorder:
         mode: str,
         target_rate: Optional[float],
         target_interval_ns: int,
+        side: str = "sut",
+        max_samples: int = DEFAULT_PACE_SAMPLE_LIMIT,
+        expected_tokens: Optional[float] = None,
     ) -> None:
         self.mode = mode
+        self.side = side
         self.target_rate = float(target_rate) if target_rate else None
         self.target_interval_ns = int(target_interval_ns)
         self.tokens_scheduled = 0
@@ -230,44 +363,67 @@ class PaceRecorder:
         self.token_send_failures = 0
         self.sequence_gaps = 0
         self.last_sequence: Optional[int] = None
+        self.first_sequence: Optional[int] = None
+        self.tokens_expected_in_measure_window: Optional[int] = None
+        self.phase_start_ns: Optional[int] = None
+        self.first_scheduled_deadline_ns: Optional[int] = None
+        self.first_emission_ns: Optional[int] = None
+        self.first_receiver_ns: Optional[int] = None
         self.catch_up_events = 0
         self.microburst_emissions = 0
         self.n_bursts = 0
         self.max_burst_size = 0
-        self._lateness = array("q")
-        self._emission_times = array("q")
-        self._receiver_times = array("q")
-        self._emission_to_receiver = array("q")
-        self._receiver_to_publish = array("q")
+        stride = trace_stride(float(expected_tokens or 0.0), max_samples)
+        self._sampler = PaceTraceSampler(max_points=max_samples, stride=stride)
+        self._last_emission_ns: Optional[int] = None
+        self._last_receiver_ns: Optional[int] = None
         self._burst_run = 0
         self.invalid_tokens = 0
         self._pacer_side = None
+        self._sequence_flags: List[str] = []
+
+    def memory_bytes(self) -> int:
+        return self._sampler.memory_bytes()
+
+    def sample_count(self) -> int:
+        return self._sampler.sample_count()
+
+    def set_window(self, start_ns: int, until_ns: int, interval_ns: int) -> None:
+        self.phase_start_ns = int(start_ns)
+        self.first_scheduled_deadline_ns = int(start_ns)
+        self.tokens_expected_in_measure_window = tokens_expected_in_window(
+            start_ns, until_ns, interval_ns
+        )
+        expected = self.tokens_expected_in_measure_window
+        if expected:
+            self._sampler.stride = trace_stride(float(expected), self._sampler.max_points)
+
+    def _flag(self, reason: str) -> None:
+        if reason not in self._sequence_flags:
+            self._sequence_flags.append(reason)
 
     def note_gap(self, sequence: int) -> None:
+        seq = int(sequence)
         if self.last_sequence is None:
-            self.last_sequence = sequence
+            self.first_sequence = seq
+            self.last_sequence = seq
+            if seq != 0:
+                self._flag(STIMULUS_PREFIX_LOSS)
             return
         expected = self.last_sequence + 1
-        if sequence != expected:
-            self.sequence_gaps += max(1, sequence - expected) if sequence > expected else 1
-        self.last_sequence = sequence
-
-    def record_emission(
-        self,
-        sequence: int,
-        scheduled_deadline_ns: int,
-        emission_ns: int,
-        *,
-        sent: bool,
-    ) -> None:
-        self.tokens_scheduled += 1
-        if not sent:
-            self.token_send_failures += 1
+        if seq == self.last_sequence or seq < self.last_sequence:
+            self.sequence_gaps += 1
+            self._flag(STIMULUS_DUPLICATE)
             return
-        self.tokens_emitted += 1
-        self._lateness.append(int(emission_ns) - int(scheduled_deadline_ns))
-        if self._emission_times:
-            interval = int(emission_ns) - int(self._emission_times[-1])
+        if seq != expected:
+            self.sequence_gaps += seq - expected
+            self._flag(STIMULUS_INTERNAL_GAP)
+        self.last_sequence = seq
+
+    def _note_emission_shape(self, scheduled_deadline_ns: int, emission_ns: int) -> Optional[int]:
+        interval = None
+        if self._last_emission_ns is not None:
+            interval = int(emission_ns) - int(self._last_emission_ns)
             half = int(self.target_interval_ns * MICROBURST_FRACTION)
             if half > 0 and interval < half:
                 self.microburst_emissions += 1
@@ -278,9 +434,32 @@ class PaceRecorder:
                     self.max_burst_size = self._burst_run + 1
             else:
                 self._burst_run = 0
-        self._emission_times.append(int(emission_ns))
+        self._last_emission_ns = int(emission_ns)
+        if self.first_emission_ns is None:
+            self.first_emission_ns = int(emission_ns)
         if self.target_interval_ns > 0 and emission_ns >= scheduled_deadline_ns + self.target_interval_ns:
             self.catch_up_events += 1
+        return interval
+
+    def record_emission(
+        self,
+        sequence: int,
+        scheduled_deadline_ns: int,
+        emission_ns: int,
+        *,
+        sent: bool,
+    ) -> None:
+        del sequence
+        self.tokens_scheduled += 1
+        if not sent:
+            self.token_send_failures += 1
+            return
+        self.tokens_emitted += 1
+        interval = self._note_emission_shape(scheduled_deadline_ns, emission_ns)
+        if self._sampler.begin_token():
+            self._sampler.store("lateness_ns", int(emission_ns) - int(scheduled_deadline_ns))
+            if interval is not None:
+                self._sampler.store("emission_interval_ns", interval)
 
     def record_receiver(
         self,
@@ -293,10 +472,13 @@ class PaceRecorder:
             return
         self.tokens_received += 1
         self.note_gap(token.sequence)
-        self._receiver_times.append(int(receiver_ns))
-        self._emission_to_receiver.append(int(receiver_ns) - int(token.pacer_emission_ns))
-        if publish_call_ns is not None:
-            self._receiver_to_publish.append(int(publish_call_ns) - int(receiver_ns))
+        recv_ns = int(receiver_ns)
+        if self.first_receiver_ns is None:
+            self.first_receiver_ns = recv_ns
+        recv_interval = None
+        if self._last_receiver_ns is not None:
+            recv_interval = recv_ns - int(self._last_receiver_ns)
+        self._last_receiver_ns = recv_ns
         if self.mode == "in_loop":
             self.record_emission(
                 token.sequence,
@@ -304,9 +486,40 @@ class PaceRecorder:
                 token.pacer_emission_ns,
                 sent=True,
             )
+            if self._sampler.last_was_sampled:
+                if recv_interval is not None:
+                    self._sampler.store("receiver_interval_ns", recv_interval)
+                self._sampler.store(
+                    "emission_to_receiver_ns",
+                    recv_ns - int(token.pacer_emission_ns),
+                )
+                if publish_call_ns is not None:
+                    self._sampler.store(
+                        "receiver_to_publish_ns",
+                        int(publish_call_ns) - recv_ns,
+                    )
+            return
+        if self.side != "sut":
+            return
+        if self._sampler.begin_token():
+            if recv_interval is not None:
+                self._sampler.store("receiver_interval_ns", recv_interval)
+            self._sampler.store(
+                "emission_to_receiver_ns",
+                recv_ns - int(token.pacer_emission_ns),
+            )
+            if publish_call_ns is not None:
+                self._sampler.store(
+                    "receiver_to_publish_ns",
+                    int(publish_call_ns) - recv_ns,
+                )
 
     def note_receiver_to_publish(self, receiver_ns: int, publish_call_ns: int) -> None:
-        self._receiver_to_publish.append(int(publish_call_ns) - int(receiver_ns))
+        if not self._sampler.last_was_sampled:
+            return
+        self._sampler.store(
+            "receiver_to_publish_ns", int(publish_call_ns) - int(receiver_ns)
+        )
 
     def merge_pacer_side(self, stats: Optional[dict]) -> None:
         """Copy the process-side calendar counters. Do not append raw samples.
@@ -326,6 +539,16 @@ class PaceRecorder:
         self.microburst_emissions = int(burst.get("emissions") or 0)
         self.n_bursts = int(burst.get("n_bursts") or 0)
         self.max_burst_size = int(burst.get("max_burst_size") or 0)
+        if stats.get("phase_start_ns") is not None:
+            self.phase_start_ns = int(stats["phase_start_ns"])
+        if stats.get("first_scheduled_deadline_ns") is not None:
+            self.first_scheduled_deadline_ns = int(stats["first_scheduled_deadline_ns"])
+        if stats.get("first_emission_ns") is not None:
+            self.first_emission_ns = int(stats["first_emission_ns"])
+        if stats.get("tokens_expected_in_measure_window") is not None:
+            self.tokens_expected_in_measure_window = int(
+                stats["tokens_expected_in_measure_window"]
+            )
 
     def actual_offered_rate(self, duration_s: float) -> Optional[float]:
         if duration_s <= 0:
@@ -333,20 +556,46 @@ class PaceRecorder:
         count = self.tokens_received or self.tokens_emitted
         return float(count) / float(duration_s)
 
-    def stimulus_valid(self) -> bool:
+    def completeness_reasons(self) -> List[str]:
+        reasons: List[str] = []
         if self.token_send_failures > 0:
-            return False
-        if self.sequence_gaps > 0:
-            return False
-        return True
+            reasons.append(STIMULUS_SEND_FAILURE)
+        if self.tokens_emitted != self.tokens_scheduled - self.token_send_failures:
+            reasons.append(STIMULUS_EMITTED_VS_SCHEDULED)
+        reasons.extend(self._sequence_flags)
+        expected = self.tokens_expected_in_measure_window
+        if self.side == "pacer":
+            return _unique(reasons)
+        if expected is not None:
+            if expected > 0 and self.first_sequence is None:
+                self._flag(STIMULUS_PREFIX_LOSS)
+                self._flag(STIMULUS_SUFFIX_LOSS)
+            elif self.first_sequence is not None and self.first_sequence != 0:
+                self._flag(STIMULUS_PREFIX_LOSS)
+            if expected > 0 and (
+                self.last_sequence is None or self.last_sequence < expected - 1
+            ):
+                self._flag(STIMULUS_SUFFIX_LOSS)
+            if expected > 0 and self.last_sequence is not None and self.last_sequence > expected - 1:
+                self._flag(STIMULUS_DUPLICATE)
+            reasons = _unique(reasons + self._sequence_flags)
+        if self.tokens_emitted and self.tokens_received != self.tokens_emitted:
+            reasons.append(STIMULUS_RECEIVED_VS_EMITTED)
+        return _unique(reasons)
+
+    def stimulus_valid(self) -> bool:
+        return not self.completeness_reasons()
 
     def summary(self, *, duration_s: Optional[float] = None) -> dict:
         side = self._pacer_side or {}
-        emission_intervals = _intervals(self._emission_times)
-        receiver_intervals = _intervals(self._receiver_times)
         offered = self.actual_offered_rate(duration_s) if duration_s else None
-        lateness = side.get("pacer_lateness") or _ns_percentiles(self._lateness)
-        emission = side.get("emission_intervals") or _ns_percentiles(emission_intervals)
+        lateness = side.get("pacer_lateness") or _ns_percentiles(
+            self._sampler.values("lateness_ns")
+        )
+        emission = side.get("emission_intervals") or _ns_percentiles(
+            self._sampler.values("emission_interval_ns")
+        )
+        invalid = self.completeness_reasons()
         return {
             "mode": self.mode,
             "target_rate": self.target_rate,
@@ -354,14 +603,27 @@ class PaceRecorder:
             "tokens_scheduled": self.tokens_scheduled,
             "tokens_emitted": self.tokens_emitted,
             "tokens_received": self.tokens_received,
+            "tokens_expected_in_measure_window": self.tokens_expected_in_measure_window,
+            "first_sequence": self.first_sequence,
+            "last_sequence": self.last_sequence,
             "sequence_gaps": self.sequence_gaps,
             "token_send_failures": self.token_send_failures,
             "invalid_tokens": self.invalid_tokens,
+            "phase_start_ns": self.phase_start_ns,
+            "first_scheduled_deadline_ns": self.first_scheduled_deadline_ns,
+            "first_emission_ns": self.first_emission_ns,
+            "first_receiver_ns": self.first_receiver_ns,
             "pacer_lateness": lateness,
             "emission_intervals": emission,
-            "receiver_intervals": _ns_percentiles(receiver_intervals),
-            "emission_to_receiver_delay": _ns_percentiles(self._emission_to_receiver),
-            "receiver_to_publish_delay": _ns_percentiles(self._receiver_to_publish),
+            "receiver_intervals": _ns_percentiles(
+                self._sampler.values("receiver_interval_ns")
+            ),
+            "emission_to_receiver_delay": _ns_percentiles(
+                self._sampler.values("emission_to_receiver_ns")
+            ),
+            "receiver_to_publish_delay": _ns_percentiles(
+                self._sampler.values("receiver_to_publish_ns")
+            ),
             "actual_offered_rate": offered,
             "catch_up": {
                 "definition": (
@@ -379,8 +641,20 @@ class PaceRecorder:
                 "n_bursts": self.n_bursts,
                 "max_burst_size": self.max_burst_size,
             },
-            "stimulus_valid": self.stimulus_valid(),
+            "stimulus_valid": not invalid,
+            "stimulus_invalid_reasons": invalid,
         }
+
+
+def _unique(items: Sequence[str]) -> List[str]:
+    seen = set()
+    out: List[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
 
 
 class ExternalRatePacer:
@@ -414,6 +688,7 @@ class ExternalRatePacer:
             mode="external",
             target_rate=(1_000_000_000.0 / self.interval_ns),
             target_interval_ns=self.interval_ns,
+            side="pacer",
         )
 
     def deadline(self, n: int) -> int:
@@ -438,6 +713,7 @@ class ExternalRatePacer:
         return token
 
     def emit_until(self, until_ns: int) -> PaceRecorder:
+        self.recorder.set_window(self.start_ns, int(until_ns), self.interval_ns)
         while not self.stop and self.deadline(self.sequence) < until_ns:
             self.emit_one()
         return self.recorder
@@ -553,10 +829,13 @@ class PacerClient:
         except json.JSONDecodeError:
             return {"ok": False, "raw": line.decode("utf-8", "replace")}
 
-    def start_phase(self, *, interval_ns: int, duration_ns: int) -> None:
+    def start_phase(
+        self, *, absolute_start_ns: int, interval_ns: int, duration_ns: int
+    ) -> None:
         self._command(
             {
                 "cmd": "start",
+                "absolute_start_ns": int(absolute_start_ns),
                 "interval_ns": int(interval_ns),
                 "duration_ns": int(duration_ns),
                 "spin_ns": self.spin_ns,
@@ -607,21 +886,43 @@ class PacerClient:
 def stimulus_invalid_reasons(pacing: Optional[dict], *, mode: Optional[str] = None) -> List[str]:
     """Fail the run when the external stimulus itself is not a regular calendar.
 
-    Token loss or a sequence gap means the SUT did not see the schedule the
-    pacer computed. Lateness / burst percentiles stay diagnostic.
+    Token loss — including a missing last token with no following sequence
+    number — means the SUT did not see the schedule the pacer computed.
+    Lateness / burst percentiles stay diagnostic. Exact reasons are kept.
     """
     if not pacing:
         return []
     resolved = str(pacing.get("mode") or mode or DEFAULT_PACER_MODE)
     if resolved != "external":
         return []
+    stored = pacing.get("stimulus_invalid_reasons")
+    if stored:
+        return [str(item) for item in stored]
+    reasons: List[str] = []
     if int(pacing.get("token_send_failures") or 0) > 0:
-        return [PACER_STIMULUS_INVALID]
+        reasons.append(STIMULUS_SEND_FAILURE)
+    scheduled = int(pacing.get("tokens_scheduled") or 0)
+    emitted = int(pacing.get("tokens_emitted") or 0)
+    failures = int(pacing.get("token_send_failures") or 0)
+    if scheduled and emitted != scheduled - failures:
+        reasons.append(STIMULUS_EMITTED_VS_SCHEDULED)
+    received = int(pacing.get("tokens_received") or 0)
+    if emitted and received != emitted:
+        reasons.append(STIMULUS_RECEIVED_VS_EMITTED)
+    expected = pacing.get("tokens_expected_in_measure_window")
+    if expected is not None:
+        expected_n = int(expected)
+        if received != expected_n:
+            if received == 0:
+                reasons.append(STIMULUS_PREFIX_LOSS)
+                reasons.append(STIMULUS_SUFFIX_LOSS)
+            elif received < expected_n:
+                reasons.append(STIMULUS_SUFFIX_LOSS)
     if int(pacing.get("sequence_gaps") or 0) > 0:
-        return [PACER_STIMULUS_INVALID]
-    if pacing.get("stimulus_valid") is False:
-        return [PACER_STIMULUS_INVALID]
-    return []
+        reasons.append(STIMULUS_INTERNAL_GAP)
+    if pacing.get("stimulus_valid") is False and not reasons:
+        reasons.append(PACER_STIMULUS_INVALID)
+    return _unique(reasons)
 
 
 def pacer_stimulus_reasons(point: dict, worker_results: Iterable[dict]) -> List[str]:
