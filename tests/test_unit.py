@@ -4384,6 +4384,235 @@ class CrossClientLoadTests(unittest.TestCase):
             20000.0,
         )
 
+    def test_c_common_async_is_independent_of_paho(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point, round_shared_target_rate
+
+        point = {
+            "shared_load_fraction": 0.75,
+            "topology": "application_rtt",
+            "protocol": "MQTTv311",
+        }
+        profiles = {
+            "mqttium": self._rtt_profile(14077.0),
+            "gmqtt": self._rtt_profile(14423.0),
+            "paho": self._rtt_profile(11854.0),
+        }
+        async_grid = resolve_shared_load_point(point, profiles, ["mqttium", "gmqtt"])
+        with_paho = resolve_shared_load_point(point, profiles, ["mqttium", "gmqtt", "paho"])
+        self.assertEqual(async_grid["shared_capacity_msgs_per_s"], 14077.0)
+        self.assertEqual(async_grid["target_rate"], round_shared_target_rate(14077.0 * 0.75))
+        self.assertNotEqual(async_grid["target_rate"], with_paho["target_rate"])
+        self.assertNotIn("paho", async_grid["shared_capacities"])
+
+    def test_c_common_paho_is_independent_of_gmqtt(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point, round_shared_target_rate
+
+        point = {
+            "shared_load_fraction": 0.50,
+            "topology": "application_rtt",
+            "protocol": "MQTTv5",
+        }
+        profiles = {
+            "mqttium": self._rtt_profile(13598.0),
+            "gmqtt": self._rtt_profile(8000.0),
+            "paho": self._rtt_profile(9141.0),
+        }
+        # _rtt_profile scales v5 as 0.9 * capacity argument.
+        paho_grid = resolve_shared_load_point(point, profiles, ["mqttium", "paho"])
+        self.assertEqual(paho_grid["shared_capacity_msgs_per_s"], 9141.0 * 0.9)
+        self.assertEqual(
+            paho_grid["target_rate"],
+            round_shared_target_rate(9141.0 * 0.9 * 0.50),
+        )
+        self.assertNotIn("gmqtt", paho_grid["shared_capacities"])
+
+    def test_pairwise_order_does_not_change_either_grid(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point
+
+        point = {
+            "shared_load_fraction": 0.90,
+            "topology": "application_rtt",
+            "protocol": "MQTTv311",
+        }
+        profiles = {
+            "mqttium": self._rtt_profile(14077.0),
+            "gmqtt": self._rtt_profile(14423.0),
+            "paho": self._rtt_profile(11854.0),
+        }
+        a = resolve_shared_load_point(point, profiles, ["mqttium", "gmqtt"])
+        b = resolve_shared_load_point(point, profiles, ["gmqtt", "mqttium"])
+        self.assertEqual(a["target_rate"], b["target_rate"])
+        self.assertEqual(a["shared_capacity_msgs_per_s"], b["shared_capacity_msgs_per_s"])
+        c = resolve_shared_load_point(point, profiles, ["mqttium", "paho"])
+        d = resolve_shared_load_point(point, profiles, ["paho", "mqttium"])
+        self.assertEqual(c["target_rate"], d["target_rate"])
+        self.assertEqual(c["shared_capacity_msgs_per_s"], d["shared_capacity_msgs_per_s"])
+
+    def test_same_absolute_target_rate_on_both_pairwise_clients(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point
+
+        point = {
+            "shared_load_fraction": 0.25,
+            "topology": "application_rtt",
+            "protocol": "MQTTv311",
+        }
+        profiles = {
+            "mqttium": self._rtt_profile(14077.0),
+            "gmqtt": self._rtt_profile(14423.0),
+        }
+        resolved = resolve_shared_load_point(point, profiles, ["mqttium", "gmqtt"])
+        self.assertEqual(resolved["shared_capacities"]["mqttium"], 14077.0)
+        self.assertEqual(resolved["shared_capacities"]["gmqtt"], 14423.0)
+        self.assertEqual(resolved["target_rate"], resolved["target_rate"])
+        self.assertLess(resolved["target_rate"], 14077.0)
+
+    def test_matched_load_misses_are_stricter_than_relative_load(self):
+        from mqtt_client_bench.harness import (
+            MATCHED_LOAD_BACKPRESSURE_MAX,
+            OPEN_LOOP_BACKPRESSURE_MAX,
+            validate_run,
+        )
+
+        self.assertLess(MATCHED_LOAD_BACKPRESSURE_MAX, OPEN_LOOP_BACKPRESSURE_MAX)
+        worker = {
+            "role": "rtt_initiator",
+            "ok": True,
+            "duration_s": 10.0,
+            "offered": 10000,
+            "sent_in_window": 9950,
+            "completed_in_window": 9950,
+            "missed_due_to_backpressure": 50,
+        }
+        relative = {
+            "cadence": "loaded75",
+            "target_rate": 1000.0,
+            "topology": "application_rtt",
+            "duration_s": 10.0,
+        }
+        matched = {**relative, "shared_load_fraction": 0.75}
+        rel = validate_run(relative, [worker], None, [])
+        mat = validate_run(matched, [worker], None, [])
+        self.assertNotIn("open_loop_backpressure_misses", rel["reasons"])
+        self.assertIn("open_loop_backpressure_misses", mat["reasons"])
+        self.assertIsNone(mat.get("target_rate_override"))
+
+
+class NativeRttDriveTests(unittest.TestCase):
+    """application_rtt must take the native path when the library has one."""
+
+    def test_mqttium_and_gmqtt_are_native_async(self):
+        from mqtt_client_bench.roles.rtt_drive import select_rtt_drive
+
+        for client in ("mqttium", "gmqtt"):
+            plan = select_rtt_drive(client)
+            self.assertTrue(plan["native_async"], client)
+            self.assertEqual(plan["publish_path"], "native_async", client)
+            self.assertTrue(plan["publish_sync_on_loop"], client)
+            self.assertEqual(plan["builder"].__name__, "create_async_adapter")
+
+    def test_paho_stays_sync(self):
+        from mqtt_client_bench.roles.rtt_drive import select_rtt_drive
+
+        plan = select_rtt_drive("paho")
+        self.assertFalse(plan["native_async"])
+        self.assertEqual(plan["publish_path"], "sync_facade")
+        self.assertEqual(plan["builder"].__name__, "create_adapter")
+
+    def test_forced_facade_is_recorded_not_silent(self):
+        from mqtt_client_bench.roles.rtt_drive import select_rtt_drive
+
+        plan = select_rtt_drive("mqttium", native_async=False)
+        self.assertFalse(plan["native_async"])
+        self.assertEqual(plan["publish_path"], "sync_facade")
+
+    def test_roles_cannot_silently_drop_create_async_adapter(self):
+        drive = (ROOT / "src/mqtt_client_bench/roles/rtt_drive.py").read_text()
+        initiator = (ROOT / "src/mqtt_client_bench/roles/rtt_initiator.py").read_text()
+        responder = (ROOT / "src/mqtt_client_bench/roles/responder.py").read_text()
+        self.assertIn("create_async_adapter", drive)
+        self.assertIn("has_async_adapter", drive)
+        self.assertIn("publish_path", drive)
+        for src, name in ((initiator, "rtt_initiator"), (responder, "responder")):
+            self.assertIn("select_rtt_drive", src, name)
+            self.assertIn("native_async", src, name)
+            self.assertIn("_run_native", src, name)
+
+    def test_identity_persists_path_and_runtime(self):
+        from mqtt_client_bench.adapters.registry import adapter_identity
+        from mqtt_client_bench.roles.rtt_drive import drive_identity, select_rtt_drive
+
+        plan = select_rtt_drive("mqttium")
+        row = drive_identity(plan, adapter_identity("mqttium"))
+        self.assertEqual(row["publish_path"], "native_async")
+        self.assertTrue(row["native_async"])
+        self.assertTrue(row["io_model"])
+        self.assertTrue(row["completion_mechanism"])
+        self.assertEqual(row["client"], "mqttium")
+
+    def test_extract_run_row_keeps_offer_and_path(self):
+        from mqtt_client_bench.archive import extract_run_row
+
+        row = extract_run_row(
+            {
+                "client": "mqttium",
+                "harness_fingerprint": "abc",
+                "publish_path": "native_async",
+                "native_async": True,
+                "status": "valid",
+                "reasons": [],
+                "primary_msgs_per_s": 1000.0,
+                "run_id": "deadbeef",
+                "point": {
+                    "scenario": "application_rtt_fixed_rate",
+                    "protocol": "MQTTv311",
+                    "shared_load_fraction": 0.75,
+                    "target_rate": 10558.0,
+                    "shared_capacity_msgs_per_s": 14077.0,
+                },
+                "environment": {"python": "3.14.6", "machine": "aarch64", "scaling_governor": "performance"},
+                "host_profile": {"fingerprint": "4dd74b07ca00455b", "role": "runner"},
+                "workers": [
+                    {
+                        "role": "rtt_initiator",
+                        "client_version": "1.0.0rc13",
+                        "io_model": "asyncio_bridged",
+                        "completion_mechanism": "callback",
+                        "offered": 10000,
+                        "submitted": 9998,
+                        "sent_in_window": 9998,
+                        "completed_in_window": 9997,
+                        "missed_due_to_backpressure": 2,
+                        "backlog_at_end": 1,
+                        "latency_summary": {"p50_ms": 0.5, "p95_ms": 0.8, "p99_ms": 1.1},
+                    }
+                ],
+            }
+        )
+        self.assertEqual(row["target_rate"], 10558.0)
+        self.assertEqual(row["offered"], 10000)
+        self.assertEqual(row["submitted"], 9998)
+        self.assertEqual(row["completed"], 9997)
+        self.assertEqual(row["missed_due_to_backpressure"], 2)
+        self.assertEqual(row["publish_path"], "native_async")
+        self.assertTrue(row["native_async"])
+        self.assertEqual(row["p50_ms"], 0.5)
+        self.assertNotIn("latencies_ns", row)
+
+    def test_official_pairwise_script_never_builds_a_three_way_grid(self):
+        official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
+        legacy = (ROOT / "scripts/run_mqttium_gmqtt_paho_arm64.sh").read_text()
+        self.assertIn('assert version("mqttium") == "1.0.0rc13"', official)
+        self.assertIn('assert version("gmqtt") == "0.7.0"', official)
+        self.assertIn('assert version("paho-mqtt") == "2.1.0"', official)
+        self.assertIn('mqttium==${MQTTIUM_VER}', official)
+        self.assertIn('run_pair "mqttium,gmqtt"', official)
+        self.assertIn('run_pair "mqttium,paho"', official)
+        self.assertNotIn("--clients mqttium,gmqtt,paho", official)
+        self.assertIn('--clients "$pair"', official)
+        self.assertIn("SUPERSEDED", legacy)
+        self.assertIn("run_pairwise_rtt_campaign.sh", legacy)
+        self.assertIn("exit 2", legacy)
+
 
 class _FakeSyncOnLoopAdapter:
     """A client that admits a publish on the loop and acknowledges it later.

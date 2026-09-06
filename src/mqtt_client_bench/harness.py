@@ -111,6 +111,16 @@ SYS_SETTLE_S = 1.5
 # measurement path (see provenance.py).
 HARNESS_FINGERPRINT = harness_fingerprint()
 
+# Open-loop offer clock may drift ±2 %. That is a paceur check, not a licence
+# to keep a latency sample after the client refused a material share of slots.
+OPEN_LOOP_OFFER_TOLERANCE = 0.02
+OPEN_LOOP_BACKPRESSURE_MAX = 0.02
+# Matched-load latency (shared_load_fraction) is a percentile comparison of the
+# *offered* shape. A 2 % miss rate can drop the congested tail and still look
+# valid. 0.2 % keeps completion near-full without treating a single missed
+# slot on a short smoke window as a ranking.
+MATCHED_LOAD_BACKPRESSURE_MAX = 0.002
+
 # Target offer for core sub_* QoS0 exact-topic capacity (paced mqtt_hammer).
 # emqtt-bench -I is milliseconds and cannot hold this on one loadgen core;
 # those paths are clamped to EMQTT_MAX_OFFER_MSGS_PER_S. MQTT_BENCH_LOADGEN=emqtt
@@ -688,12 +698,18 @@ def validate_run(
             if offered is None:
                 continue
             actual_offer = float(offered) / duration
-            if abs(actual_offer - target) / target > 0.02:
+            if abs(actual_offer - target) / target > OPEN_LOOP_OFFER_TOLERANCE:
                 reasons.append("open_loop_rate_out_of_tolerance")
             missed = int(result.get("missed_due_to_backpressure") or 0)
             # Material missed slots mean the latency sample is from a different
-            # offered shape than the point claimed; fail closed.
-            if float(offered) > 0 and missed / float(offered) > 0.02:
+            # offered shape than the point claimed; fail closed. Never lower
+            # target_rate to hide an offer-limited client.
+            miss_limit = (
+                MATCHED_LOAD_BACKPRESSURE_MAX
+                if point.get("shared_load_fraction") is not None
+                else OPEN_LOOP_BACKPRESSURE_MAX
+            )
+            if float(offered) > 0 and missed / float(offered) > miss_limit:
                 reasons.append("open_loop_backpressure_misses")
 
     topology = point.get("topology")
@@ -1919,10 +1935,16 @@ def run_point(
         # ranked against each other; for a client that *has* a native path, a
         # facade run is diagnostic by definition and is marked non_comparable.
         publish_path = None
+        native_async = None
         for wr in worker_results:
             if wr.get("publish_path"):
                 publish_path = wr["publish_path"]
+            if wr.get("native_async") is not None:
+                native_async = wr["native_async"]
+            if publish_path is not None and native_async is not None:
                 break
+        if native_async is None and publish_path is not None:
+            native_async = publish_path == "native_async"
         forced_facade = publish_path == "sync_facade" and has_async_adapter(client)
 
         return {
@@ -1974,6 +1996,7 @@ def run_point(
             "non_comparable": bool(point.get("non_comparable")) or forced_facade,
             "protocol_effective": point.get("protocol", "MQTTv311"),
             "publish_path": publish_path,
+            "native_async": native_async,
         }
     finally:
         barrier.close()
