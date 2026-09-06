@@ -1256,6 +1256,27 @@ class CliDefaultsTests(unittest.TestCase):
                                      + (["--scenario", "pub_qos_sweep_telemetry"] if cmd == "run" else []))
             self.assertEqual(args.profile, "standard", cmd)
 
+    def test_compare_cli_accepts_external_broker(self):
+        from mqtt_client_bench.run import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "compare",
+                "--clients", "mqttium,gmqtt",
+                "--scenario", "application_rtt_fixed_rate",
+                "--broker", "127.0.0.1:11883",
+                "--load-profile-dir", "calibrations",
+                "--variant-index", "0",
+                "--blocks", "1",
+            ]
+        )
+        self.assertEqual(args.broker, "127.0.0.1:11883")
+        self.assertEqual(args.variant_index, 0)
+        self.assertEqual(args.load_profile_dir, "calibrations")
+        official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
+        self.assertIn('"${BROKER_ARGS[@]}"', official)
+
 
 class BarrierTests(unittest.TestCase):
     def test_two_phase_barrier(self):
@@ -4812,6 +4833,7 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertIn("write_official_rtt_calibrations", official)
         self.assertIn('AA_VARIANT_INDEX="${AA_VARIANT_INDEX:-4}"', official)
         self.assertIn("ABBA_VARIANT_INDEXES", official)
+        self.assertIn('--load-profile-dir "$cal_dir/aa"', official)
         self.assertIn("SUPERSEDED", legacy)
         self.assertIn("run_pairwise_rtt_campaign.sh", legacy)
         self.assertIn("exit 2", legacy)
@@ -5020,6 +5042,54 @@ class PairwiseCapacityGateTests(unittest.TestCase):
         self.assertEqual(smoke["protocols"]["MQTTv311"]["n_admitted"], 1)
         self.assertEqual(smoke["protocols"]["MQTTv311"]["capacity_msgs_per_s"], 27389.66)
         self.assertEqual(smoke["protocols"]["MQTTv311"]["admission"], "smoke_path_proof")
+
+    def test_aa_calibrations_use_pair_c_common_not_the_faster_client(self):
+        import tempfile
+
+        from mqtt_client_bench.pairwise import write_official_rtt_calibrations
+
+        mqttium_runs = [self._valid(14000.0 + i) for i in range(5)]
+        gmqtt_runs = [self._valid(20000.0 + i) for i in range(5)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            matrix = root / "matrix"
+            cal = root / "cal"
+            matrix.mkdir()
+            (matrix / "mqttium-rtt_capacity_qos1.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            self._block("MQTTv311", mqttium_runs),
+                            self._block("MQTTv5", [self._valid(13000.0) for _ in range(5)]),
+                        ]
+                    }
+                )
+            )
+            (matrix / "gmqtt-rtt_capacity_qos1.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            self._block("MQTTv311", gmqtt_runs),
+                            self._block("MQTTv5", [self._valid(19000.0) for _ in range(5)]),
+                        ]
+                    }
+                )
+            )
+            payload = write_official_rtt_calibrations(
+                matrix, cal, ("mqttium", "gmqtt"), required_valid=5
+            )
+            self.assertEqual(payload["c_common"]["MQTTv311"], 14002.0)
+            aa_gmqtt = json.loads((cal / "aa" / "gmqtt-load.json").read_text())
+            own_gmqtt = json.loads((cal / "gmqtt-load.json").read_text())
+            self.assertEqual(
+                aa_gmqtt["protocol_capacities"]["MQTTv311"]["rtt_capacity_msgs_per_s"],
+                14002.0,
+            )
+            self.assertGreater(
+                own_gmqtt["protocol_capacities"]["MQTTv311"]["rtt_capacity_msgs_per_s"],
+                14002.0,
+            )
+            self.assertEqual(aa_gmqtt["c_common_of"], ["mqttium", "gmqtt"])
 
     def test_bridged_path_is_refused_for_async_peers(self):
         from mqtt_client_bench.pairwise import official_rtt_capacity_block

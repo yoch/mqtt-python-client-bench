@@ -2756,6 +2756,7 @@ def compare_clients(
     host_profile_path: Optional[str] = None,
     client_paths: Optional[Dict[str, str]] = None,
     variant_index: Optional[int] = None,
+    broker: Optional[str] = None,
 ) -> dict:
     """ABBA compare two MQTT client adapters across scenario variants."""
     if len(clients) < 2:
@@ -2770,8 +2771,15 @@ def compare_clients(
         cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile="smoke")
     pin_current_process(cpusets.get("orch"))
 
-    meta = broker_up(wait=True, cpuset=cpusets.get("broker"))
-    host, port, tls_port = meta["host"], meta["port"], meta["tls_port"]
+    managed = broker is None
+    if managed:
+        meta = broker_up(wait=True, cpuset=cpusets.get("broker"))
+        host, port, tls_port = meta["host"], meta["port"], meta["tls_port"]
+    else:
+        host, port = parse_broker_endpoint(broker)
+        tls_port = DEFAULT_TLS_PORT
+        wait_for_broker(host, port, timeout_s=10)
+        meta = {"managed_broker": False, "host": host, "port": port, "tls_port": tls_port}
 
     scenario_obj = SCENARIO_BY_NAME[scenario]
     points = expand_scenario(scenario_obj, profile)
@@ -2859,7 +2867,7 @@ def compare_clients(
                     cpusets=cpusets,
                     load_profile=calibrations.get(name),
                     host_profile=host_profile,
-                    managed_broker=True,
+                    managed_broker=managed,
                     cross_client=True,
                 )
                 result["ab_label"] = label
