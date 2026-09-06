@@ -55,6 +55,7 @@ from mqtt_client_bench.metrics import (
     abba_order,
     abba_block_ratios,
     compare_verdict_from_block_ratios,
+    abba_observation_usable,
     comparison_spec,
     comparison_value,
     integrity_counts,
@@ -2870,11 +2871,7 @@ def compare_clients(
                 result["comparison_value"] = observed["value"]
                 raw.append(result)
                 value = observed["value"]
-                usable = (
-                    value is not None
-                    and result.get("status") == "valid"
-                    and not result.get("non_comparable")
-                )
+                usable = abba_observation_usable(result, value, profile=profile)
                 slot_values.append(float(value) if usable else None)
                 slot_p95.append(observed.get("p95_ms") if usable else None)
                 slot_p99.append(observed.get("p99_ms") if usable else None)

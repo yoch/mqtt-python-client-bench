@@ -7,6 +7,7 @@ import collections
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 import sys
@@ -65,6 +66,7 @@ from mqtt_client_bench.metrics import (  # noqa: E402
     LATENCY_P50_METRIC,
     THROUGHPUT_METRIC,
     abba_block_ratios,
+    abba_observation_usable,
     abba_order,
     compare_verdict,
     compare_verdict_from_block_ratios,
@@ -201,6 +203,25 @@ class MetricsTests(unittest.TestCase):
         observed = comparison_value(run, "pub_qos_sweep_telemetry")
         self.assertEqual(observed["comparison_metric"], THROUGHPUT_METRIC)
         self.assertEqual(observed["value"], 201500.0)
+
+    def test_abba_smoke_admits_valid_non_comparable_p50(self):
+        result = {
+            "status": "valid",
+            "non_comparable": True,
+            "primary_msgs_per_s": 5000.0,
+        }
+        self.assertTrue(
+            abba_observation_usable(result, 0.80, profile="smoke")
+        )
+        self.assertFalse(
+            abba_observation_usable(result, 0.80, profile="standard")
+        )
+        self.assertFalse(
+            abba_observation_usable(
+                {**result, "status": "inconclusive"}, 0.80, profile="smoke"
+            )
+        )
+        self.assertFalse(abba_observation_usable(result, None, profile="smoke"))
 
     def test_compare_inconclusive_on_noise(self):
         baseline = [100.0] * 8
@@ -4789,6 +4810,8 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertNotIn("--clients mqttium,gmqtt,paho", official)
         self.assertIn('--clients "$pair"', official)
         self.assertIn("write_official_rtt_calibrations", official)
+        self.assertIn('AA_VARIANT_INDEX="${AA_VARIANT_INDEX:-4}"', official)
+        self.assertIn("ABBA_VARIANT_INDEXES", official)
         self.assertIn("SUPERSEDED", legacy)
         self.assertIn("run_pairwise_rtt_campaign.sh", legacy)
         self.assertIn("exit 2", legacy)
@@ -4800,6 +4823,25 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertIn('MQTTIUM_VER: "1.0.0rc13"', workflow)
         self.assertIn('GMQTT_VER: "0.7.0"', workflow)
         self.assertIn('PAHO_VER: "2.1.0"', workflow)
+        self.assertIn("ABBA_VARIANT_INDEXES=0,1", workflow)
+        env_sha = re.search(r"BENCH_SHA:\s*([0-9a-f]{40})", workflow)
+        ref_sha = re.search(r"ref:\s*([0-9a-f]{40})", workflow)
+        self.assertIsNotNone(env_sha)
+        self.assertIsNotNone(ref_sha)
+        self.assertEqual(env_sha.group(1), ref_sha.group(1))
+        self.assertNotEqual(env_sha.group(1), "0b7f0e57457461f9de60d5658e8ff9566de269dc")
+        self.assertNotIn("run_mqttium_gmqtt_paho_arm64.sh", workflow)
+
+    def test_legacy_three_way_script_exits_explicitly(self):
+        proc = subprocess.run(
+            ["bash", str(ROOT / "scripts/run_mqttium_gmqtt_paho_arm64.sh")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("SUPERSEDED", proc.stderr)
+        self.assertIn("run_pairwise_rtt_campaign.sh", proc.stderr)
 
 
 class PairwiseCapacityGateTests(unittest.TestCase):
@@ -4884,6 +4926,100 @@ class PairwiseCapacityGateTests(unittest.TestCase):
         )
         self.assertTrue(smoke["ok"])
         self.assertEqual(smoke["protocols"]["MQTTv311"]["n_valid"], 5)
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["n_admitted"], 5)
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["admission"], "smoke_path_proof")
+
+    def test_timeout_or_mixed_reasons_fail_closed(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        def doc_for(run):
+            return {
+                "results": [
+                    self._block("MQTTv311", [run]),
+                    self._block("MQTTv5", [self._valid(13000.0)]),
+                ]
+            }
+
+        cases = [
+            {
+                "status": "inconclusive",
+                "primary_msgs_per_s": 25000.0,
+                "publish_path": "native_async",
+                "reasons": ["rtt_timeouts"],
+            },
+            {
+                "status": "error",
+                "primary_msgs_per_s": 25000.0,
+                "publish_path": "native_async",
+                "error": "boom",
+                "reasons": ["worker_error:boom"],
+            },
+            {
+                "status": "inconclusive",
+                "primary_msgs_per_s": 25000.0,
+                "publish_path": "native_async",
+                "reasons": ["broker_headroom_low:84", "rtt_timeouts"],
+            },
+        ]
+        for run in cases:
+            official = official_rtt_capacities(doc_for(run), "gmqtt", required_valid=1)
+            self.assertFalse(official["ok"], run)
+            smoke = official_rtt_capacities(
+                doc_for(run), "gmqtt", required_valid=1, allow_non_comparable=True
+            )
+            self.assertFalse(smoke["ok"], run)
+            self.assertIsNone(smoke["protocols"]["MQTTv311"]["capacity_msgs_per_s"], run)
+
+    def test_missing_protocol_fails_closed(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        doc = {"results": [self._block("MQTTv311", [self._valid(14000.0) for _ in range(5)])]}
+        inspected = official_rtt_capacities(doc, "mqttium", required_valid=5)
+        self.assertFalse(inspected["ok"])
+        self.assertTrue(any("missing_valid_rtt_capacity:MQTTv5" in e for e in inspected["errors"]))
+
+    def test_smoke_admits_exclusive_broker_cpu_void_as_path_proof(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        runs = [
+            {
+                "status": "inconclusive",
+                "primary_msgs_per_s": 27389.66,
+                "publish_path": "native_async",
+                "native_async": True,
+                "non_comparable": True,
+                "reasons": ["broker_headroom_low:84"],
+            }
+        ]
+        doc = {
+            "results": [
+                self._block("MQTTv311", runs),
+                self._block(
+                    "MQTTv5",
+                    [
+                        {
+                            "status": "inconclusive",
+                            "primary_msgs_per_s": 29991.85,
+                            "publish_path": "native_async",
+                            "native_async": True,
+                            "non_comparable": True,
+                            "reasons": ["container_cpu_high:workspace-mosquitto-1"],
+                        }
+                    ],
+                ),
+            ]
+        }
+        official = official_rtt_capacities(doc, "gmqtt", required_valid=1)
+        self.assertFalse(official["ok"])
+        self.assertIsNone(official["protocols"]["MQTTv311"]["capacity_msgs_per_s"])
+        smoke = official_rtt_capacities(
+            doc, "gmqtt", required_valid=1, allow_non_comparable=True
+        )
+        self.assertTrue(smoke["ok"])
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["n_valid"], 0)
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["n_admitted"], 1)
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["capacity_msgs_per_s"], 27389.66)
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["admission"], "smoke_path_proof")
 
     def test_bridged_path_is_refused_for_async_peers(self):
         from mqtt_client_bench.pairwise import official_rtt_capacity_block

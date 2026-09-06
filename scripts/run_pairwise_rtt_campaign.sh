@@ -32,6 +32,10 @@ ABBA_BLOCKS="${ABBA_BLOCKS:-6}"
 AA_BLOCKS="${AA_BLOCKS:-4}"
 RUN_ABBA="${RUN_ABBA:-1}"
 RUN_AA="${RUN_AA:-1}"
+# Empty = every expanded point. Smoke may set e.g. 0,1 (25% v311 and 25% v5).
+ABBA_VARIANT_INDEXES="${ABBA_VARIANT_INDEXES:-}"
+# expand order: fraction then protocol → index 4 is 75% MQTTv311.
+AA_VARIANT_INDEX="${AA_VARIANT_INDEX:-4}"
 
 if [ "${CLIENTS:-}" = "mqttium,gmqtt,paho" ] || [ "${CLIENTS:-}" = "mqttium,paho,gmqtt" ]; then
   echo "three-way CLIENTS= is refused: Paho must not size the asyncio grid" >&2
@@ -126,43 +130,58 @@ PY
 
   if [ "$RUN_ABBA" = "1" ]; then
     echo "==> [$label] ABBA $pair application_rtt_fixed_rate blocks=${ABBA_BLOCKS}"
-    python -m mqtt_client_bench.run compare \
-      --clients "$pair" \
-      --scenario application_rtt_fixed_rate \
-      --profile "$PROFILE" \
-      --blocks "$ABBA_BLOCKS" \
-      "${BROKER_ARGS[@]}" \
-      --load-profile-dir "$cal_dir" \
-      --output "${pair_dir}/compare-${label}-application_rtt_fixed_rate.json" \
-      >"$LOG_DIR/abba-${label}-application_rtt_fixed_rate.log" 2>&1
+    if [ -n "$ABBA_VARIANT_INDEXES" ]; then
+      IFS=',' read -ra idxs <<< "$ABBA_VARIANT_INDEXES"
+      for idx in "${idxs[@]}"; do
+        python -m mqtt_client_bench.run compare \
+          --clients "$pair" \
+          --scenario application_rtt_fixed_rate \
+          --profile "$PROFILE" \
+          --blocks "$ABBA_BLOCKS" \
+          --variant-index "$idx" \
+          "${BROKER_ARGS[@]}" \
+          --load-profile-dir "$cal_dir" \
+          --output "${pair_dir}/compare-${label}-application_rtt_fixed_rate-v${idx}.json" \
+          >"$LOG_DIR/abba-${label}-application_rtt_fixed_rate-v${idx}.log" 2>&1
+      done
+    else
+      python -m mqtt_client_bench.run compare \
+        --clients "$pair" \
+        --scenario application_rtt_fixed_rate \
+        --profile "$PROFILE" \
+        --blocks "$ABBA_BLOCKS" \
+        "${BROKER_ARGS[@]}" \
+        --load-profile-dir "$cal_dir" \
+        --output "${pair_dir}/compare-${label}-application_rtt_fixed_rate.json" \
+        >"$LOG_DIR/abba-${label}-application_rtt_fixed_rate.log" 2>&1
+    fi
   fi
 
   if [ "$RUN_AA" = "1" ]; then
     local a_client="${pair%%,*}"
     local b_client="${pair#*,}"
-    # expand order: fraction then protocol → index 4 is 75% MQTTv311
-    echo "==> [$label] A/A ${a_client} 75% v311"
+    echo "==> [$label] A/A ${a_client} variant=${AA_VARIANT_INDEX}"
     python -m mqtt_client_bench.run compare \
       --clients "${a_client},${a_client}" \
       --scenario application_rtt_fixed_rate \
       --profile "$PROFILE" \
       --blocks "$AA_BLOCKS" \
-      --variant-index 4 \
+      --variant-index "$AA_VARIANT_INDEX" \
       "${BROKER_ARGS[@]}" \
       --load-profile-dir "$cal_dir" \
-      --output "${pair_dir}/compare-aa-${a_client}-application_rtt_fixed_rate-75-v311.json" \
-      >"$LOG_DIR/aa-${label}-${a_client}-75-v311.log" 2>&1
-    echo "==> [$label] A/A ${b_client} 75% v311"
+      --output "${pair_dir}/compare-aa-${a_client}-application_rtt_fixed_rate-v${AA_VARIANT_INDEX}.json" \
+      >"$LOG_DIR/aa-${label}-${a_client}-v${AA_VARIANT_INDEX}.log" 2>&1
+    echo "==> [$label] A/A ${b_client} variant=${AA_VARIANT_INDEX}"
     python -m mqtt_client_bench.run compare \
       --clients "${b_client},${b_client}" \
       --scenario application_rtt_fixed_rate \
       --profile "$PROFILE" \
       --blocks "$AA_BLOCKS" \
-      --variant-index 4 \
+      --variant-index "$AA_VARIANT_INDEX" \
       "${BROKER_ARGS[@]}" \
       --load-profile-dir "$cal_dir" \
-      --output "${pair_dir}/compare-aa-${b_client}-application_rtt_fixed_rate-75-v311.json" \
-      >"$LOG_DIR/aa-${label}-${b_client}-75-v311.log" 2>&1
+      --output "${pair_dir}/compare-aa-${b_client}-application_rtt_fixed_rate-v${AA_VARIANT_INDEX}.json" \
+      >"$LOG_DIR/aa-${label}-${b_client}-v${AA_VARIANT_INDEX}.log" 2>&1
   fi
 }
 
