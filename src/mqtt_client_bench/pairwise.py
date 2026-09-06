@@ -28,9 +28,11 @@ _PATH_PROOF_ENV_REASONS = frozenset(
     {
         "broker_headroom_low",
         "container_cpu_high",
+        "process_cpu_high",
         "cpu_governor_unknown",
         "clock_unpinned",
         "non_comparable",
+        "broker_telemetry_missing",
     }
 )
 
@@ -102,7 +104,8 @@ def official_rtt_capacity_block(
 ) -> dict:
     """Inspect one protocol block. Fail closed unless every requested run is valid.
 
-    Official: ``status=valid`` and not ``non_comparable``. Smoke path-proof may
+    Official: every requested run must be executed and ``status=valid``.
+    ``6`` runs of which ``5`` are valid is not ``5/5``. Smoke path-proof may
     also admit exclusive environmental voids so the rest of the campaign can
     run as ``non_comparable``.
     """
@@ -145,8 +148,17 @@ def official_rtt_capacity_block(
             f"{client}:{proto}:insufficient_valid_rtt_capacity:"
             f"{len(admitted)}/{required_valid}:{','.join(reasons) or 'none'}"
         )
+    elif not allow_non_comparable and len(admitted) != required_valid:
+        errors.append(
+            f"{client}:{proto}:insufficient_valid_rtt_capacity:"
+            f"{len(admitted)}/{required_valid}:extra_runs"
+        )
     if len(runs) < required_valid:
         errors.append(f"{client}:{proto}:incomplete_rtt_capacity:{len(runs)}/{required_valid}")
+    elif not allow_non_comparable and len(runs) != required_valid:
+        errors.append(
+            f"{client}:{proto}:executed_rtt_capacity:{len(runs)}/{required_valid}"
+        )
     stats = _spread(rates)
     admission = "official_valid"
     if allow_non_comparable:

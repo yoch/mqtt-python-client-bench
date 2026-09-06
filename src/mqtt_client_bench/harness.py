@@ -86,11 +86,13 @@ from mqtt_client_bench.telemetry import (
     TelemetrySampler,
     allocate_cpuset,
     environment_metadata,
+    inspect_external_broker_pid,
     loadavg,
     scaling_governor,
     pin_current_process,
     process_exit_metadata,
     process_memory_peaks,
+    resolve_external_broker_pid,
     temporarily_pinned,
 )
 from mqtt_client_bench.retained import clear_retained_snapshot, seed_retained_snapshot
@@ -123,6 +125,12 @@ OPEN_LOOP_BACKPRESSURE_MAX = 0.02
 # valid. 0.2 % keeps completion near-full without treating a single missed
 # slot on a short smoke window as a ranking.
 MATCHED_LOAD_BACKPRESSURE_MAX = 0.002
+# Initiator timeouts and responder echo refusals use the same ceiling as
+# matched-load admission misses. A 1 % timeout budget would let a latency
+# ranking drop the congested tail that matched-load already refuses at 0.2 %.
+RTT_FAILURE_MAX = MATCHED_LOAD_BACKPRESSURE_MAX
+BROKER_CPU_SATURATION_PCT = 85.0
+BROKER_PROCESS_SAMPLE_KEY = "broker"
 
 # Target offer for core sub_* QoS0 exact-topic capacity (paced mqtt_hammer).
 # emqtt-bench -I is milliseconds and cannot hold this on one loadgen core;
@@ -185,7 +193,8 @@ BROKER_RECONCILE_MAX_RATIO = 1.20
 
 # Broker headroom. Above this the run still produces a number, but that number
 # is partly the broker's limit, so it must not enter a client ranking. The
-# higher container_cpu_high threshold stays as the hard saturation signal.
+# higher saturation threshold stays as the hard signal, for both a managed
+# container and an isolated native process sampled by PID.
 BROKER_CPU_HEADROOM_PCT = 70.0
 
 # Share of the host's measured one-subscriber fan-out ceiling above which a
@@ -329,6 +338,112 @@ def _samples_in_window(
         if s.get("ts") is not None and start <= float(s["ts"]) <= end
     ]
     return inside or telemetry_samples
+
+
+def rtt_ratio_exceeds(
+    count: int,
+    denom: int,
+    *,
+    non_comparable: bool = False,
+    limit: float = RTT_FAILURE_MAX,
+) -> bool:
+    """True when a failure count is too large for an official RTT ranking.
+
+    Smoke tags every run ``non_comparable``. A single event on a window
+    shorter than ``1 / limit`` samples makes the ratio jump above the ceiling
+    by construction; that is noise, not a ranking, so smoke may keep it.
+    Standard still fail-closes on any material ratio, including a lone miss
+    on a tiny window — official campaigns are not that short.
+    """
+    count_i = int(count)
+    denom_i = int(denom)
+    if count_i <= 0:
+        return False
+    if denom_i <= 0:
+        return True
+    if non_comparable and count_i == 1 and denom_i < (1.0 / limit):
+        return False
+    return (count_i / denom_i) > limit
+
+
+def responder_validity_reasons(worker: dict, *, non_comparable: bool = False) -> List[str]:
+    """Fail closed when the echo path did not produce a clean RTT sample."""
+    if worker.get("role") != "responder":
+        return []
+    reasons: List[str] = []
+    echo_errors = int(worker.get("echo_errors") or 0)
+    pending_at_end = int(worker.get("pending_at_end") or 0)
+    echo_refused = int(worker.get("echo_refused") or 0)
+    received = int(worker.get("requests_received") or 0)
+    if echo_errors > 0:
+        reasons.append(f"rtt_responder_errors:{echo_errors}")
+    if pending_at_end > 0:
+        reasons.append(f"rtt_responder_pending:{pending_at_end}")
+    if rtt_ratio_exceeds(echo_refused, received, non_comparable=non_comparable):
+        reasons.append(f"rtt_echo_refused:{echo_refused}/{received}")
+    unaccounted = worker.get("echo_unaccounted")
+    if unaccounted is None and received:
+        accounted = (
+            int(worker.get("responses") or 0)
+            + echo_refused
+            + echo_errors
+            + pending_at_end
+        )
+        unaccounted = received - accounted
+    if unaccounted:
+        reasons.append(f"rtt_responder_unaccounted:{int(unaccounted)}")
+    return reasons
+
+
+def _broker_cpu_from_samples(
+    telemetry_samples: List[dict],
+    measure_window: Optional[tuple],
+) -> dict:
+    """Peak broker CPU from a managed container and/or an external process PID."""
+    broker_cpu_max: Optional[float] = None
+    saturated_containers: set = set()
+    saturated_processes: set = set()
+    watched_any = False
+    watched_ok = False
+    source = None
+    for sample in telemetry_samples:
+        for stats in (sample.get("containers") or {}).values():
+            watched_any = True
+            if stats is not None:
+                watched_ok = True
+        processes = sample.get("processes") or {}
+        if BROKER_PROCESS_SAMPLE_KEY in processes:
+            watched_any = True
+            if processes.get(BROKER_PROCESS_SAMPLE_KEY) is not None:
+                watched_ok = True
+    for sample in _samples_in_window(telemetry_samples, measure_window):
+        for name, stats in (sample.get("containers") or {}).items():
+            if not stats or stats.get("cpu_pct") is None:
+                continue
+            cpu = float(stats["cpu_pct"])
+            if broker_cpu_max is None or cpu > broker_cpu_max:
+                broker_cpu_max = cpu
+                source = "container"
+            if cpu >= BROKER_CPU_SATURATION_PCT:
+                saturated_containers.add(name)
+        broker_proc = (sample.get("processes") or {}).get(BROKER_PROCESS_SAMPLE_KEY)
+        if not broker_proc or broker_proc.get("cpu_pct") is None:
+            continue
+        cpu = float(broker_proc["cpu_pct"])
+        if broker_cpu_max is None or cpu > broker_cpu_max:
+            broker_cpu_max = cpu
+            source = "process"
+        if cpu >= BROKER_CPU_SATURATION_PCT:
+            saturated_processes.add(BROKER_PROCESS_SAMPLE_KEY)
+    return {
+        "broker_cpu_max": broker_cpu_max,
+        "saturated_containers": saturated_containers,
+        "saturated_processes": saturated_processes,
+        "watched_any": watched_any,
+        "watched_ok": watched_ok,
+        "source": source,
+        "telemetry_available": broker_cpu_max is not None,
+    }
 
 
 def reconcile_broker_publishes(
@@ -642,6 +757,8 @@ def validate_run(
     loadgen_ref_sub: Optional[dict] = None,
     measure_window: Optional[tuple] = None,
     fanout_ceiling_msgs_per_s: Optional[float] = None,
+    managed_broker: bool = True,
+    external_broker_pid: Optional[int] = None,
 ) -> dict:
     reasons = []
     for result in worker_results:
@@ -668,8 +785,17 @@ def validate_run(
         if result.get("role") == "rtt_initiator":
             sent = int(result.get("sent_in_window") or 0)
             timeouts = int(result.get("timeouts") or 0)
-            if timeouts > 0 and (sent == 0 or timeouts / max(sent, 1) > 0.01):
+            if rtt_ratio_exceeds(
+                timeouts,
+                sent,
+                non_comparable=bool(point.get("non_comparable")),
+            ):
                 reasons.append("rtt_timeouts")
+        reasons.extend(
+            responder_validity_reasons(
+                result, non_comparable=bool(point.get("non_comparable"))
+            )
+        )
 
     # Sequence integrity is the substance of publisher_with_oracle / integrity
     # points. Enrichment must have run first; a mismatch must not stay valid.
@@ -754,47 +880,47 @@ def validate_run(
         elif (recv_parsed.get("last_total") in (None, 0)) and (pub_parsed.get("last_total") or 0) > 0:
             reasons.append("no_delivery_despite_load")
 
-    # Telemetry saturation heuristics. Peak broker CPU is computed over the whole
-    # run (not just the tail) and reported as a first-class field so a reader can
-    # see how much headroom the broker had for any published number.
+    # Telemetry saturation heuristics. Peak broker CPU is computed over the
+    # measure window and reported as a first-class field so a reader can see
+    # how much headroom the broker had for any published number. A managed
+    # Mosquitto container and an isolated native process (BENCH_BROKER_PID)
+    # share BROKER_CPU_HEADROOM_PCT / BROKER_CPU_SATURATION_PCT.
     diagnostic = "diagnostic" in (point.get("tags") or ()) or topology == "broker_ceiling"
     # A 200k ingress offer pegs single-threaded Mosquitto even when clients
     # still differentiate (preview: 14k–60k at 100 % CPU). Ranking subscribe
     # scores callback deliveries; CPU here is the cost of shedding, not a
     # shared ceiling. Diagnostic / ceiling probes still fail closed.
     ingress_ranking = topology == "subscriber_ingress" and not diagnostic
-    broker_cpu_max: Optional[float] = None
-    saturated_containers = set()
-    for sample in _samples_in_window(telemetry_samples, measure_window):
-        for name, stats in (sample.get("containers") or {}).items():
-            if not stats or stats.get("cpu_pct") is None:
-                continue
-            cpu = float(stats["cpu_pct"])
-            if broker_cpu_max is None or cpu > broker_cpu_max:
-                broker_cpu_max = cpu
-            if cpu >= 85.0:
-                saturated_containers.add(name)
+    cpu_obs = _broker_cpu_from_samples(telemetry_samples, measure_window)
+    broker_cpu_max = cpu_obs["broker_cpu_max"]
+    saturated_containers = cpu_obs["saturated_containers"]
+    saturated_processes = cpu_obs["saturated_processes"]
     if not ingress_ranking:
         for name in sorted(saturated_containers):
             reasons.append(f"container_cpu_high:{name}")
+        for name in sorted(saturated_processes):
+            reasons.append(f"process_cpu_high:{name}")
         # Headroom gate: below hard saturation the number is still partly the
         # broker's, so it must not enter a client ranking.
         if (
             broker_cpu_max is not None
             and not saturated_containers
+            and not saturated_processes
             and broker_cpu_max >= BROKER_CPU_HEADROOM_PCT
         ):
             reasons.append(f"broker_headroom_low:{broker_cpu_max:.0f}")
-    # Managed-broker runs must observe the broker; a silently dead stats probe
-    # would mislabel broker-limited runs as sut_limited.
-    watched_any = False
-    watched_ok = False
-    for sample in telemetry_samples:
-        for stats in (sample.get("containers") or {}).values():
-            watched_any = True
-            if stats is not None:
-                watched_ok = True
-    if watched_any and not watched_ok:
+    official = not bool(point.get("non_comparable"))
+    if managed_broker:
+        if cpu_obs["watched_any"] and not cpu_obs["watched_ok"]:
+            reasons.append("broker_telemetry_missing")
+    elif external_broker_pid is not None:
+        if not cpu_obs["telemetry_available"]:
+            reasons.append("broker_pid_unobserved")
+    elif official:
+        reasons.append("broker_pid_required")
+    else:
+        # Smoke / already-tagged non_comparable may continue as path proof,
+        # but absence of broker CPU is recorded rather than assumed OK.
         reasons.append("broker_telemetry_missing")
 
     # Loadgen health vs effective offer (never raw QoS0 pub rates — they are ~2×).
@@ -885,7 +1011,11 @@ def validate_run(
     bottleneck = "bottleneck_unattributed"
     if reconciliation["reason"]:
         bottleneck = "broker_unconfirmed"
-    elif any(r.startswith("container_cpu_high:") and "mosquitto" in r for r in reasons) or (
+    elif any(
+        (r.startswith("container_cpu_high:") and "mosquitto" in r)
+        or r.startswith("process_cpu_high:")
+        for r in reasons
+    ) or (
         sys_drops and not ingress_consumer_drops
     ):
         bottleneck = "broker_limited"
@@ -942,6 +1072,8 @@ def validate_run(
         "delivered_rate": delivered_rate,
         "delivery_offer_ratio": delivery_ratio,
         "broker_cpu_max_pct": sanitize_number(broker_cpu_max),
+        "broker_telemetry_available": bool(cpu_obs["telemetry_available"]),
+        "broker_telemetry_source": cpu_obs["source"],
         "broker_reconciliation": reconciliation,
         "ingress_reconciliation": ingress_reconciliation,
     }
@@ -1130,6 +1262,7 @@ def run_point(
     load_profile: Optional[dict] = None,
     host_profile: Optional[dict] = None,
     managed_broker: bool = True,
+    external_broker_pid: Optional[int] = None,
     cross_client: bool = False,
 ) -> dict:
     run_id = make_run_id()
@@ -1137,6 +1270,13 @@ def run_point(
     point["run_id"] = run_id
     started_at = _utc_now()
     host_state = host_state_snapshot()
+    if managed_broker:
+        external_broker_pid = None
+    else:
+        external_broker_pid = resolve_external_broker_pid(external_broker_pid)
+    sample_broker_pid = None
+    if external_broker_pid is not None and inspect_external_broker_pid(external_broker_pid).get("ok"):
+        sample_broker_pid = external_broker_pid
 
     missing = unsupported_features(point, client=client)
     if missing:
@@ -1742,14 +1882,17 @@ def run_point(
         sampler = TelemetrySampler(
             pids={f"w{i}": w.pid for i, w in enumerate(workers) if w.pid},
             containers=[broker_container_name()] if managed_broker else [],
+            broker_pid=None if managed_broker else sample_broker_pid,
         )
         sampler.start()
 
-        # $SYS is sampled for every managed-broker run, not just ingress: publisher
-        # capacity is the core of the ranking and was never confronted with what
-        # the broker actually received. Burst ingress is excluded because its
-        # offer is deliberately bounded and bursty, so counters are not meaningful.
-        need_sys = managed_broker and not burst_ingress
+        # $SYS is sampled whenever we can talk to the broker at host:port,
+        # including an isolated native Mosquitto. Burst ingress is excluded
+        # because its offer is deliberately bounded and bursty. Publisher
+        # reconciliation still applies only to SUT-only publish topologies;
+        # application_rtt does not use it (initiator and responder both
+        # publish). Broker CPU/headroom is the ranking control on native ARM.
+        need_sys = not burst_ingress
         if need_sys:
             try:
                 sys_probe = SysCountersProbe(host, endpoint_port, client_id=f"sys-{run_id}")
@@ -1895,6 +2038,8 @@ def run_point(
             fanout_ceiling_msgs_per_s=(
                 ((host_profile or {}).get("ceilings") or {}).get("broker_fanout_msgs_per_s")
             ),
+            managed_broker=managed_broker,
+            external_broker_pid=external_broker_pid,
         )
         declared_policy = ((host_profile or {}).get("host") or {}).get("frequency_policy")
         for reason in host_state_reasons(host_state, declared_policy=declared_policy):
@@ -1968,6 +2113,8 @@ def run_point(
             "delivery_offer_ratio": validity.get("delivery_offer_ratio"),
             "effective_offer_msgs_per_s": validity.get("effective_offer_msgs_per_s"),
             "broker_cpu_max_pct": validity.get("broker_cpu_max_pct"),
+            "broker_telemetry_available": validity.get("broker_telemetry_available"),
+            "broker_telemetry_source": validity.get("broker_telemetry_source"),
             "broker_reconciliation": validity.get("broker_reconciliation"),
             "ingress_reconciliation": validity.get("ingress_reconciliation"),
             "cost_per_message": cost_per_message(worker_results, telemetry_samples),
@@ -1984,6 +2131,7 @@ def run_point(
             "network": net_result,
             "qdisc": qdisc_stats() if network != "localhost" else None,
             "managed_broker": managed_broker,
+            "external_broker_pid": external_broker_pid,
             "environment": environment_metadata(),
             # Which machine's ceilings this number was taken against. Absent on
             # a host nobody calibrated, which is the honest answer rather than
@@ -2161,6 +2309,7 @@ def run_matrix(
     host_profile_path: Optional[str] = None,
     seed: int = 42,
     variant_index: Optional[int] = None,
+    broker_pid: Optional[int] = None,
 ) -> dict:
     """Run several clients interleaved **within each point**, not one after another.
 
@@ -2198,6 +2347,7 @@ def run_matrix(
     pin_current_process(cpusets.get("orch"))
 
     managed = broker is None
+    external_pid = None
     if managed:
         meta = broker_up(wait=True, cpuset=cpusets.get("broker"))
         host, port, tls_port = meta["host"], meta["port"], meta["tls_port"]
@@ -2206,6 +2356,7 @@ def run_matrix(
         tls_port = DEFAULT_TLS_PORT
         wait_for_broker(host, port, timeout_s=10)
         meta = {"managed_broker": False, "host": host, "port": port, "tls_port": tls_port}
+        external_pid = resolve_external_broker_pid(broker_pid)
 
     host_profile = resolve_host_profile(host_profile_path)
     if host_profile is not None:
@@ -2260,6 +2411,7 @@ def run_matrix(
                         load_profile=profiles.get(client),
                         host_profile=host_profile,
                         managed_broker=managed,
+                        external_broker_pid=external_pid,
                         cross_client=True,
                     )
                     result["run_index"] = run_idx
@@ -2362,6 +2514,7 @@ def run_scenario(
     seed: int = 42,
     point_filter: Optional[Callable[[dict], bool]] = None,
     publish_path: str = "native",
+    broker_pid: Optional[int] = None,
 ) -> dict:
     scenario = SCENARIO_BY_NAME[name]
     if runs is None:
@@ -2387,6 +2540,7 @@ def run_scenario(
     pin_current_process(cpusets.get("orch"))
 
     managed = broker is None
+    external_pid = None
     if managed:
         meta = broker_up(wait=True, cpuset=cpusets.get("broker"))
         host, port, tls_port = meta["host"], meta["port"], meta["tls_port"]
@@ -2395,6 +2549,7 @@ def run_scenario(
         tls_port = DEFAULT_TLS_PORT
         wait_for_broker(host, port, timeout_s=10)
         meta = {"managed_broker": False, "host": host, "port": port, "tls_port": tls_port}
+        external_pid = resolve_external_broker_pid(broker_pid)
 
     # Resolved once per campaign, not per point: the machine does not change
     # under a run, and validating it here fails before any measuring starts.
@@ -2428,6 +2583,7 @@ def run_scenario(
                     load_profile=load_profile,
                     host_profile=host_profile,
                     managed_broker=managed,
+                    external_broker_pid=external_pid,
                 )
                 result["run_index"] = run_idx
                 point_runs.append(result)
@@ -2757,6 +2913,7 @@ def compare_clients(
     client_paths: Optional[Dict[str, str]] = None,
     variant_index: Optional[int] = None,
     broker: Optional[str] = None,
+    broker_pid: Optional[int] = None,
 ) -> dict:
     """ABBA compare two MQTT client adapters across scenario variants."""
     if len(clients) < 2:
@@ -2772,6 +2929,7 @@ def compare_clients(
     pin_current_process(cpusets.get("orch"))
 
     managed = broker is None
+    external_pid = None
     if managed:
         meta = broker_up(wait=True, cpuset=cpusets.get("broker"))
         host, port, tls_port = meta["host"], meta["port"], meta["tls_port"]
@@ -2780,6 +2938,7 @@ def compare_clients(
         tls_port = DEFAULT_TLS_PORT
         wait_for_broker(host, port, timeout_s=10)
         meta = {"managed_broker": False, "host": host, "port": port, "tls_port": tls_port}
+        external_pid = resolve_external_broker_pid(broker_pid)
 
     scenario_obj = SCENARIO_BY_NAME[scenario]
     points = expand_scenario(scenario_obj, profile)
@@ -2868,6 +3027,7 @@ def compare_clients(
                     load_profile=calibrations.get(name),
                     host_profile=host_profile,
                     managed_broker=managed,
+                    external_broker_pid=external_pid,
                     cross_client=True,
                 )
                 result["ab_label"] = label

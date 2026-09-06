@@ -1274,8 +1274,20 @@ class CliDefaultsTests(unittest.TestCase):
         self.assertEqual(args.broker, "127.0.0.1:11883")
         self.assertEqual(args.variant_index, 0)
         self.assertEqual(args.load_profile_dir, "calibrations")
+        args_pid = parser.parse_args(
+            [
+                "compare",
+                "--clients", "mqttium,gmqtt",
+                "--scenario", "application_rtt_fixed_rate",
+                "--broker", "127.0.0.1:11883",
+                "--broker-pid", "4321",
+            ]
+        )
+        self.assertEqual(args_pid.broker_pid, 4321)
         official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
         self.assertIn('"${BROKER_ARGS[@]}"', official)
+        self.assertIn("--broker-pid", official)
+        self.assertIn("BENCH_BROKER_PID", official)
 
 
 class BarrierTests(unittest.TestCase):
@@ -4586,6 +4598,9 @@ class CrossClientLoadTests(unittest.TestCase):
         )
 
         self.assertLess(MATCHED_LOAD_BACKPRESSURE_MAX, OPEN_LOOP_BACKPRESSURE_MAX)
+        from mqtt_client_bench.harness import RTT_FAILURE_MAX
+
+        self.assertEqual(RTT_FAILURE_MAX, MATCHED_LOAD_BACKPRESSURE_MAX)
         worker = {
             "role": "rtt_initiator",
             "ok": True,
@@ -4657,8 +4672,10 @@ class NativeRttDriveTests(unittest.TestCase):
             self.assertIn("native_async", src, name)
             self.assertIn("_run_native", src, name)
         self.assertIn("echo_refused", responder)
+        self.assertIn("requests_received", responder)
         self.assertIn("publish_nowait", responder)
         self.assertIn("pending_at_end", responder)
+        self.assertIn("responder_result_fields", responder)
 
     def test_identity_persists_path_and_runtime(self):
         from mqtt_client_bench.adapters.registry import adapter_identity
@@ -4729,6 +4746,38 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertEqual(row["architecture"], "aarch64")
         self.assertEqual(row["harness_git_sha"], "00b7a2ae")
         self.assertNotIn("latencies_ns", row)
+        row_resp = extract_run_row(
+            {
+                "client": "mqttium",
+                "status": "valid",
+                "managed_broker": False,
+                "external_broker_pid": 11883,
+                "broker_cpu_max_pct": 22.5,
+                "broker_telemetry_available": True,
+                "broker_telemetry_source": "process",
+                "workers": [
+                    {
+                        "role": "rtt_initiator",
+                        "offered": 100,
+                        "submitted": 100,
+                        "completed_in_window": 100,
+                    },
+                    {
+                        "role": "responder",
+                        "requests_received": 100,
+                        "responses": 99,
+                        "echo_refused": 1,
+                        "echo_errors": 0,
+                        "pending_at_end": 0,
+                        "echo_unaccounted": 0,
+                    },
+                ],
+            }
+        )
+        self.assertEqual(row_resp["requests_received"], 100)
+        self.assertEqual(row_resp["echo_refused"], 1)
+        self.assertEqual(row_resp["external_broker_pid"], 11883)
+        self.assertTrue(row_resp["broker_telemetry_available"])
 
     def test_compare_document_rows_and_verdicts_are_persisted(self):
         from mqtt_client_bench.archive import extract_compare_summaries, extract_run_rows
@@ -4846,6 +4895,11 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertIn('GMQTT_VER: "0.7.0"', workflow)
         self.assertIn('PAHO_VER: "2.1.0"', workflow)
         self.assertIn("ABBA_VARIANT_INDEXES=0,1", workflow)
+        self.assertIn("BENCH_BROKER_PID", workflow)
+        self.assertIn("echo \"BENCH_BROKER_PID=$pid\"", workflow)
+        official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
+        self.assertIn('AA_BLOCKS="${AA_BLOCKS:-6}"', official)
+        self.assertIn("--broker-pid", official)
         env_sha = re.search(r"BENCH_SHA:\s*([0-9a-f]{40})", workflow)
         ref_sha = re.search(r"ref:\s*([0-9a-f]{40})", workflow)
         self.assertIsNotNone(env_sha)
@@ -5090,6 +5144,42 @@ class PairwiseCapacityGateTests(unittest.TestCase):
                 14002.0,
             )
             self.assertEqual(aa_gmqtt["c_common_of"], ["mqttium", "gmqtt"])
+
+    def test_six_runs_with_five_valid_is_not_five_of_five(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        runs = [self._valid(14000.0 + i) for i in range(6)]
+        doc = {
+            "results": [
+                self._block("MQTTv311", runs),
+                self._block("MQTTv5", [self._valid(13000.0) for _ in range(5)]),
+            ]
+        }
+        inspected = official_rtt_capacities(doc, "mqttium", required_valid=5)
+        self.assertFalse(inspected["ok"])
+        self.assertTrue(
+            any("executed_rtt_capacity:6/5" in e for e in inspected["errors"])
+        )
+        five_valid_plus_extra = [self._valid(14000.0 + i) for i in range(5)]
+        five_valid_plus_extra.append(
+            {
+                "status": "inconclusive",
+                "primary_msgs_per_s": 9000.0,
+                "publish_path": "native_async",
+                "reasons": ["rtt_timeouts"],
+            }
+        )
+        mixed = {
+            "results": [
+                self._block("MQTTv311", five_valid_plus_extra),
+                self._block("MQTTv5", [self._valid(13000.0) for _ in range(5)]),
+            ]
+        }
+        mixed_out = official_rtt_capacities(mixed, "mqttium", required_valid=5)
+        self.assertFalse(mixed_out["ok"])
+        self.assertTrue(
+            any("executed_rtt_capacity:6/5" in e for e in mixed_out["errors"])
+        )
 
     def test_bridged_path_is_refused_for_async_peers(self):
         from mqtt_client_bench.pairwise import official_rtt_capacity_block
@@ -5700,6 +5790,443 @@ class MqttiumNativeNowaitTests(unittest.TestCase):
         adapter._client = _Client()
         with self.assertRaises(RuntimeError):
             adapter.publish_nowait("t", b"x", qos=0)
+
+
+class ExternalBrokerTelemetryTests(unittest.TestCase):
+    """Native/external Mosquitto must be sampled by PID; absence is not OK."""
+
+    def _pub_point(self):
+        return {"topology": "publisher_only", "duration_s": 12.0}
+
+    def _pub_worker(self, n=1000):
+        return {
+            "ok": True,
+            "role": "publisher",
+            "completed_success": n,
+            "completed_in_window": n,
+        }
+
+    def test_managed_container_headroom_unchanged(self):
+        from mqtt_client_bench.harness import validate_run
+
+        samples = [{"containers": {"mosquitto": {"cpu_pct": 40.0}}}]
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            samples,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=True,
+        )
+        self.assertEqual(out["status"], "valid")
+        self.assertEqual(out["broker_cpu_max_pct"], 40.0)
+        self.assertTrue(out["broker_telemetry_available"])
+        self.assertEqual(out["broker_telemetry_source"], "container")
+        self.assertIsNone(out.get("external_broker_pid"))
+
+    def test_external_without_pid_standard_fails_closed(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            [],
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertIn("broker_pid_required", out["reasons"])
+        self.assertFalse(out["broker_telemetry_available"])
+
+    def test_external_without_pid_smoke_is_tagged_not_assumed_ok(self):
+        from mqtt_client_bench.harness import validate_run
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        out = validate_run(
+            {**self._pub_point(), "non_comparable": True},
+            [self._pub_worker()],
+            None,
+            [],
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertIn("broker_telemetry_missing", out["reasons"])
+        doc = {
+            "results": [
+                {
+                    "point": {"protocol": "MQTTv311"},
+                    "runs": [
+                        {
+                            "status": "inconclusive",
+                            "primary_msgs_per_s": 20000.0,
+                            "publish_path": "native_async",
+                            "non_comparable": True,
+                            "reasons": ["broker_telemetry_missing"],
+                        }
+                    ],
+                },
+                {
+                    "point": {"protocol": "MQTTv5"},
+                    "runs": [
+                        {
+                            "status": "inconclusive",
+                            "primary_msgs_per_s": 20000.0,
+                            "publish_path": "native_async",
+                            "non_comparable": True,
+                            "reasons": ["broker_telemetry_missing"],
+                        }
+                    ],
+                },
+            ]
+        }
+        official = official_rtt_capacities(doc, "mqttium", required_valid=1)
+        self.assertFalse(official["ok"])
+        smoke = official_rtt_capacities(
+            doc, "mqttium", required_valid=1, allow_non_comparable=True
+        )
+        self.assertTrue(smoke["ok"])
+
+    def test_external_pid_cpu_observed_and_persisted(self):
+        from mqtt_client_bench.harness import validate_run
+
+        samples = [{"processes": {"broker": {"cpu_pct": 32.0, "pid": 4242, "alive": True}}}]
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            samples,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+            external_broker_pid=4242,
+        )
+        self.assertEqual(out["status"], "valid")
+        self.assertEqual(out["broker_cpu_max_pct"], 32.0)
+        self.assertTrue(out["broker_telemetry_available"])
+        self.assertEqual(out["broker_telemetry_source"], "process")
+        self.assertNotIn("broker_headroom_low", " ".join(out["reasons"]))
+
+    def test_external_pid_above_headroom_is_broker_limited(self):
+        from mqtt_client_bench.harness import validate_run
+
+        samples = [{"processes": {"broker": {"cpu_pct": 77.0, "pid": 4242}}}]
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            samples,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+            external_broker_pid=4242,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertEqual(out["bottleneck"], "broker_limited")
+        self.assertTrue(any(r.startswith("broker_headroom_low:") for r in out["reasons"]))
+        self.assertEqual(out["broker_cpu_max_pct"], 77.0)
+
+    def test_external_pid_below_headroom_has_no_broker_reason(self):
+        from mqtt_client_bench.harness import validate_run
+
+        samples = [{"processes": {"broker": {"cpu_pct": 12.0, "pid": 4242}}}]
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            samples,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+            external_broker_pid=4242,
+        )
+        self.assertEqual(out["status"], "valid")
+        self.assertFalse(any(str(r).startswith("broker_") for r in out["reasons"]))
+
+    def test_dead_or_unobserved_pid_fails_closed(self):
+        from mqtt_client_bench.harness import validate_run
+
+        samples = [{"processes": {"broker": None}}]
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            samples,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+            external_broker_pid=4242,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertIn("broker_pid_unobserved", out["reasons"])
+        self.assertFalse(out["broker_telemetry_available"])
+
+        missing_cpu = [{"processes": {"broker": {"pid": 4242, "alive": True, "cpu_pct": None}}}]
+        out2 = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            missing_cpu,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+            external_broker_pid=4242,
+        )
+        self.assertIn("broker_pid_unobserved", out2["reasons"])
+
+    def test_process_sampler_observes_cpu_and_dead_pid(self):
+        from mqtt_client_bench.telemetry import ProcessCpuSampler, inspect_external_broker_pid
+
+        sampler = ProcessCpuSampler(os.getpid())
+        first = sampler.sample()
+        self.assertIsNotNone(first)
+        busy = 0
+        for _ in range(2_000_000):
+            busy += 1
+        second = sampler.sample()
+        self.assertIsNotNone(second)
+        self.assertIsNotNone(second["cpu_pct"])
+        self.assertGreaterEqual(second["cpu_pct"], 0.0)
+        dead = ProcessCpuSampler(999_999_999)
+        self.assertIsNone(dead.sample())
+        inspected = inspect_external_broker_pid(os.getpid())
+        self.assertFalse(inspected["ok"])
+        self.assertEqual(inspected["reason"], "broker_pid_unobserved")
+
+    def test_resolve_pid_prefers_cli_over_env(self):
+        from mqtt_client_bench.telemetry import resolve_external_broker_pid
+
+        self.assertEqual(
+            resolve_external_broker_pid(9, environ={"BENCH_BROKER_PID": "3"}),
+            9,
+        )
+        self.assertEqual(
+            resolve_external_broker_pid(None, environ={"BENCH_BROKER_PID": "77"}),
+            77,
+        )
+        self.assertIsNone(resolve_external_broker_pid(None, environ={}))
+
+    def test_workflow_exports_broker_pid(self):
+        workflow = (ROOT / "scripts/github/benchmark-matched-load-arm64.yml").read_text()
+        self.assertIn('echo "BENCH_BROKER_PID=$pid" >> "$GITHUB_ENV"', workflow)
+        self.assertIn("broker.pid", workflow)
+
+
+class RttResponderValidityTests(unittest.TestCase):
+    """Responder failures must gate ranking RTT as strictly as matched-load misses."""
+
+    def _point(self, **extra):
+        point = {
+            "topology": "application_rtt",
+            "cadence": "loaded75",
+            "target_rate": 1000.0,
+            "duration_s": 10.0,
+            "shared_load_fraction": 0.75,
+        }
+        point.update(extra)
+        return point
+
+    def _initiator(self, timeouts=0, sent=10000, missed=0):
+        return {
+            "role": "rtt_initiator",
+            "ok": True,
+            "duration_s": 10.0,
+            "offered": sent + missed,
+            "sent_in_window": sent,
+            "completed_in_window": sent - timeouts,
+            "timeouts": timeouts,
+            "missed_due_to_backpressure": missed,
+        }
+
+    def _responder(self, **extra):
+        row = {
+            "role": "responder",
+            "ok": True,
+            "requests_received": 10000,
+            "responses": 10000,
+            "echo_refused": 0,
+            "echo_errors": 0,
+            "pending_at_end": 0,
+            "echo_unaccounted": 0,
+        }
+        row.update(extra)
+        return row
+
+    def test_echo_errors_invalidate_standard(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._point(),
+            [self._initiator(), self._responder(echo_errors=1, responses=9999)],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertTrue(any(r.startswith("rtt_responder_errors:") for r in out["reasons"]))
+
+    def test_pending_at_end_invalidates(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._point(),
+            [self._initiator(), self._responder(pending_at_end=2, responses=9998)],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertTrue(any(r.startswith("rtt_responder_pending:") for r in out["reasons"]))
+
+    def test_echo_refused_under_threshold_stays_valid(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._point(),
+            [
+                self._initiator(),
+                self._responder(echo_refused=10, responses=9990, requests_received=10000),
+            ],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(out["status"], "valid")
+        self.assertFalse(any("rtt_echo_refused" in r for r in out["reasons"]))
+
+    def test_echo_refused_above_0_2_percent_invalidates(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._point(),
+            [
+                self._initiator(),
+                self._responder(echo_refused=21, responses=9979, requests_received=10000),
+            ],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertTrue(any(r.startswith("rtt_echo_refused:") for r in out["reasons"]))
+
+    def test_initiator_timeouts_use_the_same_0_2_percent_policy(self):
+        from mqtt_client_bench.harness import validate_run
+
+        quiet = validate_run(
+            self._point(),
+            [self._initiator(timeouts=10, sent=10000), self._responder()],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(quiet["status"], "valid")
+        loud = validate_run(
+            self._point(),
+            [self._initiator(timeouts=30, sent=10000), self._responder()],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(loud["status"], "inconclusive")
+        self.assertIn("rtt_timeouts", loud["reasons"])
+        # Previously valid at 1%; 50/10000 = 0.5% must now fail.
+        formerly_ok = validate_run(
+            self._point(),
+            [self._initiator(timeouts=50, sent=10000), self._responder()],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertIn("rtt_timeouts", formerly_ok["reasons"])
+
+    def test_invalidated_p50_cannot_enter_abba(self):
+        from mqtt_client_bench.metrics import abba_observation_usable
+
+        result = {
+            "status": "inconclusive",
+            "reasons": ["rtt_echo_refused:30/10000"],
+            "non_comparable": False,
+        }
+        self.assertFalse(abba_observation_usable(result, 0.40, profile="standard"))
+        self.assertFalse(abba_observation_usable(result, 0.40, profile="smoke"))
+
+    def test_smoke_single_refusal_on_tiny_window_stays_non_comparable(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._point(non_comparable=True, target_rate=4.0),
+            [
+                self._initiator(sent=40, timeouts=0),
+                self._responder(
+                    requests_received=40, responses=39, echo_refused=1, echo_unaccounted=0
+                ),
+            ],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertFalse(any("rtt_echo_refused" in r for r in out["reasons"]))
+
+    def test_native_mqttium_and_gmqtt_accounting_identity(self):
+        import threading
+
+        from mqtt_client_bench.roles.responder import (
+            admit_echo,
+            note_echo_error,
+            note_request,
+            responder_result_fields,
+        )
+        from mqtt_client_bench.roles.rtt_drive import select_rtt_drive
+
+        for client in ("mqttium", "gmqtt"):
+            plan = select_rtt_drive(client)
+            self.assertTrue(plan["native_async"], client)
+            self.assertTrue(plan["publish_sync_on_loop"], client)
+
+        state = {
+            "lock": threading.Lock(),
+            "requests_received": 0,
+            "responses": 0,
+            "echo_refused": 0,
+            "echo_errors": 0,
+        }
+        for mid in (1, None, 2):
+            note_request(state)
+            admit_echo(state, mid)
+        note_request(state)
+        note_echo_error(state)
+        fields = responder_result_fields(state, pending_at_end=0)
+        self.assertEqual(fields["requests_received"], 4)
+        self.assertEqual(fields["responses"], 2)
+        self.assertEqual(fields["echo_refused"], 1)
+        self.assertEqual(fields["echo_errors"], 1)
+        self.assertEqual(fields["echo_unaccounted"], 0)
+        self.assertEqual(
+            fields["requests_received"],
+            fields["responses"]
+            + fields["echo_refused"]
+            + fields["echo_errors"]
+            + fields["pending_at_end"],
+        )
+
+    def test_paho_facade_pending_is_zero(self):
+        from mqtt_client_bench.roles.rtt_drive import select_rtt_drive
+
+        plan = select_rtt_drive("paho")
+        self.assertEqual(plan["publish_path"], "sync_facade")
+        src = (ROOT / "src/mqtt_client_bench/roles/responder.py").read_text()
+        self.assertIn("pending_at_end=0", src)
+        self.assertIn("note_request(state)", src)
+
+    def test_gmqtt_nowait_none_is_refusal(self):
+        from mqtt_client_bench.adapters.gmqtt_async import GmqttAsyncAdapter
+
+        adapter = GmqttAsyncAdapter()
+
+        class _Client:
+            def publish(self, message):
+                raise RuntimeError("queue full")
+
+        adapter._client = _Client()
+        adapter._alloc_mid = lambda: 7
+        self.assertIsNone(adapter.publish_nowait("t", b"x", qos=0))
 
 
 if __name__ == "__main__":

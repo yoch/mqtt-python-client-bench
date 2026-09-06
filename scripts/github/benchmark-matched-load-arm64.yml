@@ -109,6 +109,8 @@ jobs:
             tests.test_unit.CrossClientLoadTests \
             tests.test_unit.NativeRttDriveTests \
             tests.test_unit.PairwiseCapacityGateTests \
+            tests.test_unit.ExternalBrokerTelemetryTests \
+            tests.test_unit.RttResponderValidityTests \
             tests.test_unit.MetricsTests.test_application_rtt_compare_uses_latency_p50_lower_is_better \
             tests.test_unit.MetricsTests.test_throughput_compare_still_uses_msgs_per_s \
             tests.test_unit.CliDefaultsTests.test_compare_cli_accepts_external_broker \
@@ -153,6 +155,9 @@ jobs:
           taskset -c "$broker_cpuset" mosquitto -c "$RUNNER_TEMP/mosquitto-bench.conf" > "$RUNNER_TEMP/mosquitto-bench.log" 2>&1 &
           pid=$!
           echo "BROKER_PID=$pid" >> "$GITHUB_ENV"
+          echo "BENCH_BROKER_PID=$pid" >> "$GITHUB_ENV"
+          mkdir -p "$RESULTS_DIR"
+          echo "$pid" > "$RESULTS_DIR/broker.pid"
           sleep 1
           kill -0 "$pid"
           cat "$RUNNER_TEMP/mosquitto-bench.log"

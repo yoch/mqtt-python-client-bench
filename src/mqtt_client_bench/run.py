@@ -76,6 +76,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             load_profile_path=args.load_profile,
             host_profile_path=getattr(args, "host_profile", None),
             seed=args.seed,
+            broker_pid=getattr(args, "broker_pid", None),
         )
         if args.output:
             write_json(args.output, result)
@@ -103,6 +104,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         host_profile_path=getattr(args, "host_profile", None),
         seed=args.seed,
         publish_path=getattr(args, "publish_path", "native"),
+        broker_pid=getattr(args, "broker_pid", None),
     )
     if not args.output:
         # Compact stdout summary.
@@ -172,6 +174,7 @@ def cmd_matrix(args: argparse.Namespace) -> int:
             host_profile_path=getattr(args, "host_profile", None),
             seed=args.seed,
             variant_index=args.variant_index,
+            broker_pid=getattr(args, "broker_pid", None),
         )
         for client, doc in result["documents"].items():
             medians = [
@@ -286,6 +289,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         host_profile_path=getattr(args, "host_profile", None),
         variant_index=args.variant_index,
         broker=getattr(args, "broker", None),
+        broker_pid=getattr(args, "broker_pid", None),
     )
     print(json.dumps({"verdict": payload.get("verdict"), "order": payload.get("order"), "points": len(payload.get("points") or [])}, indent=2))
     return 0
@@ -349,6 +353,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--client", choices=list(CLIENT_NAMES), default="paho", help="SUT MQTT client library")
     run_p.add_argument("--client-path", help="Optional checkout root for the selected client (A/B worktrees)")
     run_p.add_argument("--broker", help="External broker host:port")
+    run_p.add_argument(
+        "--broker-pid",
+        type=int,
+        help="PID of an external broker process to sample (or BENCH_BROKER_PID)",
+    )
     run_p.add_argument("--network", choices=sorted(PROFILES.keys()))
     run_p.add_argument("--load-profile", help="JSON from calibrate")
     run_p.add_argument(
@@ -375,6 +384,11 @@ def build_parser() -> argparse.ArgumentParser:
     matrix_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
     matrix_p.add_argument("--runs", type=int)
     matrix_p.add_argument("--broker", help="External broker host:port")
+    matrix_p.add_argument(
+        "--broker-pid",
+        type=int,
+        help="PID of an external broker process to sample (or BENCH_BROKER_PID)",
+    )
     matrix_p.add_argument("--network", choices=sorted(PROFILES.keys()))
     matrix_p.add_argument(
         "--load-profile-dir",
@@ -451,6 +465,11 @@ def build_parser() -> argparse.ArgumentParser:
     cmp_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
     cmp_p.add_argument("--variant-index", type=int, default=None, help="Compare a single variant index (default: all)")
     cmp_p.add_argument("--broker", help="External broker host:port")
+    cmp_p.add_argument(
+        "--broker-pid",
+        type=int,
+        help="PID of an external broker process to sample (or BENCH_BROKER_PID)",
+    )
     cmp_p.add_argument("--load-profile")
     cmp_p.add_argument(
         "--load-profile-dir",

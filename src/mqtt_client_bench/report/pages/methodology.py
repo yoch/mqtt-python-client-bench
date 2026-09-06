@@ -27,6 +27,12 @@ _PROTOCOLS = """
           (Paho) must never size an asyncio pairwise grid.
           Official matched-load cells fail closed above
           <code>MATCHED_LOAD_BACKPRESSURE_MAX</code> (0.2&nbsp;% missed slots);
+          initiator timeouts and responder echo refusals use the same
+          <code>RTT_FAILURE_MAX</code> ceiling. A native broker is sampled by
+          PID (<code>BENCH_BROKER_PID</code>); missing process CPU on a standard
+          run is fail-closed. <code>$SYS</code> publisher reconciliation does
+          not apply to <code>application_rtt</code> (both roles publish);
+          broker CPU headroom still does.
           relative-load characterization still uses 2&nbsp;%.
           If official capacity is null, only calibrate runs voided
           <em>exclusively</em> by <code>broker_headroom_low</code> may
