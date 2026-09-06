@@ -47,12 +47,19 @@ def official_rtt_capacity_block(
     client: str,
     *,
     required_valid: int = REQUIRED_OFFICIAL_CAPACITY_RUNS,
+    allow_non_comparable: bool = False,
 ) -> dict:
     """Inspect one protocol block. Fail closed unless every requested run is valid."""
     proto = str((block.get("point") or {}).get("protocol") or "")
     runs = list(block.get("runs") or [])
-    valid = [r for r in runs if r.get("status") == "valid" and not r.get("non_comparable")]
-    invalid = [r for r in runs if r not in valid]
+    valid = []
+    invalid = []
+    for run in runs:
+        is_valid = run.get("status") == "valid"
+        if is_valid and (allow_non_comparable or not run.get("non_comparable")):
+            valid.append(run)
+        else:
+            invalid.append(run)
     rates = [
         float(r["primary_msgs_per_s"])
         for r in valid
@@ -67,7 +74,10 @@ def official_rtt_capacity_block(
     if len(valid) < required_valid:
         reasons = []
         for run in invalid:
-            reasons.extend(run.get("reasons") or [run.get("status") or "invalid"])
+            extra = list(run.get("reasons") or [])
+            if run.get("non_comparable") and "non_comparable" not in extra:
+                extra.append("non_comparable")
+            reasons.extend(extra or [run.get("status") or "invalid"])
         errors.append(
             f"{client}:{proto}:insufficient_valid_rtt_capacity:"
             f"{len(valid)}/{required_valid}:{','.join(reasons) or 'none'}"
@@ -93,6 +103,7 @@ def official_rtt_capacities(
     *,
     required_valid: int = REQUIRED_OFFICIAL_CAPACITY_RUNS,
     required_protocols: tuple[str, ...] = REQUIRED_PROTOCOLS,
+    allow_non_comparable: bool = False,
 ) -> dict:
     """Build a calibration from a matrix document, or list the refusals."""
     errors = []
@@ -100,7 +111,10 @@ def official_rtt_capacities(
     seen = set()
     for block in doc.get("results") or []:
         inspected = official_rtt_capacity_block(
-            block, client, required_valid=required_valid
+            block,
+            client,
+            required_valid=required_valid,
+            allow_non_comparable=allow_non_comparable,
         )
         proto = inspected["protocol"]
         if proto in required_protocols:
@@ -124,6 +138,7 @@ def write_official_rtt_calibrations(
     clients: list[str] | tuple[str, ...],
     *,
     required_valid: int = REQUIRED_OFFICIAL_CAPACITY_RUNS,
+    allow_non_comparable: bool = False,
 ) -> dict:
     """Write per-client load profiles. Raises SystemExit-style ValueError on refusal."""
     matrix_dir = Path(matrix_dir)
@@ -134,7 +149,10 @@ def write_official_rtt_calibrations(
     for client in clients:
         doc = json.loads((matrix_dir / f"{client}-rtt_capacity_qos1.json").read_text())
         inspected = official_rtt_capacities(
-            doc, client, required_valid=required_valid
+            doc,
+            client,
+            required_valid=required_valid,
+            allow_non_comparable=allow_non_comparable,
         )
         errors.extend(inspected["errors"])
         caps = {

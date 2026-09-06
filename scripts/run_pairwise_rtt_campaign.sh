@@ -88,7 +88,7 @@ run_pair() {
     --output-dir "$pair_dir" \
     >"$LOG_DIR/matrix-${label}-rtt_capacity_qos1.log" 2>&1
 
-  python - "$pair_dir" "$cal_dir" "$pair" "$MATRIX_RUNS" <<'PY'
+  python - "$pair_dir" "$cal_dir" "$pair" "$MATRIX_RUNS" "$PROFILE" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -99,8 +99,15 @@ out = Path(sys.argv[1])
 cal = Path(sys.argv[2])
 clients = tuple(sys.argv[3].split(","))
 required = int(sys.argv[4])
+allow_non_comparable = sys.argv[5] == "smoke"
 try:
-    payload = write_official_rtt_calibrations(out, cal, clients, required_valid=required)
+    payload = write_official_rtt_calibrations(
+        out,
+        cal,
+        clients,
+        required_valid=required,
+        allow_non_comparable=allow_non_comparable,
+    )
 except ValueError as exc:
     raise SystemExit(str(exc)) from exc
 print(json.dumps(payload, indent=2, default=str))
