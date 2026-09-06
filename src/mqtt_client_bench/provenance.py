@@ -56,6 +56,9 @@ MEASUREMENT_PATH = (
     "roles/rtt_drive.py",
     "roles/rtt_initiator.py",
     "roles/responder.py",
+    "roles/rate_pacer.py",
+    "pacing.py",
+    "temporal_trace.py",
     "scripts/mqtt_hammer.c",
 )
 

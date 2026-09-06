@@ -1330,6 +1330,28 @@ class CliDefaultsTests(unittest.TestCase):
         self.assertIn("--broker-pid", official)
         self.assertIn("BENCH_BROKER_PID", official)
 
+    def test_compare_cli_pacer_mode_defaults_in_loop(self):
+        from mqtt_client_bench.run import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "compare",
+                "--clients", "mqttium,mqttium",
+                "--scenario", "application_rtt_fixed_rate",
+            ]
+        )
+        self.assertEqual(args.pacer_mode, "in_loop")
+        args_ext = parser.parse_args(
+            [
+                "compare",
+                "--clients", "mqttium,mqttium",
+                "--scenario", "application_rtt_fixed_rate",
+                "--pacer-mode", "external",
+            ]
+        )
+        self.assertEqual(args_ext.pacer_mode, "external")
+
 
 class BarrierTests(unittest.TestCase):
     def test_two_phase_barrier(self):

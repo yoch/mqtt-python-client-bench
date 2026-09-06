@@ -64,6 +64,7 @@ from mqtt_client_bench.metrics import (
     sanitize_number,
     summarize_valid_runs,
 )
+from mqtt_client_bench.pacing import DEFAULT_PACER_SPIN_NS, pacer_stimulus_reasons
 from mqtt_client_bench.pairwise import attach_aa_control
 from mqtt_client_bench.network import PROFILES as NETWORK_PROFILES
 from mqtt_client_bench.network import apply_profile, clear_profile, qdisc_stats
@@ -842,6 +843,8 @@ def validate_run(
             if float(offered) > 0 and missed / float(offered) > miss_limit:
                 reasons.append("open_loop_backpressure_misses")
 
+    reasons.extend(pacer_stimulus_reasons(point, worker_results))
+
     topology = point.get("topology")
     duration_s = float(point.get("duration_s") or 1.0)
     offer = None
@@ -1431,6 +1434,7 @@ def run_point(
                 "max_harness_payload_bytes",
                 "submit_count", "expected_accepts", "expected_rejects",
                 "receive_maximum", "retained_count", "defer_subscribe",
+                "pacer_mode", "pacer_spin_ns", "temporal_trace_max_points",
             ) if k in point or point.get(k) is not None},
         }
         # Fill defaults from point always.
@@ -1455,6 +1459,9 @@ def run_point(
             ("native_async", True),
         ):
             cfg.setdefault(key, point.get(key, default))
+        cfg.setdefault("pacer_mode", point.get("pacer_mode", "in_loop"))
+        cfg.setdefault("pacer_spin_ns", point.get("pacer_spin_ns", DEFAULT_PACER_SPIN_NS))
+        cfg.setdefault("pacer_cpuset", cpusets.get("loadgen"))
         if "force_header" in point:
             cfg["force_header"] = point["force_header"]
         # The accounting protocol needs an admission verdict at the call site,
@@ -1628,6 +1635,9 @@ def run_point(
 
             init_cfg = base_cfg("rtt", "rtt_initiator")
             init_cfg.update({"request_topic": req, "response_topic": resp})
+            init_cfg["pacer_socket_path"] = str(work_dir / f"pacer-{run_id}.sock")
+            init_cfg["pacer_stats_path"] = str(work_dir / f"pacer-{run_id}.stats.json")
+            init_cfg["temporal_trace_path"] = str(work_dir / f"rtt-{run_id}.temporal_trace.jsonl")
             init_path = work_dir / f"rtt-{run_id}.cfg.json"
             write_json(str(init_path), init_cfg)
             workers.append(_spawn_role("rtt_initiator.py", str(init_path), cpusets.get("sut")))
@@ -2096,7 +2106,7 @@ def run_point(
             native_async = publish_path == "native_async"
         forced_facade = publish_path == "sync_facade" and has_async_adapter(client)
 
-        return {
+        payload = {
             "schema_version": 1,
             "harness_fingerprint": HARNESS_FINGERPRINT,
             "run_id": run_id,
@@ -2150,6 +2160,16 @@ def run_point(
             "publish_path": publish_path,
             "native_async": native_async,
         }
+        initiator = next((w for w in worker_results if w.get("role") == "rtt_initiator"), None)
+        if initiator is not None:
+            if initiator.get("pacing"):
+                payload["pacing"] = initiator["pacing"]
+            if initiator.get("temporal_trace"):
+                payload["temporal_trace"] = initiator["temporal_trace"]
+                payload["temporal_trace_metric"] = initiator.get(
+                    "temporal_trace_metric", "application_e2e_latency"
+                )
+        return payload
     finally:
         barrier.close()
         for w in workers:
@@ -2951,6 +2971,7 @@ def compare_clients(
     variant_index: Optional[int] = None,
     broker: Optional[str] = None,
     broker_pid: Optional[int] = None,
+    pacer_mode: Optional[str] = None,
 ) -> dict:
     """ABBA compare two MQTT client adapters across scenario variants."""
     if len(clients) < 2:
@@ -3040,6 +3061,9 @@ def compare_clients(
         spec = comparison_spec(scenario)
         for point_idx, point in enumerate(points):
             point = resolve_shared_load_point(point, calibrations, pair)
+            if pacer_mode:
+                point = dict(point)
+                point["pacer_mode"] = pacer_mode
             baseline_values = []
             candidate_values = []
             slot_values: List[Optional[float]] = []
@@ -3161,6 +3185,7 @@ def compare_clients(
         "verdict": overall,
         "environment": environment_metadata(),
         "cpusets": cpusets,
+        "pacer_mode": pacer_mode or "in_loop",
     }
     # Backward-compatible top-level rates from first point.
     if point_results:

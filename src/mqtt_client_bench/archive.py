@@ -29,6 +29,18 @@ from mqtt_client_bench.metrics import latency_summary
 RAW_SAMPLE_KEYS = ("latencies_ns", "scheduler_lags_ns", "sequences", "sent_sequences")
 
 ARCHIVED_KEY = "raw_samples_archived"
+_TRACE_META_KEYS = (
+    "kind",
+    "metric",
+    "stride",
+    "max_points",
+    "count",
+    "seen",
+    "reserved",
+    "invalid",
+    "memory_bytes",
+    "columns",
+)
 
 
 def _slim_in_place(node) -> Dict[str, int]:
@@ -48,6 +60,16 @@ def _slim_in_place(node) -> Dict[str, int]:
             node[ARCHIVED_KEY] = counts
             for key, n in counts.items():
                 dropped[key] = dropped.get(key, 0) + n
+        trace = node.get("temporal_trace")
+        if (
+            isinstance(trace, dict)
+            and isinstance(trace.get("sequence"), list)
+            and not trace.get("arrays_archived")
+        ):
+            retained = int(trace.get("count") or 0)
+            node["temporal_trace"] = {k: trace[k] for k in _TRACE_META_KEYS if k in trace}
+            node["temporal_trace"]["arrays_archived"] = True
+            dropped["temporal_trace"] = dropped.get("temporal_trace", 0) + retained
         for value in node.values():
             for key, n in _slim_in_place(value).items():
                 dropped[key] = dropped.get(key, 0) + n
@@ -215,6 +237,9 @@ def extract_run_row(run: dict, *, document: dict | None = None) -> dict:
         "library_effects": ((worker.get("runtime") or {}).get("library") or {}).get("effects"),
         "library_writer": ((worker.get("runtime") or {}).get("library") or {}).get("writer"),
         "non_comparable": run.get("non_comparable"),
+        "pacer_mode": point.get("pacer_mode") or run.get("pacer_mode") or (run.get("pacing") or {}).get("mode"),
+        "pacing_stimulus_valid": (run.get("pacing") or (worker.get("pacing") or {})).get("stimulus_valid"),
+        "temporal_trace_count": ((worker.get("temporal_trace") or run.get("temporal_trace") or {}).get("count")),
     }
 
 

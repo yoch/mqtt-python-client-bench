@@ -140,6 +140,7 @@ _ENVIRONMENT_REASON_PREFIXES = (
     "cpu_governor_unknown",
     "cpu_governor_not_performance:",
     "host_busy_at_start:",
+    "pacer_stimulus_invalid",
 )
 
 # Values within this relative tolerance of the row/series maximum are treated
