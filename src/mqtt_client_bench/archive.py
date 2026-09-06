@@ -114,3 +114,83 @@ def archive_results(
     report["files"] = len(report["archived"])
     report["saved_bytes"] = report["bytes_before"] - report["bytes_after"]
     return report
+
+
+def _initiator_worker(run: dict) -> dict:
+    for worker in run.get("workers") or []:
+        if worker.get("role") in ("rtt_initiator", "publisher"):
+            return worker
+    return {}
+
+
+def extract_run_row(run: dict, *, document: dict | None = None) -> dict:
+    """One reviewable row per run: enough to rebuild medians, ABBA and A/A.
+
+    Raw sample vectors stay out. Percentiles come from ``latency_summary``,
+    which ``slim_document`` derives before dropping ``latencies_ns``.
+    """
+    doc = document or {}
+    worker = _initiator_worker(run)
+    latency = worker.get("latency_summary") or {}
+    point = run.get("point") or {}
+    offered = worker.get("offered")
+    submitted = worker.get("submitted")
+    if submitted is None:
+        submitted = worker.get("sent_in_window")
+    completed = worker.get("completed_in_window")
+    completion = worker.get("completion")
+    if completion is None and offered and completed is not None:
+        completion = completed / float(offered)
+    host = run.get("host_profile") or {}
+    env = run.get("environment") or {}
+    identity = worker or doc.get("client_identity") or {}
+    return {
+        "client": run.get("client") or doc.get("client"),
+        "client_version": identity.get("client_version"),
+        "adapter": identity.get("adapter"),
+        "harness_fingerprint": run.get("harness_fingerprint") or doc.get("harness_fingerprint"),
+        "host_fingerprint": host.get("fingerprint"),
+        "host_role": host.get("role"),
+        "machine": env.get("machine"),
+        "python": env.get("python"),
+        "scaling_governor": env.get("scaling_governor") or (run.get("host_state") or {}).get("scaling_governor"),
+        "scenario": point.get("scenario") or doc.get("scenario"),
+        "protocol": point.get("protocol") or run.get("protocol_effective"),
+        "shared_load_fraction": point.get("shared_load_fraction"),
+        "target_rate": point.get("target_rate"),
+        "C_common": point.get("shared_capacity_msgs_per_s"),
+        "run_id": run.get("run_id"),
+        "run_index": run.get("run_index"),
+        "matrix_slot": run.get("matrix_slot"),
+        "matrix_rotation": run.get("matrix_rotation"),
+        "status": run.get("status"),
+        "reasons": list(run.get("reasons") or []),
+        "primary_msgs_per_s": run.get("primary_msgs_per_s"),
+        "p50_ms": latency.get("p50_ms"),
+        "p95_ms": latency.get("p95_ms"),
+        "p99_ms": latency.get("p99_ms"),
+        "offered": offered,
+        "submitted": submitted,
+        "completed": completed,
+        "completion": completion,
+        "missed_due_to_backpressure": worker.get("missed_due_to_backpressure"),
+        "backlog_at_end": worker.get("backlog_at_end") if worker.get("backlog_at_end") is not None else worker.get("timeouts"),
+        "publish_path": run.get("publish_path") or worker.get("publish_path"),
+        "native_async": run.get("native_async") if run.get("native_async") is not None else worker.get("native_async"),
+        "io_model": identity.get("io_model"),
+        "completion_mechanism": identity.get("completion_mechanism"),
+        "managed_broker": run.get("managed_broker"),
+        "non_comparable": run.get("non_comparable"),
+    }
+
+
+def extract_run_rows(doc: dict) -> list:
+    """Flatten a scenario document into persistable per-run rows."""
+    rows = []
+    for block in doc.get("results") or []:
+        point = block.get("point") or {}
+        for run in block.get("runs") or []:
+            merged = dict(run)
+            merged.setdefault("point", point)
+            rows.append(extract_run_row(merged, document=doc))
+    return rows
