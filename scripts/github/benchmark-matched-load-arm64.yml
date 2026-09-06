@@ -22,7 +22,7 @@ jobs:
     runs-on: [self-hosted, linux, ARM64]
     timeout-minutes: 480
     env:
-      BENCH_SHA: db19a075b3ff6a6555027bd3e3fcf94aba26ab30
+      BENCH_SHA: 3b037e734e536106bdafd19565276574ea8c444a
       MQTTIUM_VER: "1.0.0rc13"
       GMQTT_VER: "0.7.0"
       PAHO_VER: "2.1.0"
@@ -72,7 +72,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: yoch/mqtt-python-client-bench
-          ref: db19a075b3ff6a6555027bd3e3fcf94aba26ab30
+          ref: 3b037e734e536106bdafd19565276574ea8c444a
           path: bench
           persist-credentials: false
 
@@ -87,8 +87,8 @@ jobs:
           mosquitto -h 2>&1 | head -n 3
           gov="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true)"
           echo "governor=$gov"
-          if [ "$CAMPAIGN" = "standard" ] && [ "$gov" != "performance" ]; then
-            echo "standard campaign requires scaling_governor=performance, got ${gov:-missing}" >&2
+          if { [ "$CAMPAIGN" = "standard" ] || [ "$CAMPAIGN" = "pacer-causal" ]; } && [ "$gov" != "performance" ]; then
+            echo "${CAMPAIGN} campaign requires scaling_governor=performance, got ${gov:-missing}" >&2
             exit 1
           fi
           if pgrep -a mosquitto; then
