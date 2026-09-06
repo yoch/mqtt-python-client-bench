@@ -14,7 +14,8 @@
 # Usage:
 #   bash scripts/run_pairwise_rtt_campaign.sh
 #   PROFILE=smoke bash scripts/run_pairwise_rtt_campaign.sh   # functional only
-#   BENCH_BROKER=127.0.0.1:11883 bash scripts/run_pairwise_rtt_campaign.sh
+#   BENCH_BROKER=127.0.0.1:11883 BENCH_BROKER_PID=$pid \\
+#     bash scripts/run_pairwise_rtt_campaign.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -29,7 +30,7 @@ PAHO_VER="${PAHO_VER:-2.1.0}"
 PROFILE="${PROFILE:-standard}"
 MATRIX_RUNS="${MATRIX_RUNS:-5}"
 ABBA_BLOCKS="${ABBA_BLOCKS:-6}"
-AA_BLOCKS="${AA_BLOCKS:-4}"
+AA_BLOCKS="${AA_BLOCKS:-6}"
 RUN_ABBA="${RUN_ABBA:-1}"
 RUN_AA="${RUN_AA:-1}"
 # Empty = every expanded point. Smoke may set e.g. 0,1 (25% v311 and 25% v5).
@@ -71,6 +72,12 @@ mkdir -p "$OUT" "$CAL_ROOT" "$LOG_DIR"
 BROKER_ARGS=()
 if [ -n "${BENCH_BROKER:-}" ]; then
   BROKER_ARGS=(--broker "$BENCH_BROKER")
+  if [ -n "${BENCH_BROKER_PID:-}" ]; then
+    BROKER_ARGS+=(--broker-pid "$BENCH_BROKER_PID")
+  elif [ "$PROFILE" = "standard" ]; then
+    echo "standard campaign with BENCH_BROKER requires BENCH_BROKER_PID so broker CPU/headroom can be verified" >&2
+    exit 2
+  fi
 else
   python -m mqtt_client_bench.run broker up
 fi

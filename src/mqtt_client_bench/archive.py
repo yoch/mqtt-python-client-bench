@@ -123,6 +123,13 @@ def _initiator_worker(run: dict) -> dict:
     return {}
 
 
+def _responder_worker(run: dict) -> dict:
+    for worker in run.get("workers") or []:
+        if worker.get("role") == "responder":
+            return worker
+    return {}
+
+
 def extract_run_row(run: dict, *, document: dict | None = None) -> dict:
     """One reviewable row per run: enough to rebuild medians, ABBA and A/A.
 
@@ -144,6 +151,7 @@ def extract_run_row(run: dict, *, document: dict | None = None) -> dict:
     host = run.get("host_profile") or {}
     env = run.get("environment") or {}
     identity = worker or doc.get("client_identity") or {}
+    responder = _responder_worker(run)
     return {
         "client": run.get("client") or doc.get("client"),
         "client_version": identity.get("client_version"),
@@ -193,6 +201,16 @@ def extract_run_row(run: dict, *, document: dict | None = None) -> dict:
         "comparison_direction": run.get("comparison_direction") or doc.get("comparison_direction"),
         "comparison_value": run.get("comparison_value"),
         "managed_broker": run.get("managed_broker"),
+        "external_broker_pid": run.get("external_broker_pid"),
+        "broker_cpu_max_pct": run.get("broker_cpu_max_pct"),
+        "broker_telemetry_available": run.get("broker_telemetry_available"),
+        "broker_telemetry_source": run.get("broker_telemetry_source"),
+        "requests_received": responder.get("requests_received"),
+        "responses": responder.get("responses"),
+        "echo_refused": responder.get("echo_refused"),
+        "echo_errors": responder.get("echo_errors"),
+        "pending_at_end": responder.get("pending_at_end"),
+        "echo_unaccounted": responder.get("echo_unaccounted"),
         "non_comparable": run.get("non_comparable"),
     }
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -69,6 +70,10 @@ def collect(root: Path) -> dict:
         "kind": "pairwise_rtt_run_table",
         "root": str(root),
         "harness_git_sha": harness_git,
+        "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+        "github_run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
+        "bench_broker_pid": os.environ.get("BENCH_BROKER_PID"),
+        "profile": os.environ.get("PROFILE"),
         "documents": documents,
         "n_runs": len(rows),
         "n_compares": len(compares),

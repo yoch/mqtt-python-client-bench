@@ -67,7 +67,17 @@ whole matrix, so the baseline does not move between fractions.
   `inconclusive` (`broker_received_below_completed`), not a published number.
 - **Broker headroom.** Peak broker CPU is recorded per run
   (`broker_cpu_max_pct`); above 70 % the run is `broker_limited` and does not
-  enter a ranking, and 85 % remains the hard saturation signal.
+  enter a ranking, and 85 % remains the hard saturation signal. A managed
+  compose Mosquitto and an isolated native process (`BENCH_BROKER_PID` /
+  `--broker-pid`) share that gate. Standard runs against an external broker
+  without an observable PID fail closed (`broker_pid_required`); a dead or
+  non-Mosquitto PID is `broker_pid_unobserved`. Missing broker CPU is never
+  treated as “broker probably OK”.
+- **`$SYS` on a native broker.** The `$SYS` probe talks to `host:port` and is
+  enabled for an isolated local Mosquitto as well as a compose broker. Publisher
+  reconciliation still applies only to single-publisher topologies. Application
+  RTT does not use it (initiator and responder both publish); broker CPU/headroom
+  is the ranking control there. Drop counts still apply when the probe works.
 
 ## Topologies
 
