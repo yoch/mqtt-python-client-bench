@@ -4225,7 +4225,7 @@ class CrossClientLoadTests(unittest.TestCase):
         self.assertIsNone(resolved.get("target_rate"))
         self.assertTrue(any("gmqtt" in e for e in resolved["shared_load_error"]))
 
-    def _observed_rtt_profile(self, rates: list[float]) -> dict:
+    def _observed_rtt_profile(self, runs: list[dict], *, rates: list[float] | None = None) -> dict:
         return {
             "protocol_capacities": {
                 "MQTTv311": {"rtt_capacity_msgs_per_s": None, "capacity_msgs_per_s": 50000},
@@ -4234,33 +4234,138 @@ class CrossClientLoadTests(unittest.TestCase):
             "raw": {
                 "MQTTv311": {
                     "rtt": {
-                        "results": [{"summary": {"values": [], "inconclusive_rates": rates, "median": None}}]
+                        "results": [
+                            {
+                                "runs": runs,
+                                "summary": {
+                                    "values": [],
+                                    "inconclusive_rates": rates if rates is not None else [
+                                        run.get("primary_msgs_per_s") for run in runs
+                                    ],
+                                    "median": None,
+                                },
+                            }
+                        ]
                     }
                 }
             },
         }
 
-    def test_observed_rtt_rate_unblocks_c_common(self):
+    def _headroom_run(self, rate: float, *extra_reasons: str) -> dict:
+        return {
+            "status": "inconclusive",
+            "primary_msgs_per_s": rate,
+            "reasons": ["broker_headroom_low:77", *extra_reasons],
+        }
+
+    def _resolve_observed(self, observed: dict, clients: list[str] | None = None):
+        from mqtt_client_bench.harness import resolve_shared_load_point
+
+        return resolve_shared_load_point(
+            {"shared_load_fraction": 0.50, "topology": "application_rtt", "protocol": "MQTTv311"},
+            {"mqttium": self._rtt_profile(20419.317), "gmqtt": observed},
+            clients or ["mqttium", "gmqtt"],
+        )
+
+    def test_headroom_only_observed_rate_unblocks_c_common(self):
         from mqtt_client_bench.harness import (
+            OBSERVED_LOWER_BOUND_SOURCE,
             observed_capacity_from_calibration,
-            resolve_shared_load_point,
             round_shared_target_rate,
         )
 
-        observed = self._observed_rtt_profile([21537.0, 25863.0, 25774.0])
+        observed = self._observed_rtt_profile(
+            [self._headroom_run(21537.0), self._headroom_run(25863.0), self._headroom_run(25774.0)]
+        )
         self.assertEqual(
             observed_capacity_from_calibration(observed, protocol="MQTTv311", kind="rtt"),
             25774.0,
         )
-        resolved = resolve_shared_load_point(
-            {"shared_load_fraction": 0.50, "topology": "application_rtt", "protocol": "MQTTv311"},
-            {"mqttium": self._rtt_profile(20419.317), "gmqtt": observed},
-            ["mqttium", "gmqtt"],
-        )
+        resolved = self._resolve_observed(observed)
         self.assertEqual(resolved["shared_capacity_msgs_per_s"], 20419.317)
         self.assertEqual(resolved["target_rate"], round_shared_target_rate(20419.317 * 0.50))
         self.assertEqual(resolved["shared_capacity_sources"]["mqttium"], "valid")
-        self.assertEqual(resolved["shared_capacity_sources"]["gmqtt"], "observed_lower_bound")
+        self.assertEqual(resolved["shared_capacity_sources"]["gmqtt"], OBSERVED_LOWER_BOUND_SOURCE)
+        self.assertEqual(
+            resolved["shared_capacity_provenance"]["gmqtt"]["exclusive_reason"],
+            "broker_headroom_low",
+        )
+        self.assertEqual(resolved["shared_capacity_provenance"]["gmqtt"]["n_admitted"], 3)
+
+    def test_headroom_plus_other_reason_is_refused(self):
+        from mqtt_client_bench.harness import observed_capacity_from_calibration
+
+        observed = self._observed_rtt_profile(
+            [self._headroom_run(25774.0, "rtt_timeouts")]
+        )
+        self.assertIsNone(
+            observed_capacity_from_calibration(observed, protocol="MQTTv311", kind="rtt")
+        )
+        resolved = self._resolve_observed(observed)
+        self.assertIsNone(resolved.get("target_rate"))
+        self.assertTrue(any("gmqtt" in e for e in resolved["shared_load_error"]))
+
+    def test_timeout_or_error_never_feeds_c_common(self):
+        from mqtt_client_bench.harness import observed_capacity_from_calibration
+
+        cases = [
+            [{"status": "inconclusive", "primary_msgs_per_s": 25000.0, "reasons": ["rtt_timeouts"]}],
+            [{"status": "inconclusive", "primary_msgs_per_s": 25000.0, "reasons": ["worker_error:boom"]}],
+            [{"status": "inconclusive", "primary_msgs_per_s": 25000.0, "reasons": ["host_busy"]}],
+            [{"status": "error", "primary_msgs_per_s": 25000.0, "reasons": ["broker_headroom_low:80"], "error": "boom"}],
+            [{"status": "inconclusive", "primary_msgs_per_s": 25000.0, "reasons": ["broker_headroom_low:80"], "ok": False}],
+        ]
+        for runs in cases:
+            observed = self._observed_rtt_profile(runs)
+            self.assertIsNone(
+                observed_capacity_from_calibration(observed, protocol="MQTTv311", kind="rtt"),
+                runs,
+            )
+            resolved = self._resolve_observed(observed)
+            self.assertIsNone(resolved.get("target_rate"), runs)
+            self.assertTrue(any("gmqtt" in e for e in resolved["shared_load_error"]), runs)
+
+    def test_summary_inconclusive_rates_alone_are_refused(self):
+        from mqtt_client_bench.harness import observed_capacity_from_calibration
+
+        observed = self._observed_rtt_profile([], rates=[21537.0, 25863.0, 25774.0])
+        self.assertIsNone(
+            observed_capacity_from_calibration(observed, protocol="MQTTv311", kind="rtt")
+        )
+        resolved = self._resolve_observed(observed)
+        self.assertIsNone(resolved.get("target_rate"))
+        self.assertTrue(any("gmqtt" in e for e in resolved["shared_load_error"]))
+
+    def test_no_admissible_run_leaves_shared_load_unresolved(self):
+        resolved = self._resolve_observed(self._observed_rtt_profile([]))
+        self.assertIsNone(resolved.get("target_rate"))
+        self.assertIsNone(resolved.get("shared_capacity_msgs_per_s"))
+        self.assertTrue(resolved.get("shared_load_error"))
+
+    def test_client_order_does_not_change_c_common(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point, round_shared_target_rate
+
+        profiles = {
+            "mqttium": self._rtt_profile(20419.317),
+            "gmqtt": self._rtt_profile(25774.0),
+            "paho": self._rtt_profile(8123.5),
+        }
+        point = {"shared_load_fraction": 0.75, "topology": "application_rtt", "protocol": "MQTTv311"}
+        expected = round_shared_target_rate(8123.5 * 0.75)
+        orders = (
+            ["mqttium", "gmqtt", "paho"],
+            ["paho", "mqttium", "gmqtt"],
+            ["gmqtt", "paho", "mqttium"],
+        )
+        rates = []
+        commons = []
+        for order in orders:
+            resolved = resolve_shared_load_point(point, profiles, order)
+            rates.append(resolved["target_rate"])
+            commons.append(resolved["shared_capacity_msgs_per_s"])
+            self.assertEqual(resolved["shared_capacities"]["paho"], 8123.5)
+        self.assertEqual(set(rates), {expected})
+        self.assertEqual(set(commons), {8123.5})
 
     def test_load_profile_dir_reads_per_client_files(self):
         import tempfile

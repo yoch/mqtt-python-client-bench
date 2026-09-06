@@ -934,6 +934,8 @@ def validate_run(
 # C_common = min(client capacities) so A and B see the same target_rate.
 PER_CLIENT_LOAD_FRACTION_REASON = "per_client_load_fraction_not_cross_client"
 SHARED_LOAD_UNRESOLVED_REASON = "shared_load_fraction_unresolved"
+BROKER_HEADROOM_REASON_PREFIX = "broker_headroom_low"
+OBSERVED_LOWER_BOUND_SOURCE = "observed_lower_bound:broker_headroom_low"
 
 
 def uses_per_client_load_fraction(point: dict) -> bool:
@@ -965,30 +967,68 @@ def round_shared_target_rate(rate: float) -> float:
     return float(round(float(rate)))
 
 
+def _is_broker_headroom_only(reasons: object) -> bool:
+    """True only when every recorded reason is a broker-headroom gate."""
+    if not isinstance(reasons, (list, tuple)) or not reasons:
+        return False
+    texts = [str(item) for item in reasons if item]
+    return bool(texts) and all(text.startswith(BROKER_HEADROOM_REASON_PREFIX) for text in texts)
+
+
+def _run_is_headroom_only_lower_bound(run: dict) -> bool:
+    """Admit a calibrate run as a C_common lower bound, fail closed otherwise.
+
+    Official ``valid`` rates belong on the capacity field. A timeout, worker
+    error, host-state failure or mixed reason list must never feed C_common,
+    even if the run also hit broker headroom and still produced a rate.
+    """
+    if run.get("status") == "valid":
+        return False
+    if run.get("error") or run.get("ok") is False:
+        return False
+    rate = run.get("primary_msgs_per_s")
+    if rate is None or float(rate) <= 0:
+        return False
+    return _is_broker_headroom_only(run.get("reasons"))
+
+
+def _calibration_result_blocks(load_profile: dict, *, protocol: str, kind: str) -> List[dict]:
+    raw = load_profile.get("raw") or {}
+    block = ((raw.get(protocol) or {}).get("rtt" if kind == "rtt" else "publish")) or {}
+    results = block.get("results")
+    if not isinstance(results, list):
+        return []
+    return [item for item in results if isinstance(item, dict)]
+
+
+def admitted_observed_rates(
+    load_profile: dict,
+    *,
+    protocol: str,
+    kind: str,
+) -> List[float]:
+    """Delivered rates from headroom-only inconclusive calibrate runs."""
+    rates: List[float] = []
+    for block in _calibration_result_blocks(load_profile, protocol=protocol, kind=kind):
+        for run in block.get("runs") or []:
+            if isinstance(run, dict) and _run_is_headroom_only_lower_bound(run):
+                rates.append(float(run["primary_msgs_per_s"]))
+    return rates
+
+
 def observed_capacity_from_calibration(
     load_profile: dict,
     *,
     protocol: str,
     kind: str,
 ) -> Optional[float]:
-    """Median of delivered calibrate rates when the official capacity is null.
+    """Median of headroom-only delivered rates when official capacity is null.
 
-    A broker-headroom gate can void every RTT calibrate run while the client
-    still produced a real rate (often above the other client's valid C). That
-    rate is a lower bound, not a client ceiling — ``resolve_shared_load_point``
-    uses it only so ``C_common = min(...)`` can resolve. Per-client
-    ``load_fraction`` must keep using the official field, which stays null.
+    Summary ``inconclusive_rates`` are ignored: they mix timeouts and worker
+    errors with broker-headroom voids. Per-client ``load_fraction`` keeps
+    using the official field, which stays null.
     """
-    raw = load_profile.get("raw") or {}
-    block = ((raw.get(protocol) or {}).get("rtt" if kind == "rtt" else "publish")) or {}
-    rates: List[float] = []
-    for result in block.get("results") or []:
-        summary = result.get("summary") or {}
-        for key in ("values", "inconclusive_rates"):
-            for value in summary.get(key) or []:
-                if value is not None:
-                    rates.append(float(value))
-    return median(rates)
+    return median(admitted_observed_rates(load_profile, protocol=protocol, kind=kind))
 
 
 def resolve_shared_load_point(
@@ -1000,9 +1040,9 @@ def resolve_shared_load_point(
 
     Missing or non-positive capacities are recorded on the point; ``run_point``
     then fails closed instead of inventing a rate. The caller's point is not
-    mutated. When the official capacity is null, a delivered calibrate rate is
-    accepted as an observed lower bound so a broker-limited peer cannot void
-    every matched-load point.
+    mutated. When the official capacity is null, only calibrate runs voided
+    exclusively by ``broker_headroom_low`` may contribute an observed lower
+    bound. Client order does not change ``C_common`` or ``target_rate``.
     """
     resolved = dict(point)
     frac = resolved.get("shared_load_fraction")
@@ -1013,6 +1053,7 @@ def resolve_shared_load_point(
     unique_clients = list(dict.fromkeys(clients))
     per_client: Dict[str, float] = {}
     sources: Dict[str, str] = {}
+    provenance: Dict[str, dict] = {}
     errors: List[str] = []
     for name in unique_clients:
         profile = calibrations.get(name)
@@ -1026,21 +1067,31 @@ def resolve_shared_load_point(
             continue
         source = "valid"
         if cap is None or float(cap) <= 0:
-            cap = observed_capacity_from_calibration(profile, protocol=protocol, kind=kind)
-            source = "observed_lower_bound"
+            admitted = admitted_observed_rates(profile, protocol=protocol, kind=kind)
+            cap = median(admitted)
+            source = OBSERVED_LOWER_BOUND_SOURCE
+            provenance[name] = {
+                "source": "observed_lower_bound",
+                "exclusive_reason": BROKER_HEADROOM_REASON_PREFIX,
+                "n_admitted": len(admitted),
+                "admitted_rates": admitted,
+            }
+        else:
+            provenance[name] = {"source": "valid"}
         if cap is None or float(cap) <= 0:
             errors.append(f"shared_load_missing_capacity:{name}:{protocol}:{kind}")
             continue
         per_client[name] = float(cap)
         sources[name] = source
     if errors or len(per_client) != len(unique_clients):
-        resolved["shared_load_error"] = errors or ["shared_load_incomplete_capacities"]
+        resolved["shared_load_error"] = errors or [SHARED_LOAD_UNRESOLVED_REASON]
         return resolved
     c_common = min(per_client.values())
     resolved["target_rate"] = round_shared_target_rate(c_common * float(frac))
     resolved["shared_capacity_msgs_per_s"] = c_common
     resolved["shared_capacities"] = per_client
     resolved["shared_capacity_sources"] = sources
+    resolved["shared_capacity_provenance"] = provenance
     resolved["calibration_kind"] = kind
     resolved["calibration_protocol"] = protocol
     return resolved
