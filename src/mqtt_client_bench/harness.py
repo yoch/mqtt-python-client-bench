@@ -55,6 +55,8 @@ from mqtt_client_bench.metrics import (
     abba_order,
     abba_block_ratios,
     compare_verdict_from_block_ratios,
+    comparison_spec,
+    comparison_value,
     integrity_counts,
     latency_summary,
     median,
@@ -2830,11 +2832,14 @@ def compare_clients(
             else:
                 calibrations[baseline_client] = shared_load_profile
                 calibrations[candidate_client] = shared_load_profile
+        spec = comparison_spec(scenario)
         for point_idx, point in enumerate(points):
             point = resolve_shared_load_point(point, calibrations, pair)
-            baseline_rates = []
-            candidate_rates = []
-            slot_rates: List[Optional[float]] = []
+            baseline_values = []
+            candidate_values = []
+            slot_values: List[Optional[float]] = []
+            slot_p95: List[Optional[float]] = []
+            slot_p99: List[Optional[float]] = []
             raw = []
             fail_closed_load = bool(point.get("shared_load_error"))
             for slot, label in enumerate(order):
@@ -2859,26 +2864,45 @@ def compare_clients(
                 result["ab_label"] = label
                 result["slot"] = slot
                 result["cooldown_s"] = ABBA_COOLDOWN_S
+                observed = comparison_value(result, scenario)
+                result["comparison_metric"] = observed["comparison_metric"]
+                result["comparison_direction"] = observed["comparison_direction"]
+                result["comparison_value"] = observed["value"]
                 raw.append(result)
-                rate = result.get("primary_msgs_per_s")
-                usable = rate is not None and result.get("status") == "valid" and not result.get("non_comparable")
-                slot_rates.append(float(rate) if usable else None)
+                value = observed["value"]
+                usable = (
+                    value is not None
+                    and result.get("status") == "valid"
+                    and not result.get("non_comparable")
+                )
+                slot_values.append(float(value) if usable else None)
+                slot_p95.append(observed.get("p95_ms") if usable else None)
+                slot_p99.append(observed.get("p99_ms") if usable else None)
                 if usable:
                     if label == "A":
-                        baseline_rates.append(float(rate))
+                        baseline_values.append(float(value))
                     else:
-                        candidate_rates.append(float(rate))
+                        candidate_values.append(float(value))
 
-            block_ratios = abba_block_ratios(order, slot_rates)
-            verdict = compare_verdict_from_block_ratios(block_ratios)
+            block_ratios = abba_block_ratios(order, slot_values)
+            verdict = compare_verdict_from_block_ratios(
+                block_ratios,
+                direction=spec["comparison_direction"],
+            )
+            verdict["comparison_metric"] = spec["comparison_metric"]
+            verdict["comparison_direction"] = spec["comparison_direction"]
             point_results.append(
                 {
                     "point": point,
                     "point_index": point_idx,
                     "order": order,
-                    "baseline_rates": baseline_rates,
-                    "candidate_rates": candidate_rates,
-                    "slot_rates": slot_rates,
+                    "comparison_metric": spec["comparison_metric"],
+                    "comparison_direction": spec["comparison_direction"],
+                    "baseline_rates": baseline_values,
+                    "candidate_rates": candidate_values,
+                    "slot_rates": slot_values,
+                    "slot_p95_ms": slot_p95,
+                    "slot_p99_ms": slot_p99,
                     "block_ratios": block_ratios,
                     "verdict": verdict,
                     "runs": raw,
@@ -2907,6 +2931,8 @@ def compare_clients(
         "schema_version": 1,
         "harness_fingerprint": HARNESS_FINGERPRINT,
         "scenario": scenario,
+        "comparison_metric": spec["comparison_metric"],
+        "comparison_direction": spec["comparison_direction"],
         "profile": profile,
         "point": points[0] if len(points) == 1 else None,
         "points": point_results,
