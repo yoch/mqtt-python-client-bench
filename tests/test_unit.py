@@ -4859,6 +4859,32 @@ class PairwiseCapacityGateTests(unittest.TestCase):
         self.assertTrue(any("insufficient_valid_rtt_capacity:4/5" in e for e in inspected["errors"]))
         self.assertIsNone(inspected["protocols"]["MQTTv311"]["capacity_msgs_per_s"])
 
+    def test_smoke_non_comparable_is_not_an_official_capacity(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        runs = [
+            {
+                "status": "valid",
+                "primary_msgs_per_s": 14000.0 + i,
+                "publish_path": "native_async",
+                "non_comparable": True,
+            }
+            for i in range(5)
+        ]
+        doc = {
+            "results": [
+                self._block("MQTTv311", runs),
+                self._block("MQTTv5", runs),
+            ]
+        }
+        official = official_rtt_capacities(doc, "mqttium", required_valid=5)
+        self.assertFalse(official["ok"])
+        smoke = official_rtt_capacities(
+            doc, "mqttium", required_valid=5, allow_non_comparable=True
+        )
+        self.assertTrue(smoke["ok"])
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["n_valid"], 5)
+
     def test_bridged_path_is_refused_for_async_peers(self):
         from mqtt_client_bench.pairwise import official_rtt_capacity_block
 
