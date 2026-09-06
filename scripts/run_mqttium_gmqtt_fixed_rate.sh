@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Matched-load latency campaign: mqttium vs gmqtt at the same absolute rates.
 #
-# application_rtt_fixed_rate uses shared_load_fraction × C_common =
-# min(client RTT capacities). puback_latency_fixed_rate uses catalogue
-# target_rate values. Per-client load_fraction scenarios are refused.
+# Default is the short remake: application_rtt_fixed_rate matrix only, 3
+# interleaved runs, reuse existing calibrations, no ABBA / A/A.
+# The overnight shape is opt-in: FULL=1.
 #
 # Usage:
 #   bash scripts/run_mqttium_gmqtt_fixed_rate.sh
+#   FULL=1 bash scripts/run_mqttium_gmqtt_fixed_rate.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -15,7 +16,19 @@ source .venv/bin/activate
 export PYTHONPATH=src
 
 MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc13}"
-MATRIX_RUNS="${MATRIX_RUNS:-5}"
+FULL="${FULL:-0}"
+RECALIBRATE="${RECALIBRATE:-0}"
+if [ "$FULL" = "1" ]; then
+  MATRIX_RUNS="${MATRIX_RUNS:-5}"
+  RUN_ABBA="${RUN_ABBA:-1}"
+  RUN_AA="${RUN_AA:-1}"
+  MATRIX_SCENARIOS_DEFAULT="application_rtt_fixed_rate puback_latency_fixed_rate"
+else
+  MATRIX_RUNS="${MATRIX_RUNS:-3}"
+  RUN_ABBA="${RUN_ABBA:-0}"
+  RUN_AA="${RUN_AA:-0}"
+  MATRIX_SCENARIOS_DEFAULT="application_rtt_fixed_rate"
+fi
 ABBA_BLOCKS="${ABBA_BLOCKS:-6}"
 AA_BLOCKS="${AA_BLOCKS:-4}"
 
@@ -28,7 +41,7 @@ PYEOF
 )}"
 OUT="${HOST_DIR}/mqttium-gmqtt"
 mkdir -p "$OUT" calibrations logs
-echo "writing to $OUT (matrix ${MATRIX_RUNS} runs, ABBA ${ABBA_BLOCKS} blocks, A/A ${AA_BLOCKS} blocks)"
+echo "writing to $OUT (matrix ${MATRIX_RUNS} runs, FULL=${FULL}, ABBA=${RUN_ABBA}, AA=${RUN_AA})"
 
 echo "=== pin mqttium==${MQTTIUM_VER} ==="
 pip install --force-reinstall --no-cache-dir "mqttium==${MQTTIUM_VER}"
@@ -47,15 +60,18 @@ PY
 python -m mqtt_client_bench.run broker up
 
 for client in mqttium gmqtt; do
-  echo "=== calibrate ${client} ==="
-  python -m mqtt_client_bench.run calibrate --client "$client" --profile standard \
-    --output "calibrations/${client}-load.json" | tee "logs/calibrate-${client}-matched.log"
+  cal="calibrations/${client}-load.json"
+  if [ "$RECALIBRATE" = "1" ] || [ ! -f "$cal" ]; then
+    echo "=== calibrate ${client} ==="
+    python -m mqtt_client_bench.run calibrate --client "$client" --profile standard \
+      --output "$cal" | tee "logs/calibrate-${client}-matched.log"
+  else
+    echo "=== reuse ${cal} ==="
+  fi
 done
 
-MATRIX_SCENARIOS=(
-  application_rtt_fixed_rate
-  puback_latency_fixed_rate
-)
+# shellcheck disable=SC2206
+MATRIX_SCENARIOS=(${MATRIX_SCENARIOS:-$MATRIX_SCENARIOS_DEFAULT})
 
 for s in "${MATRIX_SCENARIOS[@]}"; do
   echo "==> matrix ${s} mqttium,gmqtt runs=${MATRIX_RUNS} $(date -Is)"
@@ -69,61 +85,70 @@ for s in "${MATRIX_SCENARIOS[@]}"; do
     >"logs/matrix-mqttium-gmqtt-${s}.log" 2>&1 || echo "FAILED matrix ${s}" | tee -a logs/mqttium-gmqtt-fixed-rate.log
 done
 
-for s in "${MATRIX_SCENARIOS[@]}"; do
-  echo "==> ABBA gmqtt,mqttium ${s} blocks=${ABBA_BLOCKS} $(date -Is)"
+if [ "$RUN_ABBA" = "1" ]; then
+  for s in "${MATRIX_SCENARIOS[@]}"; do
+    echo "==> ABBA gmqtt,mqttium ${s} blocks=${ABBA_BLOCKS} $(date -Is)"
+    python -m mqtt_client_bench.run compare \
+      --clients gmqtt,mqttium \
+      --scenario "$s" \
+      --profile standard \
+      --blocks "$ABBA_BLOCKS" \
+      --load-profile-dir calibrations \
+      --output "${OUT}/compare-gmqtt-mqttium-${s}.json" \
+      >"logs/abba-gmqtt-mqttium-${s}.log" 2>&1 || echo "FAILED ABBA ${s}" | tee -a logs/mqttium-gmqtt-fixed-rate.log
+  done
+fi
+
+if [ "$RUN_AA" = "1" ]; then
+  # A/A at 75 % of C_common, MQTTv311.
+  # application_rtt_fixed_rate expand order: fraction then protocol
+  #   4 = 0.75 MQTTv311
+  # puback_latency_fixed_rate expand order:
+  #   6 = 10000 MQTTv311
+  echo "==> A/A mqttium application_rtt_fixed_rate 75pct/v311 $(date -Is)"
   python -m mqtt_client_bench.run compare \
-    --clients gmqtt,mqttium \
-    --scenario "$s" \
+    --clients mqttium,mqttium \
+    --scenario application_rtt_fixed_rate \
     --profile standard \
-    --blocks "$ABBA_BLOCKS" \
-    --output "${OUT}/compare-gmqtt-mqttium-${s}.json" \
-    >"logs/abba-gmqtt-mqttium-${s}.log" 2>&1 || echo "FAILED ABBA ${s}" | tee -a logs/mqttium-gmqtt-fixed-rate.log
-done
+    --blocks "$AA_BLOCKS" \
+    --variant-index 4 \
+    --load-profile-dir calibrations \
+    --output "${OUT}/compare-aa-mqttium-application_rtt_fixed_rate-75-v311.json" \
+    >"logs/aa-mqttium-application_rtt_fixed_rate.log" 2>&1 || echo "FAILED A/A mqttium RTT" | tee -a logs/mqttium-gmqtt-fixed-rate.log
 
-# A/A at 75 % of C_common, MQTTv311.
-# application_rtt_fixed_rate expand order: fraction then protocol
-#   4 = 0.75 MQTTv311
-# puback_latency_fixed_rate expand order:
-#   6 = 10000 MQTTv311
-echo "==> A/A mqttium application_rtt_fixed_rate 75pct/v311 $(date -Is)"
-python -m mqtt_client_bench.run compare \
-  --clients mqttium,mqttium \
-  --scenario application_rtt_fixed_rate \
-  --profile standard \
-  --blocks "$AA_BLOCKS" \
-  --variant-index 4 \
-  --output "${OUT}/compare-aa-mqttium-application_rtt_fixed_rate-75-v311.json" \
-  >"logs/aa-mqttium-application_rtt_fixed_rate.log" 2>&1 || echo "FAILED A/A mqttium RTT" | tee -a logs/mqttium-gmqtt-fixed-rate.log
+  echo "==> A/A gmqtt application_rtt_fixed_rate 75pct/v311 $(date -Is)"
+  python -m mqtt_client_bench.run compare \
+    --clients gmqtt,gmqtt \
+    --scenario application_rtt_fixed_rate \
+    --profile standard \
+    --blocks "$AA_BLOCKS" \
+    --variant-index 4 \
+    --load-profile-dir calibrations \
+    --output "${OUT}/compare-aa-gmqtt-application_rtt_fixed_rate-75-v311.json" \
+    >"logs/aa-gmqtt-application_rtt_fixed_rate.log" 2>&1 || echo "FAILED A/A gmqtt RTT" | tee -a logs/mqttium-gmqtt-fixed-rate.log
 
-echo "==> A/A gmqtt application_rtt_fixed_rate 75pct/v311 $(date -Is)"
-python -m mqtt_client_bench.run compare \
-  --clients gmqtt,gmqtt \
-  --scenario application_rtt_fixed_rate \
-  --profile standard \
-  --blocks "$AA_BLOCKS" \
-  --variant-index 4 \
-  --output "${OUT}/compare-aa-gmqtt-application_rtt_fixed_rate-75-v311.json" \
-  >"logs/aa-gmqtt-application_rtt_fixed_rate.log" 2>&1 || echo "FAILED A/A gmqtt RTT" | tee -a logs/mqttium-gmqtt-fixed-rate.log
+  echo "==> A/A mqttium puback_latency_fixed_rate 10k/v311 $(date -Is)"
+  python -m mqtt_client_bench.run compare \
+    --clients mqttium,mqttium \
+    --scenario puback_latency_fixed_rate \
+    --profile standard \
+    --blocks "$AA_BLOCKS" \
+    --variant-index 6 \
+    --load-profile-dir calibrations \
+    --output "${OUT}/compare-aa-mqttium-puback_latency_fixed_rate-10k-v311.json" \
+    >"logs/aa-mqttium-puback_latency_fixed_rate.log" 2>&1 || echo "FAILED A/A mqttium PUBACK" | tee -a logs/mqttium-gmqtt-fixed-rate.log
 
-echo "==> A/A mqttium puback_latency_fixed_rate 10k/v311 $(date -Is)"
-python -m mqtt_client_bench.run compare \
-  --clients mqttium,mqttium \
-  --scenario puback_latency_fixed_rate \
-  --profile standard \
-  --blocks "$AA_BLOCKS" \
-  --variant-index 6 \
-  --output "${OUT}/compare-aa-mqttium-puback_latency_fixed_rate-10k-v311.json" \
-  >"logs/aa-mqttium-puback_latency_fixed_rate.log" 2>&1 || echo "FAILED A/A mqttium PUBACK" | tee -a logs/mqttium-gmqtt-fixed-rate.log
-
-echo "==> A/A gmqtt puback_latency_fixed_rate 10k/v311 $(date -Is)"
-python -m mqtt_client_bench.run compare \
-  --clients gmqtt,gmqtt \
-  --scenario puback_latency_fixed_rate \
-  --profile standard \
-  --blocks "$AA_BLOCKS" \
-  --variant-index 6 \
-  --output "${OUT}/compare-aa-gmqtt-puback_latency_fixed_rate-10k-v311.json" \
-  >"logs/aa-gmqtt-puback_latency_fixed_rate.log" 2>&1 || echo "FAILED A/A gmqtt PUBACK" | tee -a logs/mqttium-gmqtt-fixed-rate.log
+  echo "==> A/A gmqtt puback_latency_fixed_rate 10k/v311 $(date -Is)"
+  python -m mqtt_client_bench.run compare \
+    --clients gmqtt,gmqtt \
+    --scenario puback_latency_fixed_rate \
+    --profile standard \
+    --blocks "$AA_BLOCKS" \
+    --variant-index 6 \
+    --load-profile-dir calibrations \
+    --output "${OUT}/compare-aa-gmqtt-puback_latency_fixed_rate-10k-v311.json" \
+    >"logs/aa-gmqtt-puback_latency_fixed_rate.log" 2>&1 || echo "FAILED A/A gmqtt PUBACK" | tee -a logs/mqttium-gmqtt-fixed-rate.log
+fi
 
 python scripts/summarize_mqttium_gmqtt.py "$OUT" | tee "${OUT}/summary.json"
 echo "MATCHED_LOAD_DONE $(date -Is)"

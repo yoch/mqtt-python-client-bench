@@ -965,6 +965,32 @@ def round_shared_target_rate(rate: float) -> float:
     return float(round(float(rate)))
 
 
+def observed_capacity_from_calibration(
+    load_profile: dict,
+    *,
+    protocol: str,
+    kind: str,
+) -> Optional[float]:
+    """Median of delivered calibrate rates when the official capacity is null.
+
+    A broker-headroom gate can void every RTT calibrate run while the client
+    still produced a real rate (often above the other client's valid C). That
+    rate is a lower bound, not a client ceiling — ``resolve_shared_load_point``
+    uses it only so ``C_common = min(...)`` can resolve. Per-client
+    ``load_fraction`` must keep using the official field, which stays null.
+    """
+    raw = load_profile.get("raw") or {}
+    block = ((raw.get(protocol) or {}).get("rtt" if kind == "rtt" else "publish")) or {}
+    rates: List[float] = []
+    for result in block.get("results") or []:
+        summary = result.get("summary") or {}
+        for key in ("values", "inconclusive_rates"):
+            for value in summary.get(key) or []:
+                if value is not None:
+                    rates.append(float(value))
+    return median(rates)
+
+
 def resolve_shared_load_point(
     point: dict,
     calibrations: Dict[str, dict],
@@ -974,7 +1000,9 @@ def resolve_shared_load_point(
 
     Missing or non-positive capacities are recorded on the point; ``run_point``
     then fails closed instead of inventing a rate. The caller's point is not
-    mutated.
+    mutated. When the official capacity is null, a delivered calibrate rate is
+    accepted as an observed lower bound so a broker-limited peer cannot void
+    every matched-load point.
     """
     resolved = dict(point)
     frac = resolved.get("shared_load_fraction")
@@ -984,6 +1012,7 @@ def resolve_shared_load_point(
     protocol = str(resolved.get("protocol", "MQTTv311"))
     unique_clients = list(dict.fromkeys(clients))
     per_client: Dict[str, float] = {}
+    sources: Dict[str, str] = {}
     errors: List[str] = []
     for name in unique_clients:
         profile = calibrations.get(name)
@@ -995,10 +1024,15 @@ def resolve_shared_load_point(
         except ValueError as exc:
             errors.append(f"{exc}:{name}")
             continue
+        source = "valid"
+        if cap is None or float(cap) <= 0:
+            cap = observed_capacity_from_calibration(profile, protocol=protocol, kind=kind)
+            source = "observed_lower_bound"
         if cap is None or float(cap) <= 0:
             errors.append(f"shared_load_missing_capacity:{name}:{protocol}:{kind}")
             continue
         per_client[name] = float(cap)
+        sources[name] = source
     if errors or len(per_client) != len(unique_clients):
         resolved["shared_load_error"] = errors or ["shared_load_incomplete_capacities"]
         return resolved
@@ -1006,6 +1040,7 @@ def resolve_shared_load_point(
     resolved["target_rate"] = round_shared_target_rate(c_common * float(frac))
     resolved["shared_capacity_msgs_per_s"] = c_common
     resolved["shared_capacities"] = per_client
+    resolved["shared_capacity_sources"] = sources
     resolved["calibration_kind"] = kind
     resolved["calibration_protocol"] = protocol
     return resolved
@@ -2621,6 +2656,17 @@ def calibrate(
 ABBA_COOLDOWN_S = 5.0
 
 
+def _load_profiles_from_dir(directory: str, clients: List[str]) -> Dict[str, dict]:
+    """Read ``<client>-load.json`` files already produced by ``calibrate``."""
+    root = Path(directory)
+    loaded: Dict[str, dict] = {}
+    for name in dict.fromkeys(clients):
+        path = root / f"{name}-load.json"
+        if path.is_file():
+            loaded[name] = read_json(str(path))
+    return loaded
+
+
 def compare_clients(
     clients: List[str],
     scenario: str,
@@ -2629,6 +2675,7 @@ def compare_clients(
     profile: str = "standard",
     output: Optional[str] = None,
     load_profile_path: Optional[str] = None,
+    load_profile_dir: Optional[str] = None,
     host_profile_path: Optional[str] = None,
     client_paths: Optional[Dict[str, str]] = None,
     variant_index: Optional[int] = None,
@@ -2668,6 +2715,7 @@ def compare_clients(
         # a different gmqtt baseline and guarantees protocol×client alignment.
         calibrations = {}
         pair = [baseline_client, candidate_client]
+        unique_pair = list(dict.fromkeys(pair))
         if any(uses_shared_load_fraction(point) for point in points):
             # C_common is min of each client's own capacity. A single shared
             # --load-profile would silently pin both sides to one library.
@@ -2676,7 +2724,18 @@ def compare_clients(
                     "shared_load_fraction cannot use a single --load-profile; "
                     "C_common is min of each client's own calibration"
                 )
-            for name in pair:
+            if load_profile_dir:
+                calibrations.update(_load_profiles_from_dir(load_profile_dir, unique_pair))
+                for name, loaded in list(calibrations.items()):
+                    _validate_load_profile(
+                        loaded,
+                        client=name,
+                        client_path=client_paths.get(name),
+                        broker=meta,
+                    )
+            for name in unique_pair:
+                if name in calibrations:
+                    continue
                 cal_path = str(work_dir / f"cal-{name}.json")
                 calibrations[name] = calibrate(
                     cal_path,
@@ -2686,7 +2745,7 @@ def compare_clients(
                 )
         elif any(point.get("load_fraction") is not None for point in points):
             if shared_load_profile is None:
-                for name in pair:
+                for name in unique_pair:
                     cal_path = str(work_dir / f"cal-{name}.json")
                     calibrations[name] = calibrate(
                         cal_path,
@@ -2703,8 +2762,9 @@ def compare_clients(
             candidate_rates = []
             slot_rates: List[Optional[float]] = []
             raw = []
+            fail_closed_load = bool(point.get("shared_load_error"))
             for slot, label in enumerate(order):
-                if slot > 0:
+                if slot > 0 and not fail_closed_load:
                     time.sleep(ABBA_COOLDOWN_S)
                 name = baseline_client if label == "A" else candidate_client
                 result = run_point(

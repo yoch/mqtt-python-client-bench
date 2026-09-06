@@ -4225,6 +4225,60 @@ class CrossClientLoadTests(unittest.TestCase):
         self.assertIsNone(resolved.get("target_rate"))
         self.assertTrue(any("gmqtt" in e for e in resolved["shared_load_error"]))
 
+    def _observed_rtt_profile(self, rates: list[float]) -> dict:
+        return {
+            "protocol_capacities": {
+                "MQTTv311": {"rtt_capacity_msgs_per_s": None, "capacity_msgs_per_s": 50000},
+                "MQTTv5": {"rtt_capacity_msgs_per_s": None, "capacity_msgs_per_s": 48000},
+            },
+            "raw": {
+                "MQTTv311": {
+                    "rtt": {
+                        "results": [{"summary": {"values": [], "inconclusive_rates": rates, "median": None}}]
+                    }
+                }
+            },
+        }
+
+    def test_observed_rtt_rate_unblocks_c_common(self):
+        from mqtt_client_bench.harness import (
+            observed_capacity_from_calibration,
+            resolve_shared_load_point,
+            round_shared_target_rate,
+        )
+
+        observed = self._observed_rtt_profile([21537.0, 25863.0, 25774.0])
+        self.assertEqual(
+            observed_capacity_from_calibration(observed, protocol="MQTTv311", kind="rtt"),
+            25774.0,
+        )
+        resolved = resolve_shared_load_point(
+            {"shared_load_fraction": 0.50, "topology": "application_rtt", "protocol": "MQTTv311"},
+            {"mqttium": self._rtt_profile(20419.317), "gmqtt": observed},
+            ["mqttium", "gmqtt"],
+        )
+        self.assertEqual(resolved["shared_capacity_msgs_per_s"], 20419.317)
+        self.assertEqual(resolved["target_rate"], round_shared_target_rate(20419.317 * 0.50))
+        self.assertEqual(resolved["shared_capacity_sources"]["mqttium"], "valid")
+        self.assertEqual(resolved["shared_capacity_sources"]["gmqtt"], "observed_lower_bound")
+
+    def test_load_profile_dir_reads_per_client_files(self):
+        import tempfile
+
+        from mqtt_client_bench.control import write_json
+        from mqtt_client_bench.harness import _load_profiles_from_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_json(str(root / "mqttium-load.json"), self._rtt_profile(20000.0))
+            write_json(str(root / "gmqtt-load.json"), self._rtt_profile(25000.0))
+            loaded = _load_profiles_from_dir(tmp, ["mqttium", "gmqtt", "mqttium"])
+        self.assertEqual(set(loaded), {"mqttium", "gmqtt"})
+        self.assertEqual(
+            loaded["mqttium"]["protocol_capacities"]["MQTTv311"]["rtt_capacity_msgs_per_s"],
+            20000.0,
+        )
+
 
 class _FakeSyncOnLoopAdapter:
     """A client that admits a publish on the loop and acknowledges it later.
