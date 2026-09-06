@@ -8,11 +8,23 @@ import functools
 import gc
 import json
 import os
+import socket
 import threading
 import time
 
 from mqtt_client_bench.adapters.registry import adapter_identity
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
+from mqtt_client_bench.pacing import (
+    DEFAULT_PACER_SPIN_NS,
+    PaceRecorder,
+    PaceToken,
+    PacerClient,
+    bind_receiver_socket,
+    drain_datagrams,
+    interval_ns_for_rate,
+    resolve_pacer_mode,
+    unpack_token,
+)
 from mqtt_client_bench.roles.rtt_drive import (
     drive_identity,
     measure_runtime_report,
@@ -21,6 +33,11 @@ from mqtt_client_bench.roles.rtt_drive import (
     select_rtt_drive,
 )
 from mqtt_client_bench.sampling import DEFAULT_METRIC_SAMPLE_LIMIT, ReservoirSampler
+from mqtt_client_bench.temporal_trace import (
+    DEFAULT_TEMPORAL_TRACE_POINTS,
+    TemporalTraceSampler,
+    trace_stride,
+)
 from mqtt_client_bench.workloads import HEADER_SIZE, decode_header_fields, encode_header
 
 
@@ -87,6 +104,9 @@ def main(argv=None) -> int:
         "retracted_completions": 0,
         "lock": threading.Lock(),
         "slot_free": None,
+        "temporal_trace": None,
+        "trace_pending": {},
+        "pace_recorder": None,
     }
 
     if plan["native_async"]:
@@ -146,6 +166,7 @@ def _on_message(state, msg):
         if state["phase"] == "measure":
             state["latencies_ns"].add(latency)
             state["completed_in_window"] += 1
+            _commit_trace(state, corr, sent, now)
     event = state.get("slot_free")
     if event is not None and not event.is_set():
         event.set()
@@ -163,6 +184,8 @@ def _result_body(
     offered,
     missed,
     runtime=None,
+    pacing=None,
+    temporal_trace=None,
 ):
     body = {
         "ok": True,
@@ -186,6 +209,11 @@ def _result_body(
     }
     if runtime:
         body["runtime"] = runtime
+    if pacing:
+        body["pacing"] = pacing
+    if temporal_trace:
+        body["temporal_trace"] = temporal_trace
+        body["temporal_trace_metric"] = "application_e2e_latency"
     return body
 
 
@@ -200,6 +228,7 @@ def _reset_measure_counters(state):
         state["missed_due_to_backpressure"] = 0
         state["retracted_completions"] = 0
         state["timeouts"] = 0
+        state["trace_pending"] = {}
 
 
 def _snapshot(state):
@@ -212,6 +241,127 @@ def _snapshot(state):
         offered = int(state.get("offered") or 0)
         missed = int(state.get("missed_due_to_backpressure") or 0)
     return timeouts, latencies, latency_sampling, completed, sent, offered, missed
+
+
+def _commit_trace(state, seq, send_ns, receive_ns) -> None:
+    tracer = state.get("temporal_trace")
+    if tracer is None:
+        return
+    pending = state.get("trace_pending") or {}
+    meta = pending.pop(seq, None) or {}
+    tracer.add(
+        sequence=int(seq),
+        send_ns=int(send_ns),
+        receive_ns=int(receive_ns),
+        scheduled_deadline_ns=int(meta.get("scheduled_deadline_ns") or 0),
+        pacer_emission_ns=int(meta.get("pacer_emission_ns") or 0),
+        receiver_token_ns=int(meta.get("receiver_token_ns") or 0),
+        publish_call_ns=int(meta.get("publish_call_ns") or send_ns),
+    )
+
+
+def _reserve_trace(state, seq, token: PaceToken | None, receiver_ns: int, publish_call_ns: int) -> None:
+    tracer = state.get("temporal_trace")
+    if tracer is None or not tracer.want(seq):
+        return
+    pending = state.setdefault("trace_pending", {})
+    pending[seq] = {
+        "scheduled_deadline_ns": int(token.scheduled_deadline_ns) if token is not None else 0,
+        "pacer_emission_ns": int(token.pacer_emission_ns) if token is not None else 0,
+        "receiver_token_ns": int(receiver_ns or 0),
+        "publish_call_ns": int(publish_call_ns),
+    }
+
+
+def _drop_trace(state, seq) -> None:
+    pending = state.get("trace_pending")
+    if pending is not None:
+        pending.pop(seq, None)
+
+
+def _begin_measure_instrumentation(cfg, state, target_rate, duration_s):
+    """Measure-window only: in-loop stays the control; both modes get traces."""
+    mode = resolve_pacer_mode(cfg, target_rate)
+    interval_ns = interval_ns_for_rate(target_rate) if target_rate and target_rate > 0 else 0
+    recorder = None
+    if interval_ns > 0:
+        recorder = PaceRecorder(mode=mode, target_rate=target_rate, target_interval_ns=interval_ns)
+    expected = float(target_rate or 0.0) * float(duration_s or 0.0)
+    max_points = int(cfg.get("temporal_trace_max_points") or DEFAULT_TEMPORAL_TRACE_POINTS)
+    tracer = None
+    if interval_ns > 0 and max_points > 0:
+        tracer = TemporalTraceSampler(
+            max_points=max_points,
+            stride=trace_stride(expected, max_points),
+        )
+    state["pace_recorder"] = recorder
+    state["temporal_trace"] = tracer
+    state["trace_pending"] = {}
+    return recorder, tracer, mode, interval_ns
+
+
+def _finish_instrumentation(cfg, state, recorder, tracer, window_s, pacer_client):
+    if recorder is not None and pacer_client is not None:
+        recorder.merge_pacer_side(pacer_client.read_stats())
+    pacing = recorder.summary(duration_s=window_s) if recorder is not None else None
+    trace_payload = tracer.to_columnar() if tracer is not None else None
+    trace_path = cfg.get("temporal_trace_path")
+    if tracer is not None and trace_path:
+        tracer.write_jsonl(trace_path)
+    state["pace_recorder"] = None
+    state["temporal_trace"] = None
+    return pacing, trace_payload
+
+
+def _open_pacer(cfg, target_rate):
+    mode = resolve_pacer_mode(cfg, target_rate)
+    if mode != "external":
+        return None, None, mode
+    path = cfg.get("pacer_socket_path")
+    if not path:
+        raise RuntimeError("external pacer requires pacer_socket_path")
+    sock = bind_receiver_socket(path)
+    client = PacerClient(
+        socket_path=path,
+        stats_path=str(cfg.get("pacer_stats_path") or (path + ".stats.json")),
+        cpuset=cfg.get("pacer_cpuset"),
+        spin_ns=int(cfg.get("pacer_spin_ns") or DEFAULT_PACER_SPIN_NS),
+    )
+    return client, sock, mode
+
+
+def _start_pacer_phase(pacer_client, target_rate, duration_s) -> None:
+    if pacer_client is None or not target_rate:
+        return
+    pacer_client.start_phase(
+        interval_ns=interval_ns_for_rate(target_rate),
+        duration_ns=max(1, int(float(duration_s) * 1_000_000_000.0)),
+    )
+
+
+def _recv_token_sync(sock, until) -> PaceToken | None:
+    remaining = until - time.perf_counter()
+    if remaining <= 0:
+        return None
+    sock.settimeout(min(0.05, max(remaining, 0.0)))
+    try:
+        data = sock.recv(64)
+    except (TimeoutError, socket.timeout, BlockingIOError, OSError):
+        return None
+    return unpack_token(data)
+
+
+async def _recv_token_async(loop, sock, until) -> PaceToken | None:
+    remaining = until - time.perf_counter()
+    if remaining <= 0:
+        return None
+    try:
+        data = await asyncio.wait_for(
+            loop.sock_recv(sock, 64), timeout=min(0.05, max(remaining, 0.0))
+        )
+    except (asyncio.TimeoutError, OSError):
+        return None
+    return unpack_token(data)
 
 
 def _run_facade(
@@ -270,70 +420,107 @@ def _run_facade(
 
     touch(cfg["ready_path"], {"role": "rtt_initiator", "pid": os.getpid(), **identity})
     barrier = barrier_client_session(cfg["barrier_path"], timeout_s=float(cfg.get("barrier_timeout_s", 120)))
-    barrier.wait("T0")
+    pacer_client, pacer_sock, pacer_mode = _open_pacer(cfg, target_rate)
+    try:
+        barrier.wait("T0")
 
-    gc.collect()
-    state["phase"] = "warmup"
-    # Warmup correlations live in a disjoint high range so late responses cannot
-    # collide with measure-window correlations.
-    _send_loop(
-        adapter,
-        state,
-        request_topic,
-        qos,
-        run_id,
-        outstanding,
-        target_rate,
-        time.perf_counter() + warmup_s,
-        sequence_start=1 << 40,
-    )
-    drain_deadline = time.perf_counter() + min(drain_s, 5.0)
-    while time.perf_counter() < drain_deadline:
-        with state["lock"]:
-            if not state["inflight"]:
-                break
-        time.sleep(0.01)
-    _reset_measure_counters(state)
-
-    barrier.ack("WARMUP_DRAINED")
-    barrier.wait("T_MEASURE")
-    barrier.close()
-
-    state["phase"] = "measure"
-    runtime_start = process_runtime_snapshot()
-    t0 = time.perf_counter()
-    _send_loop(adapter, state, request_topic, qos, run_id, outstanding, target_rate, t0 + duration_s, sequence_start=0)
-    t1 = time.perf_counter()
-    runtime = measure_runtime_report(adapter, runtime_start, process_runtime_snapshot())
-    state["phase"] = "drain"
-    deadline = time.perf_counter() + drain_s
-    while time.perf_counter() < deadline:
-        with state["lock"]:
-            if not state["inflight"]:
-                break
-        time.sleep(0.01)
-    timeouts, latencies, latency_sampling, completed, sent, offered, missed = _snapshot(state)
-
-    adapter.disconnect()
-    adapter.loop_stop()
-    window = max(t1 - t0, 1e-9)
-    write_json(
-        cfg["result_path"],
-        _result_body(
+        gc.collect()
+        state["phase"] = "warmup"
+        _start_pacer_phase(pacer_client, target_rate, warmup_s)
+        # Warmup correlations live in a disjoint high range so late responses cannot
+        # collide with measure-window correlations.
+        _send_loop(
+            adapter,
             state,
-            identity,
-            window,
-            timeouts,
-            latencies,
-            latency_sampling,
-            completed,
-            sent,
-            offered,
-            missed,
-            runtime=runtime,
-        ),
-    )
-    return 0
+            request_topic,
+            qos,
+            run_id,
+            outstanding,
+            target_rate,
+            time.perf_counter() + warmup_s,
+            sequence_start=1 << 40,
+            pacer_mode=pacer_mode,
+            pacer_sock=pacer_sock,
+        )
+        if pacer_sock is not None:
+            drain_datagrams(pacer_sock)
+        drain_deadline = time.perf_counter() + min(drain_s, 5.0)
+        while time.perf_counter() < drain_deadline:
+            with state["lock"]:
+                if not state["inflight"]:
+                    break
+            time.sleep(0.01)
+        _reset_measure_counters(state)
+
+        barrier.ack("WARMUP_DRAINED")
+        barrier.wait("T_MEASURE")
+        barrier.close()
+
+        state["phase"] = "measure"
+        recorder, tracer, pacer_mode, _interval_ns = _begin_measure_instrumentation(
+            cfg, state, target_rate, duration_s
+        )
+        _start_pacer_phase(pacer_client, target_rate, duration_s)
+        runtime_start = process_runtime_snapshot()
+        t0 = time.perf_counter()
+        _send_loop(
+            adapter,
+            state,
+            request_topic,
+            qos,
+            run_id,
+            outstanding,
+            target_rate,
+            t0 + duration_s,
+            sequence_start=0,
+            pacer_mode=pacer_mode,
+            pacer_sock=pacer_sock,
+        )
+        t1 = time.perf_counter()
+        runtime = measure_runtime_report(adapter, runtime_start, process_runtime_snapshot())
+        state["phase"] = "drain"
+        deadline = time.perf_counter() + drain_s
+        while time.perf_counter() < deadline:
+            with state["lock"]:
+                if not state["inflight"]:
+                    break
+            time.sleep(0.01)
+        timeouts, latencies, latency_sampling, completed, sent, offered, missed = _snapshot(state)
+
+        adapter.disconnect()
+        adapter.loop_stop()
+        window = max(t1 - t0, 1e-9)
+        pacing, trace_payload = _finish_instrumentation(
+            cfg, state, recorder, tracer, window, pacer_client
+        )
+        write_json(
+            cfg["result_path"],
+            _result_body(
+                state,
+                identity,
+                window,
+                timeouts,
+                latencies,
+                latency_sampling,
+                completed,
+                sent,
+                offered,
+                missed,
+                runtime=runtime,
+                pacing=pacing,
+                temporal_trace=trace_payload,
+            ),
+        )
+        return 0
+    finally:
+        if pacer_client is not None:
+            pacer_client.close()
+        if pacer_sock is not None:
+            pacer_sock.close()
+            try:
+                os.unlink(cfg.get("pacer_socket_path") or "")
+            except OSError:
+                pass
 
 
 def _run_native(
@@ -396,69 +583,95 @@ def _run_native(
         barrier = barrier_client_session(
             cfg["barrier_path"], timeout_s=float(cfg.get("barrier_timeout_s", 120))
         )
-        await _blocking(barrier.wait, "T0")
+        pacer_client, pacer_sock, pacer_mode = _open_pacer(cfg, target_rate)
+        try:
+            await _blocking(barrier.wait, "T0")
 
-        gc.collect()
-        state["phase"] = "warmup"
-        await _send_loop_async(
-            adapter,
-            state,
-            request_topic,
-            qos,
-            run_id,
-            outstanding,
-            target_rate,
-            time.perf_counter() + warmup_s,
-            sequence_start=1 << 40,
-            sync_on_loop=plan["publish_sync_on_loop"],
-        )
-        drain_deadline = time.perf_counter() + min(drain_s, 5.0)
-        while time.perf_counter() < drain_deadline:
-            with state["lock"]:
-                if not state["inflight"]:
-                    break
-            await asyncio.sleep(0.01)
-        _reset_measure_counters(state)
+            gc.collect()
+            state["phase"] = "warmup"
+            _start_pacer_phase(pacer_client, target_rate, warmup_s)
+            await _send_loop_async(
+                adapter,
+                state,
+                request_topic,
+                qos,
+                run_id,
+                outstanding,
+                target_rate,
+                time.perf_counter() + warmup_s,
+                sequence_start=1 << 40,
+                sync_on_loop=plan["publish_sync_on_loop"],
+                pacer_mode=pacer_mode,
+                pacer_sock=pacer_sock,
+            )
+            if pacer_sock is not None:
+                drain_datagrams(pacer_sock)
+            drain_deadline = time.perf_counter() + min(drain_s, 5.0)
+            while time.perf_counter() < drain_deadline:
+                with state["lock"]:
+                    if not state["inflight"]:
+                        break
+                await asyncio.sleep(0.01)
+            _reset_measure_counters(state)
 
-        await _blocking(barrier.ack, "WARMUP_DRAINED")
-        await _blocking(barrier.wait, "T_MEASURE")
-        barrier.close()
+            await _blocking(barrier.ack, "WARMUP_DRAINED")
+            await _blocking(barrier.wait, "T_MEASURE")
+            barrier.close()
 
-        state["phase"] = "measure"
-        runtime_start = process_runtime_snapshot()
-        t0 = time.perf_counter()
-        await _send_loop_async(
-            adapter,
-            state,
-            request_topic,
-            qos,
-            run_id,
-            outstanding,
-            target_rate,
-            t0 + duration_s,
-            sequence_start=0,
-            sync_on_loop=plan["publish_sync_on_loop"],
-        )
-        t1 = time.perf_counter()
-        runtime = measure_runtime_report(adapter, runtime_start, process_runtime_snapshot())
-        state["phase"] = "drain"
-        deadline = time.perf_counter() + drain_s
-        while time.perf_counter() < deadline:
-            with state["lock"]:
-                if not state["inflight"]:
-                    break
-            await asyncio.sleep(0.01)
-        timeouts, latencies, latency_sampling, completed, sent, offered, missed = _snapshot(state)
-        await adapter.disconnect()
-        window = max(t1 - t0, 1e-9)
-        write_json(
-            cfg["result_path"],
-            _result_body(
-                state, identity, window, timeouts, latencies, latency_sampling,
-                completed, sent, offered, missed, runtime=runtime,
-            ),
-        )
-        return 0
+            state["phase"] = "measure"
+            recorder, tracer, pacer_mode, _interval_ns = _begin_measure_instrumentation(
+                cfg, state, target_rate, duration_s
+            )
+            _start_pacer_phase(pacer_client, target_rate, duration_s)
+            runtime_start = process_runtime_snapshot()
+            t0 = time.perf_counter()
+            await _send_loop_async(
+                adapter,
+                state,
+                request_topic,
+                qos,
+                run_id,
+                outstanding,
+                target_rate,
+                t0 + duration_s,
+                sequence_start=0,
+                sync_on_loop=plan["publish_sync_on_loop"],
+                pacer_mode=pacer_mode,
+                pacer_sock=pacer_sock,
+            )
+            t1 = time.perf_counter()
+            runtime = measure_runtime_report(adapter, runtime_start, process_runtime_snapshot())
+            state["phase"] = "drain"
+            deadline = time.perf_counter() + drain_s
+            while time.perf_counter() < deadline:
+                with state["lock"]:
+                    if not state["inflight"]:
+                        break
+                await asyncio.sleep(0.01)
+            timeouts, latencies, latency_sampling, completed, sent, offered, missed = _snapshot(state)
+            await adapter.disconnect()
+            window = max(t1 - t0, 1e-9)
+            pacing, trace_payload = _finish_instrumentation(
+                cfg, state, recorder, tracer, window, pacer_client
+            )
+            write_json(
+                cfg["result_path"],
+                _result_body(
+                    state, identity, window, timeouts, latencies, latency_sampling,
+                    completed, sent, offered, missed, runtime=runtime,
+                    pacing=pacing, temporal_trace=trace_payload,
+                ),
+            )
+            return 0
+        finally:
+            if pacer_client is not None:
+                pacer_client.close()
+            if pacer_sock is not None:
+                pacer_sock.close()
+                try:
+                    os.unlink(cfg.get("pacer_socket_path") or "")
+                except OSError:
+                    pass
 
     try:
         return int(loop.run_until_complete(_drive()))
@@ -466,7 +679,20 @@ def _run_native(
         loop.close()
 
 
-def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, until, sequence_start=0):
+def _send_loop(
+    adapter,
+    state,
+    topic,
+    qos,
+    run_id,
+    outstanding,
+    target_rate,
+    until,
+    sequence_start=0,
+    *,
+    pacer_mode: str = "in_loop",
+    pacer_sock=None,
+):
     interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0
     open_loop = interval > 0
     next_send = time.perf_counter()
@@ -474,8 +700,27 @@ def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, unt
     n_offered = 0
     n_missed = 0
     measure = state["phase"] == "measure"
+    recorder = state.get("pace_recorder") if measure else None
+    interval_ns = interval_ns_for_rate(target_rate) if open_loop else 0
+    token_index = 0
+    anchor_ns = time.perf_counter_ns()
+    external = open_loop and pacer_mode == "external" and pacer_sock is not None
     while time.perf_counter() < until:
-        if open_loop:
+        token = None
+        receiver_ns = 0
+        if external:
+            token = _recv_token_sync(pacer_sock, until)
+            if token is None:
+                continue
+            receiver_ns = time.monotonic_ns()
+            if recorder is not None:
+                recorder.record_receiver(token, receiver_ns, None)
+            if len(state["inflight"]) >= outstanding:
+                if measure:
+                    n_offered += 1
+                    n_missed += 1
+                continue
+        elif open_loop:
             now = time.perf_counter()
             if now < next_send:
                 time.sleep(min(0.001, next_send - now))
@@ -484,6 +729,13 @@ def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, unt
             # same discipline as the publisher: a full window is a miss, not a
             # stalled paceur that would under-shoot target_rate.
             next_send += interval
+            deadline_ns = anchor_ns + token_index * interval_ns
+            emission_ns = time.perf_counter_ns()
+            token = PaceToken(token_index, deadline_ns, emission_ns)
+            token_index += 1
+            receiver_ns = emission_ns
+            if recorder is not None:
+                recorder.record_receiver(token, receiver_ns, None)
             if len(state["inflight"]) >= outstanding:
                 if measure:
                     n_offered += 1
@@ -497,6 +749,9 @@ def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, unt
         seq += 1
         send_ns = time.perf_counter_ns()
         payload = encode_header(run_id, 1, seq, seq, send_ns)
+        if recorder is not None and token is not None:
+            recorder.note_receiver_to_publish(receiver_ns, send_ns)
+        _reserve_trace(state, seq, token, receiver_ns, send_ns)
 
         # Register the correlation before entering the client API. A synchronous
         # or cross-thread publish handoff may give the network loop enough time
@@ -521,10 +776,12 @@ def _send_loop(adapter, state, topic, qos, run_id, outstanding, target_rate, unt
                     if early is not None:
                         state["latencies_ns"].add(early)
                         state["completed_in_window"] += 1
+                        _commit_trace(state, seq, send_ns, send_ns + early)
             else:
                 # Publish refused. Drop any response that landed inside publish()
                 # without ever committing it to the latency sample.
                 state["inflight"].pop(seq, None)
+                _drop_trace(state, seq)
                 if early is not None and measure:
                     state["retracted_completions"] = int(state.get("retracted_completions") or 0) + 1
 
@@ -555,8 +812,15 @@ async def _send_loop_async(
     sequence_start=0,
     *,
     sync_on_loop: bool,
+    pacer_mode: str = "in_loop",
+    pacer_sock=None,
 ):
-    """Native twin of ``_send_loop``: same offer contract, no thread crossing."""
+    """Native twin of ``_send_loop``: same offer contract, no thread crossing.
+
+    ``pacer_mode=in_loop`` keeps the historical ``asyncio.sleep`` calendar so it
+    remains the causal control. ``external`` waits on datagram tokens whose
+    schedule ran in another process.
+    """
     interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0
     open_loop = interval > 0
     next_send = time.perf_counter()
@@ -564,15 +828,42 @@ async def _send_loop_async(
     n_offered = 0
     n_missed = 0
     measure = state["phase"] == "measure"
+    recorder = state.get("pace_recorder") if measure else None
+    interval_ns = interval_ns_for_rate(target_rate) if open_loop else 0
+    token_index = 0
+    anchor_ns = time.perf_counter_ns()
+    external = open_loop and pacer_mode == "external" and pacer_sock is not None
     slot_free = asyncio.Event()
     state["slot_free"] = slot_free
+    loop = asyncio.get_running_loop()
     while time.perf_counter() < until:
-        if open_loop:
+        token = None
+        receiver_ns = 0
+        if external:
+            token = await _recv_token_async(loop, pacer_sock, until)
+            if token is None:
+                continue
+            receiver_ns = time.monotonic_ns()
+            if recorder is not None:
+                recorder.record_receiver(token, receiver_ns, None)
+            if len(state["inflight"]) >= outstanding:
+                if measure:
+                    n_offered += 1
+                    n_missed += 1
+                continue
+        elif open_loop:
             now = time.perf_counter()
             if now < next_send:
                 await asyncio.sleep(min(0.001, next_send - now))
                 continue
             next_send += interval
+            deadline_ns = anchor_ns + token_index * interval_ns
+            emission_ns = time.perf_counter_ns()
+            token = PaceToken(token_index, deadline_ns, emission_ns)
+            token_index += 1
+            receiver_ns = emission_ns
+            if recorder is not None:
+                recorder.record_receiver(token, receiver_ns, None)
             if len(state["inflight"]) >= outstanding:
                 if measure:
                     n_offered += 1
@@ -589,6 +880,9 @@ async def _send_loop_async(
         seq += 1
         send_ns = time.perf_counter_ns()
         payload = encode_header(run_id, 1, seq, seq, send_ns)
+        if recorder is not None and token is not None:
+            recorder.note_receiver_to_publish(receiver_ns, send_ns)
+        _reserve_trace(state, seq, token, receiver_ns, send_ns)
         with state["lock"]:
             state["publishing_seq"] = seq
             state["inflight"][seq] = send_ns
@@ -604,8 +898,10 @@ async def _send_loop_async(
                     if early is not None:
                         state["latencies_ns"].add(early)
                         state["completed_in_window"] += 1
+                        _commit_trace(state, seq, send_ns, send_ns + early)
             else:
                 state["inflight"].pop(seq, None)
+                _drop_trace(state, seq)
                 if early is not None and measure:
                     state["retracted_completions"] = int(state.get("retracted_completions") or 0) + 1
 

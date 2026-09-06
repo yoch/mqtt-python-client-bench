@@ -290,6 +290,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         variant_index=args.variant_index,
         broker=getattr(args, "broker", None),
         broker_pid=getattr(args, "broker_pid", None),
+        pacer_mode=getattr(args, "pacer_mode", None),
     )
     print(json.dumps({"verdict": payload.get("verdict"), "order": payload.get("order"), "points": len(payload.get("points") or [])}, indent=2))
     return 0
@@ -477,6 +478,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cmp_p.add_argument("--host-profile")
     cmp_p.add_argument("--output")
+    cmp_p.add_argument(
+        "--pacer-mode",
+        choices=["in_loop", "external"],
+        default="in_loop",
+        help=(
+            "Open-loop RTT offer calendar. in_loop is the historical asyncio "
+            "sleep on the SUT loop (causal control). external is a dedicated "
+            "process on the loadgen cpuset. Closed-loop capacity ignores this."
+        ),
+    )
     cmp_p.set_defaults(func=cmd_compare)
 
     report_p = sub.add_parser("report", help="Build static HTML reports from results/*.json")
