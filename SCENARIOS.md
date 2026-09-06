@@ -22,10 +22,12 @@ a QoS1 publish capacity and an RTT capacity are measured and stored under
   for **that client only**. `run compare` / `run matrix` refuse these points.
 - Matched-load (`shared_load_fraction`): `C_common = min(capacities)` across the
   clients in the run, then the same `target_rate = round(C_common × fraction)`
-  for every client. If the official capacity is null but the calibrate runs
-  still delivered a rate (typically `broker_headroom_low`), that rate is an
-  observed lower bound for `C_common` only — never a per-client
-  `load_fraction` ceiling. Without any delivered rate the point is inconclusive.
+  for every client. If the official capacity is null, only calibrate runs that
+  produced a rate and were voided *exclusively* by `broker_headroom_low` may
+  contribute an observed lower bound (stamped
+  `observed_lower_bound:broker_headroom_low`). A timeout, worker error,
+  host-state failure, or mixed reason list is refused. Without an admissible
+  run the point stays unresolved.
 
 Timing profiles (`PROFILE_SPECS`):
 
@@ -249,10 +251,10 @@ Mosquitto 2.1 is single-threaded: do not widen the broker cpuset.
   `C_common = min(client RTT capacities)`, then 25 / 50 / 75 / 90 % of that
   ceiling. Every client is offered the same absolute pair rate.
 - **Topology**: `application_rtt` · `shared_load_fraction` `0.25 / 0.50 / 0.75 / 0.90` · tag `dual_protocol`.
-- **Requires**: per-client RTT calibrations (official capacity, or an observed
-  lower bound when every calibrate run was voided by broker headroom). A
-  single shared `--load-profile` is refused. Pass `--load-profile-dir` to
-  `compare` so it does not re-calibrate.
+- **Requires**: per-client RTT calibrations (official capacity, or a
+  `broker_headroom_low`-only observed lower bound). A single shared
+  `--load-profile` is refused. Pass `--load-profile-dir` to `compare` so it
+  does not re-calibrate.
 - **Reading**: this is the scenario for comparing application RTT *between*
   clients. Homogeneous product loop (two instances of the same library).
   Distinct from `rtt_capacity_qos1` (ceiling) and `application_rtt_qos1`
