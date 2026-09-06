@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: smoke is non_comparable path proof; aa-validation rechecks A/A only; standard is the official campaign (do not run until A/A is neutral)
+        description: smoke is non_comparable path proof; aa-validation rechecks A/A only; pacer-causal compares in_loop vs external pacing (no ranking); standard is the official campaign (do not run until A/A is neutral)
         type: choice
-        options: [smoke, aa-validation, standard]
+        options: [smoke, aa-validation, pacer-causal, standard]
         default: smoke
 
 permissions:
@@ -22,7 +22,7 @@ jobs:
     runs-on: [self-hosted, linux, ARM64]
     timeout-minutes: 480
     env:
-      BENCH_SHA: 018cfc99159d4e740668d1a15434697b5914f32e
+      BENCH_SHA: db19a075b3ff6a6555027bd3e3fcf94aba26ab30
       MQTTIUM_VER: "1.0.0rc13"
       GMQTT_VER: "0.7.0"
       PAHO_VER: "2.1.0"
@@ -57,13 +57,22 @@ jobs:
             echo "AA_VARIANT_INDEXES=0,4" >> "$GITHUB_ENV"
             echo "AA_CONTROL_ENFORCE=1" >> "$GITHUB_ENV"
             echo "RUN_SYNC_REFERENCE_PAIR=0" >> "$GITHUB_ENV"
+          elif [ "$CAMPAIGN" = "pacer-causal" ]; then
+            echo "MATRIX_RUNS=1" >> "$GITHUB_ENV"
+            echo "RUN_LOAD_MATRIX=0" >> "$GITHUB_ENV"
+            echo "RUN_ABBA=0" >> "$GITHUB_ENV"
+            echo "RUN_AA=1" >> "$GITHUB_ENV"
+            echo "AA_BLOCKS=4" >> "$GITHUB_ENV"
+            echo "AA_VARIANT_INDEXES=0,4" >> "$GITHUB_ENV"
+            echo "AA_CONTROL_ENFORCE=0" >> "$GITHUB_ENV"
+            echo "RUN_SYNC_REFERENCE_PAIR=0" >> "$GITHUB_ENV"
           fi
 
       - name: Checkout exact benchmark harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: yoch/mqtt-python-client-bench
-          ref: 018cfc99159d4e740668d1a15434697b5914f32e
+          ref: db19a075b3ff6a6555027bd3e3fcf94aba26ab30
           path: bench
           persist-credentials: false
 
@@ -127,7 +136,9 @@ jobs:
             tests.test_unit.AbbaCounterbalanceTests \
             tests.test_unit.AaControlGateTests \
             tests.test_unit.CliDefaultsTests.test_compare_cli_accepts_external_broker \
-            tests.test_rtt_initiator
+            tests.test_rtt_initiator \
+            tests.test_pacing \
+            tests.test_temporal_trace
 
       - name: Calibrate ARM64 host identity and harness cost
         shell: bash
@@ -182,6 +193,8 @@ jobs:
           cd bench
           if [ "$CAMPAIGN" = "aa-validation" ]; then
             bash scripts/run_targeted_aa_validation.sh
+          elif [ "$CAMPAIGN" = "pacer-causal" ]; then
+            bash scripts/run_pacer_causal_aa.sh
           else
             bash scripts/run_pairwise_rtt_campaign.sh
           fi
