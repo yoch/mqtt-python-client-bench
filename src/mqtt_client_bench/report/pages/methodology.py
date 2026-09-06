@@ -130,11 +130,14 @@ _LIMITS = """
           Bridged historical RTT is not evidence of a native ranking.
           Read <code>publish_path</code> for the measured RTT path;
           <code>io_model</code> is the adapter class.</li>
-          <li>Official ABBA / A/A alternates ABBA and BAAB. The centre is a
-          geometric mean of the two designs so a slot effect that maps to
+          <li>Official ABBA / A/A alternates ABBA and BAAB. Consecutive
+          complementary blocks are one experimental unit in the log domain;
+          the centre is their geometric mean so a slot effect that maps to
           <code>r</code> and <code>1/r</code> does not become a client
-          improvement. Same-client A/A is fail-closed at 3&nbsp;% and a CI
-          compatible with ratio 1. 90&nbsp;% of closed-loop RTT capacity is
+          improvement. A CI needs at least two units (four blocks).
+          Same-client A/A is fail-closed at 3&nbsp;%, a CI that contains
+          ratio 1, both designs, and complete requested blocks, and it runs
+          before any A/B ranking. 90&nbsp;% of closed-loop RTT capacity is
           not assumed to be a sustainable open-loop offer;
           <code>MATCHED_LOAD_BACKPRESSURE_MAX</code> stays 0.2&nbsp;%.</li>
           <li>The ARM three-way grid that sized <code>C_common</code> with Paho

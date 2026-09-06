@@ -10,9 +10,9 @@ matched-load / ABBA machinery can be exercised. They never size an official
 ``C_common``.
 
 Same-client A/A is a fail-closed publication gate, not a decorative verdict.
-A non-neutral control (absolute effect above 3 %, or a CI that excludes
-ratio 1) blocks the official ranking even when the compare itself says
-``inconclusive``.
+Capacity, then A/A, then enforce. Ranking ABBA A/B runs only after the
+control passes. A missing CI, a single complementary pair, or an
+incomplete block all fail closed.
 """
 
 from __future__ import annotations
@@ -308,19 +308,33 @@ def _pair_common_capacities(all_caps: dict, clients: list[str] | tuple[str, ...]
 # (representative load). expand_scenario crosses fraction then protocol.
 OFFICIAL_AA_VARIANT_INDEXES = (0, 4)
 AA_CONTROL_MAX_ABS_EFFECT_PCT = 3.0
+MIN_AA_BLOCKS = 4
+MIN_AA_REPLICATIONS_PER_DESIGN = 2
+
+
+def _design_counts(designs: list) -> dict:
+    counts = {"ABBA": 0, "BAAB": 0}
+    for design in designs:
+        key = str(design) if design else ""
+        if key in counts:
+            counts[key] += 1
+    return counts
 
 
 def evaluate_aa_control(
     doc: dict,
     *,
     max_abs_effect_pct: float = AA_CONTROL_MAX_ABS_EFFECT_PCT,
+    min_blocks: int = MIN_AA_BLOCKS,
+    min_replications_per_design: int = MIN_AA_REPLICATIONS_PER_DESIGN,
 ) -> dict:
     """Fail-closed gate for a same-client compare document.
 
-    Pass requires every point to have at least one complete block, an
-    absolute effect at most ``max_abs_effect_pct``, and a CI compatible
-    with ratio 1 (``excludes_zero_effect`` is false). A huge effect with a
-    wide CI that happens to include 1 still fails.
+    Pass requires every requested block to be complete, both designs
+    present with at least ``min_replications_per_design`` each, a real
+    CI that contains ratio 1, and an absolute effect at most
+    ``max_abs_effect_pct``. A missing CI is a failure, never a silent
+    ``excludes_zero_effect=false``.
     """
     baseline = doc.get("baseline_client")
     candidate = doc.get("candidate_client")
@@ -334,21 +348,40 @@ def evaluate_aa_control(
             "target_rate": point.get("target_rate"),
         }
     first = (points[0].get("verdict") or {}) if points else {}
+    order = list(doc.get("order") or (points[0].get("order") if points else []) or [])
+    requested = doc.get("blocks_requested")
+    if requested is None and order:
+        requested = len(order) // 4
+    complete = int(first.get("n_blocks") or 0) if points else 0
+    designs = list(first.get("block_designs") or [])
+    counts = _design_counts(designs)
+    ci_low = first.get("ci_low") if points else None
+    ci_high = first.get("ci_high") if points else None
+    explicit_ci = first.get("ci_available") if points else None
+    if explicit_ci is False:
+        ci_available = False
+    else:
+        ci_available = ci_low is not None and ci_high is not None
     payload = {
         "aa_control_pass": False,
         "aa_control_reason": None,
         "aa_absolute_effect_pct": first.get("absolute_effect_pct") if points else None,
         "aa_ci": {
-            "ci_low": first.get("ci_low"),
-            "ci_high": first.get("ci_high"),
+            "ci_low": ci_low,
+            "ci_high": ci_high,
             "excludes_zero_effect": first.get("excludes_zero_effect"),
             "median_ratio": first.get("median_ratio"),
+            "ci_available": ci_available,
         }
         if points
         else None,
         "aa_variant": variant,
-        "aa_n_blocks": first.get("n_blocks") if points else 0,
-        "aa_designs": list(first.get("block_designs") or []),
+        "aa_n_blocks": complete,
+        "aa_designs": designs,
+        "aa_blocks_requested": requested,
+        "aa_blocks_complete": complete,
+        "aa_design_counts": counts,
+        "aa_ci_available": ci_available,
     }
     if baseline != candidate:
         payload["aa_control_pass"] = None
@@ -362,19 +395,48 @@ def evaluate_aa_control(
         verdict = block.get("verdict") or {}
         n_blocks = int(verdict.get("n_blocks") or 0)
         effect = verdict.get("absolute_effect_pct")
-        excludes = bool(verdict.get("excludes_zero_effect"))
-        if n_blocks < 1:
-            reasons.append(f"point{index}:no_complete_blocks")
-            continue
+        point_designs = list(verdict.get("block_designs") or [])
+        point_counts = _design_counts(point_designs)
+        point_requested = requested
+        point_order = list(block.get("order") or order)
+        if point_requested is None and point_order:
+            point_requested = len(point_order) // 4
+        point_ci_low = verdict.get("ci_low")
+        point_ci_high = verdict.get("ci_high")
+        point_ci_available = verdict.get("ci_available")
+        if point_ci_available is None:
+            point_ci_available = point_ci_low is not None and point_ci_high is not None
+        if point_ci_available is False or point_ci_low is None or point_ci_high is None:
+            point_ci_available = False
+        if point_requested is not None and n_blocks != int(point_requested):
+            reasons.append(
+                f"point{index}:incomplete_blocks:{n_blocks}/{point_requested}"
+            )
+        if n_blocks < min_blocks:
+            reasons.append(f"point{index}:insufficient_blocks:{n_blocks}/{min_blocks}")
+        if point_counts["ABBA"] < 1 or point_counts["BAAB"] < 1:
+            reasons.append(
+                f"point{index}:missing_design:ABBA={point_counts['ABBA']},BAAB={point_counts['BAAB']}"
+            )
+        if (
+            point_counts["ABBA"] < min_replications_per_design
+            or point_counts["BAAB"] < min_replications_per_design
+        ):
+            reasons.append(
+                f"point{index}:insufficient_replication:"
+                f"ABBA={point_counts['ABBA']},BAAB={point_counts['BAAB']}"
+            )
+        if not point_ci_available:
+            reasons.append(f"point{index}:ci_unavailable")
+        else:
+            if not (float(point_ci_low) <= 0.0 <= float(point_ci_high)):
+                reasons.append(f"point{index}:ci_excludes_zero")
         if effect is None:
             reasons.append(f"point{index}:missing_effect")
-            continue
-        if abs(float(effect)) > max_abs_effect_pct:
+        elif abs(float(effect)) > max_abs_effect_pct:
             reasons.append(
                 f"point{index}:abs_effect_{float(effect):.4f}_exceeds_{max_abs_effect_pct}"
             )
-        if excludes:
-            reasons.append(f"point{index}:ci_excludes_zero")
     if reasons:
         payload["aa_control_pass"] = False
         payload["aa_control_reason"] = ";".join(reasons)

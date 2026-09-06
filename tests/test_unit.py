@@ -72,6 +72,7 @@ from mqtt_client_bench.metrics import (  # noqa: E402
     abba_order,
     abba_position_counts,
     balanced_geometric_ratio,
+    complementary_pair_units,
     compare_verdict,
     compare_verdict_from_block_ratios,
     comparison_spec,
@@ -150,23 +151,25 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(counts["A"]["inner"], counts["A"]["outer"])
 
     def test_abba_block_ratios_deterministic(self):
-        order = abba_order(2)
+        order = abba_order(4)
         # A=100, B=110 regardless of slot, so both designs yield 1.1
         rates = [110.0 if label == "B" else 100.0 for label in order]
         ratios = abba_block_ratios(order, rates)
-        self.assertEqual(ratios, [1.1, 1.1])
+        self.assertEqual(ratios, [1.1, 1.1, 1.1, 1.1])
         records = abba_block_records(order, rates)
-        self.assertEqual([rec["design"] for rec in records], ["ABBA", "BAAB"])
+        self.assertEqual([rec["design"] for rec in records], ["ABBA", "BAAB", "ABBA", "BAAB"])
         verdict = compare_verdict_from_block_ratios(
             ratios, min_effect_pct=3.0, seed=1, designs=[rec["design"] for rec in records]
         )
         self.assertEqual(verdict["verdict"], "improvement")
         self.assertEqual(verdict["comparison_direction"], HIGHER_IS_BETTER)
-        self.assertEqual(verdict["estimator"], "balanced_geometric_mean")
+        self.assertEqual(verdict["estimator"], "complementary_pair_geometric_mean")
+        self.assertEqual(verdict["n_pair_units"], 2)
+        self.assertTrue(verdict["ci_available"])
         # Incomplete block with None is dropped.
         incomplete = list(rates)
         incomplete[1] = None
-        self.assertEqual(abba_block_ratios(order, incomplete), [1.1])
+        self.assertEqual(abba_block_ratios(order, incomplete), [1.1, 1.1, 1.1])
 
     def test_application_rtt_compare_uses_latency_p50_lower_is_better(self):
         spec = comparison_spec("application_rtt_fixed_rate")
@@ -4681,15 +4684,16 @@ class AbbaCounterbalanceTests(unittest.TestCase):
         self.assertEqual([rec["ratio"] for rec in records], [2.0, 2.0])
 
     def test_pure_slot_effect_has_no_client_effect(self):
-        order = abba_order(2)
+        order = abba_order(4)
         values = self._values(order, outer=0.40, inner=0.24, b_scale=1.0)
         records = abba_block_records(order, values)
         ratios = [rec["ratio"] for rec in records]
         designs = [rec["design"] for rec in records]
         self.assertAlmostEqual(ratios[0], 0.24 / 0.40)
         self.assertAlmostEqual(ratios[1], 0.40 / 0.24)
-        centre = balanced_geometric_ratio(ratios, designs)
-        self.assertAlmostEqual(centre, 1.0)
+        units = complementary_pair_units(ratios, designs)
+        self.assertEqual(len(units), 2)
+        self.assertAlmostEqual(geometric_mean(units), 1.0)
         verdict = compare_verdict_from_block_ratios(
             ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
         )
@@ -4697,9 +4701,32 @@ class AbbaCounterbalanceTests(unittest.TestCase):
         self.assertAlmostEqual(verdict["median_ratio"], 1.0)
         self.assertAlmostEqual(verdict["geometric_ratio"], 1.0)
         self.assertLess(abs(verdict["absolute_effect_pct"]), 0.01)
+        self.assertTrue(verdict["ci_available"])
         self.assertFalse(verdict["excludes_zero_effect"])
+        self.assertLessEqual(verdict["ci_low"], 0.0)
+        self.assertGreaterEqual(verdict["ci_high"], 0.0)
 
-    def test_odd_blocks_two_stage_mean_still_recentres(self):
+    def test_two_block_nearly_neutral_bootstrap_is_degenerate(self):
+        ratios = [0.99, 1.02]
+        designs = ["ABBA", "BAAB"]
+        units = complementary_pair_units(ratios, designs)
+        self.assertEqual(len(units), 1)
+        centre = geometric_mean(units)
+        self.assertAlmostEqual(centre, (0.99 * 1.02) ** 0.5, places=12)
+        naive_effect = (centre - 1.0) * 100.0
+        self.assertAlmostEqual(naive_effect, 0.489, places=3)
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertEqual(verdict["n_pair_units"], 1)
+        self.assertFalse(verdict["ci_available"])
+        self.assertIsNone(verdict["ci_low"])
+        self.assertIsNone(verdict["ci_high"])
+        self.assertFalse(verdict["excludes_zero_effect"])
+        self.assertEqual(verdict["verdict"], "inconclusive")
+        self.assertAlmostEqual(verdict["absolute_effect_pct"], naive_effect, places=5)
+
+    def test_odd_blocks_pair_unit_recentres_without_a_ci(self):
         order = abba_order(3)
         values = self._values(order, outer=0.40, inner=0.24)
         records = abba_block_records(order, values)
@@ -4708,16 +4735,18 @@ class AbbaCounterbalanceTests(unittest.TestCase):
         self.assertEqual(designs, ["ABBA", "BAAB", "ABBA"])
         arithmetic = median(ratios)
         self.assertLess(arithmetic, 0.7)
-        centre = balanced_geometric_ratio(ratios, designs)
-        self.assertAlmostEqual(centre, 1.0)
+        units = complementary_pair_units(ratios, designs)
+        self.assertEqual(len(units), 1)
+        self.assertAlmostEqual(units[0], 1.0)
         verdict = compare_verdict_from_block_ratios(
             ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
         )
         self.assertEqual(verdict["verdict"], "inconclusive")
         self.assertAlmostEqual(verdict["median_ratio"], 1.0)
+        self.assertFalse(verdict["ci_available"])
 
     def test_true_plus_10_percent_client_latency_is_regression(self):
-        order = abba_order(2)
+        order = abba_order(4)
         values = self._values(order, outer=0.40, inner=0.24, b_scale=1.10)
         records = abba_block_records(order, values)
         ratios = [rec["ratio"] for rec in records]
@@ -4728,9 +4757,10 @@ class AbbaCounterbalanceTests(unittest.TestCase):
         self.assertAlmostEqual(verdict["median_ratio"], 1.10, places=5)
         self.assertEqual(verdict["verdict"], "regression")
         self.assertGreater(verdict["absolute_effect_pct"], 9.0)
+        self.assertTrue(verdict["ci_available"])
 
     def test_true_minus_10_percent_client_latency_is_improvement(self):
-        order = abba_order(2)
+        order = abba_order(4)
         values = self._values(order, outer=0.40, inner=0.24, b_scale=0.90)
         records = abba_block_records(order, values)
         ratios = [rec["ratio"] for rec in records]
@@ -4741,6 +4771,7 @@ class AbbaCounterbalanceTests(unittest.TestCase):
         self.assertAlmostEqual(verdict["median_ratio"], 0.90, places=5)
         self.assertEqual(verdict["verdict"], "improvement")
         self.assertLess(verdict["absolute_effect_pct"], -9.0)
+        self.assertTrue(verdict["ci_available"])
 
     def test_log_domain_is_symmetric_under_inversion(self):
         ratios = [0.6, 1.0 / 0.6]
@@ -4760,7 +4791,8 @@ class AbbaCounterbalanceTests(unittest.TestCase):
             designs=[rec["design"] for rec in records],
         )
         self.assertAlmostEqual(verdict["median_ratio"], 0.6)
-        self.assertEqual(verdict["verdict"], "improvement")
+        self.assertFalse(verdict["ci_available"])
+        self.assertEqual(verdict["verdict"], "inconclusive")
 
     def test_official_aa_indexes_are_25_and_75_v311(self):
         points = expand_scenario(SCENARIO_BY_NAME["application_rtt_fixed_rate"], "standard")
@@ -4771,7 +4803,7 @@ class AbbaCounterbalanceTests(unittest.TestCase):
         self.assertEqual(points[4]["protocol"], "MQTTv311")
         targeted = (ROOT / "scripts/run_targeted_aa_validation.sh").read_text()
         self.assertIn('AA_VARIANT_INDEXES="${AA_VARIANT_INDEXES:-0,4}"', targeted)
-        self.assertIn('AA_BLOCKS="${AA_BLOCKS:-2}"', targeted)
+        self.assertIn('AA_BLOCKS="${AA_BLOCKS:-4}"', targeted)
         self.assertIn('AA_CONTROL_ENFORCE="${AA_CONTROL_ENFORCE:-1}"', targeted)
         self.assertIn("RUN_SYNC_REFERENCE_PAIR", targeted)
 
@@ -5066,8 +5098,18 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertIn('assert version("gmqtt") == "0.7.0"', official)
         self.assertIn('assert version("paho-mqtt") == "2.1.0"', official)
         self.assertIn('mqttium==${MQTTIUM_VER}', official)
-        self.assertIn('run_pair "mqttium,gmqtt"', official)
-        self.assertIn('run_pair "mqttium,paho"', official)
+        self.assertIn('run_capacity "mqttium,gmqtt"', official)
+        self.assertIn('run_capacity "mqttium,paho"', official)
+        self.assertIn('run_aa "mqttium,gmqtt"', official)
+        self.assertIn("AA_GATE_PASSED", official)
+        self.assertLess(
+            official.find('run_aa "mqttium,gmqtt"'),
+            official.find('run_ranking "mqttium,gmqtt"'),
+        )
+        self.assertLess(
+            official.find("AA_GATE_PASSED"),
+            official.find('run_ranking "mqttium,gmqtt"'),
+        )
         self.assertNotIn("--clients mqttium,gmqtt,paho", official)
         self.assertIn('--clients "$pair"', official)
         self.assertIn("write_official_rtt_calibrations", official)
@@ -5095,7 +5137,7 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertIn("aa-validation", workflow)
         self.assertIn("run_targeted_aa_validation.sh", workflow)
         self.assertIn("AA_CONTROL_ENFORCE=1", workflow)
-        self.assertIn("AA_BLOCKS=2", workflow)
+        self.assertIn("AA_BLOCKS=4", workflow)
         self.assertIn("BENCH_BROKER_PID", workflow)
         self.assertIn("echo \"BENCH_BROKER_PID=$pid\"", workflow)
         official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
@@ -5403,16 +5445,39 @@ class AaControlGateTests(unittest.TestCase):
         same_client=True,
         effect_pct=-39.52,
         excludes_zero=True,
-        n_blocks=1,
+        n_blocks=4,
         fraction=0.25,
         protocol="MQTTv311",
         ratio=None,
+        designs=None,
+        ci_low=None,
+        ci_high=None,
+        ci_available=None,
+        blocks_requested=None,
+        order=None,
     ):
         if ratio is None:
             ratio = 1.0 + (effect_pct / 100.0)
+        if designs is None:
+            designs = ["ABBA", "BAAB", "ABBA", "BAAB"][:n_blocks]
+        if ci_low is None and ci_high is None and ci_available is not False:
+            if excludes_zero:
+                ci_low, ci_high = -0.41, -0.38
+            else:
+                ci_low, ci_high = -0.02, 0.02
+        if ci_available is None:
+            ci_available = ci_low is not None and ci_high is not None
+        if ci_available is False:
+            ci_low, ci_high = None, None
+        if order is None:
+            order = abba_order(n_blocks) if n_blocks else []
+        if blocks_requested is None:
+            blocks_requested = n_blocks
         return {
             "baseline_client": "mqttium",
             "candidate_client": "mqttium" if same_client else "gmqtt",
+            "blocks_requested": blocks_requested,
+            "order": order,
             "points": [
                 {
                     "point": {
@@ -5420,15 +5485,17 @@ class AaControlGateTests(unittest.TestCase):
                         "protocol": protocol,
                         "target_rate": 3889,
                     },
+                    "order": order,
                     "verdict": {
                         "verdict": "improvement" if excludes_zero else "inconclusive",
                         "median_ratio": ratio,
-                        "ci_low": -0.41 if excludes_zero else -0.02,
-                        "ci_high": -0.38 if excludes_zero else 0.02,
-                        "excludes_zero_effect": excludes_zero,
+                        "ci_low": ci_low,
+                        "ci_high": ci_high,
+                        "ci_available": ci_available,
+                        "excludes_zero_effect": bool(excludes_zero and ci_available),
                         "absolute_effect_pct": effect_pct,
                         "n_blocks": n_blocks,
-                        "block_designs": ["ABBA"] if n_blocks == 1 else ["ABBA", "BAAB"],
+                        "block_designs": designs,
                     },
                 }
             ],
@@ -5444,17 +5511,141 @@ class AaControlGateTests(unittest.TestCase):
 
     def test_huge_effect_with_wide_ci_still_fails(self):
         control = evaluate_aa_control(
-            self._compare_doc(effect_pct=-39.52, excludes_zero=False, ratio=0.60)
+            self._compare_doc(
+                effect_pct=-39.52,
+                excludes_zero=False,
+                ratio=0.60,
+                ci_low=-0.50,
+                ci_high=0.02,
+            )
         )
         self.assertIs(control["aa_control_pass"], False)
         self.assertIn("abs_effect", control["aa_control_reason"])
+
+    def test_two_blocks_one_obs_per_design_is_insufficient_replication(self):
+        ratios = [0.99, 1.02]
+        designs = ["ABBA", "BAAB"]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        doc = self._compare_doc(
+            n_blocks=2,
+            designs=designs,
+            ratio=verdict["median_ratio"],
+            effect_pct=verdict["absolute_effect_pct"],
+            ci_available=False,
+            excludes_zero=False,
+            order=abba_order(2),
+        )
+        doc["points"][0]["verdict"] = verdict
+        control = evaluate_aa_control(doc)
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("insufficient_replication", control["aa_control_reason"])
+        self.assertFalse(control["aa_ci_available"])
+        self.assertEqual(control["aa_design_counts"]["ABBA"], 1)
+        self.assertEqual(control["aa_design_counts"]["BAAB"], 1)
+        self.assertEqual(control["aa_blocks_requested"], 2)
+        self.assertEqual(control["aa_blocks_complete"], 2)
+
+    def test_abba_only_design_fails(self):
+        control = evaluate_aa_control(
+            self._compare_doc(
+                n_blocks=4,
+                designs=["ABBA", "ABBA", "ABBA", "ABBA"],
+                excludes_zero=False,
+                effect_pct=0.4,
+            )
+        )
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("missing_design", control["aa_control_reason"])
+
+    def test_missing_ci_fails(self):
+        control = evaluate_aa_control(
+            self._compare_doc(
+                n_blocks=4,
+                excludes_zero=False,
+                effect_pct=0.4,
+                ci_available=False,
+            )
+        )
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("ci_unavailable", control["aa_control_reason"])
+        self.assertFalse(control["aa_ci_available"])
+
+    def test_incomplete_block_fails(self):
+        control = evaluate_aa_control(
+            self._compare_doc(
+                n_blocks=3,
+                blocks_requested=4,
+                designs=["ABBA", "BAAB", "ABBA"],
+                excludes_zero=False,
+                effect_pct=0.2,
+                ci_available=False,
+            )
+        )
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("incomplete_blocks:3/4", control["aa_control_reason"])
+
+    def test_four_noisy_neutral_blocks_pass(self):
+        ratios = [0.97, 1.03, 1.00, 1.01]
+        designs = ["ABBA", "BAAB", "ABBA", "BAAB"]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertTrue(verdict["ci_available"])
+        self.assertLessEqual(verdict["ci_low"], 0.0)
+        self.assertGreaterEqual(verdict["ci_high"], 0.0)
+        self.assertLess(abs(verdict["absolute_effect_pct"]), 3.0)
+        doc = self._compare_doc(
+            n_blocks=4,
+            designs=designs,
+            ratio=verdict["median_ratio"],
+            effect_pct=verdict["absolute_effect_pct"],
+            ci_low=verdict["ci_low"],
+            ci_high=verdict["ci_high"],
+            ci_available=True,
+            excludes_zero=False,
+        )
+        doc["points"][0]["verdict"] = {**verdict, "block_designs": designs}
+        control = evaluate_aa_control(doc)
+        self.assertIs(control["aa_control_pass"], True)
+        self.assertEqual(control["aa_control_reason"], "neutral")
+        self.assertEqual(control["aa_blocks_requested"], 4)
+        self.assertEqual(control["aa_blocks_complete"], 4)
+        self.assertTrue(control["aa_ci_available"])
+
+    def test_four_blocks_with_real_effect_fail(self):
+        ratios = [1.10, 1.09, 1.12, 1.11]
+        designs = ["ABBA", "BAAB", "ABBA", "BAAB"]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertTrue(verdict["ci_available"])
+        self.assertGreater(abs(verdict["absolute_effect_pct"]), 3.0)
+        doc = self._compare_doc(
+            n_blocks=4,
+            designs=designs,
+            ratio=verdict["median_ratio"],
+            effect_pct=verdict["absolute_effect_pct"],
+            ci_low=verdict["ci_low"],
+            ci_high=verdict["ci_high"],
+            ci_available=True,
+            excludes_zero=verdict["excludes_zero_effect"],
+        )
+        doc["points"][0]["verdict"] = {**verdict, "block_designs": designs}
+        control = evaluate_aa_control(doc)
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertTrue(
+            "abs_effect" in control["aa_control_reason"]
+            or "ci_excludes_zero" in control["aa_control_reason"]
+        )
 
     def test_neutral_aa_allows_continuation(self):
         control = evaluate_aa_control(
             self._compare_doc(
                 effect_pct=-0.16,
                 excludes_zero=False,
-                n_blocks=2,
+                n_blocks=4,
                 ratio=0.9984,
             )
         )
@@ -5463,7 +5654,14 @@ class AaControlGateTests(unittest.TestCase):
 
     def test_ci_excluding_zero_fails_even_if_effect_is_small(self):
         control = evaluate_aa_control(
-            self._compare_doc(effect_pct=2.0, excludes_zero=True, n_blocks=6, ratio=1.02)
+            self._compare_doc(
+                effect_pct=2.0,
+                excludes_zero=True,
+                n_blocks=6,
+                ratio=1.02,
+                ci_low=0.01,
+                ci_high=0.03,
+            )
         )
         self.assertIs(control["aa_control_pass"], False)
         self.assertIn("ci_excludes_zero", control["aa_control_reason"])
@@ -5494,7 +5692,7 @@ class AaControlGateTests(unittest.TestCase):
                     self._compare_doc(
                         effect_pct=0.4,
                         excludes_zero=False,
-                        n_blocks=2,
+                        n_blocks=4,
                         ratio=1.004,
                     )
                 )
@@ -5515,6 +5713,7 @@ class AaControlGateTests(unittest.TestCase):
         self.assertIn("0,4", official)
         self.assertIn("AA_VARIANT_INDEXES", official)
         self.assertIn("enforce_aa_controls", official)
+        self.assertIn("AA_GATE_PASSED", official)
         workflow = (ROOT / "scripts/github/benchmark-matched-load-arm64.yml").read_text()
         self.assertIn("AbbaCounterbalanceTests", workflow)
         self.assertIn("AaControlGateTests", workflow)
