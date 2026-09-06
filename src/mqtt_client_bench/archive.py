@@ -29,6 +29,18 @@ from mqtt_client_bench.metrics import latency_summary
 RAW_SAMPLE_KEYS = ("latencies_ns", "scheduler_lags_ns", "sequences", "sent_sequences")
 
 ARCHIVED_KEY = "raw_samples_archived"
+_TRACE_META_KEYS = (
+    "kind",
+    "metric",
+    "stride",
+    "max_points",
+    "count",
+    "seen",
+    "reserved",
+    "invalid",
+    "memory_bytes",
+    "columns",
+)
 
 
 def _slim_in_place(node) -> Dict[str, int]:
@@ -48,6 +60,16 @@ def _slim_in_place(node) -> Dict[str, int]:
             node[ARCHIVED_KEY] = counts
             for key, n in counts.items():
                 dropped[key] = dropped.get(key, 0) + n
+        trace = node.get("temporal_trace")
+        if (
+            isinstance(trace, dict)
+            and isinstance(trace.get("sequence"), list)
+            and not trace.get("arrays_archived")
+        ):
+            retained = int(trace.get("count") or 0)
+            node["temporal_trace"] = {k: trace[k] for k in _TRACE_META_KEYS if k in trace}
+            node["temporal_trace"]["arrays_archived"] = True
+            dropped["temporal_trace"] = dropped.get("temporal_trace", 0) + retained
         for value in node.values():
             for key, n in _slim_in_place(value).items():
                 dropped[key] = dropped.get(key, 0) + n
@@ -114,3 +136,219 @@ def archive_results(
     report["files"] = len(report["archived"])
     report["saved_bytes"] = report["bytes_before"] - report["bytes_after"]
     return report
+
+
+def _initiator_worker(run: dict) -> dict:
+    for worker in run.get("workers") or []:
+        if worker.get("role") in ("rtt_initiator", "publisher"):
+            return worker
+    return {}
+
+
+def _responder_worker(run: dict) -> dict:
+    for worker in run.get("workers") or []:
+        if worker.get("role") == "responder":
+            return worker
+    return {}
+
+
+def extract_run_row(run: dict, *, document: dict | None = None) -> dict:
+    """One reviewable row per run: enough to rebuild medians, ABBA and A/A.
+
+    Raw sample vectors stay out. Percentiles come from ``latency_summary``,
+    which ``slim_document`` derives before dropping ``latencies_ns``.
+    """
+    doc = document or {}
+    worker = _initiator_worker(run)
+    latency = worker.get("latency_summary") or {}
+    point = run.get("point") or {}
+    offered = worker.get("offered")
+    submitted = worker.get("submitted")
+    if submitted is None:
+        submitted = worker.get("sent_in_window")
+    completed = worker.get("completed_in_window")
+    completion = worker.get("completion")
+    if completion is None and offered and completed is not None:
+        completion = completed / float(offered)
+    host = run.get("host_profile") or {}
+    env = run.get("environment") or {}
+    identity = worker or doc.get("client_identity") or {}
+    responder = _responder_worker(run)
+    return {
+        "client": run.get("client") or doc.get("client"),
+        "client_version": identity.get("client_version"),
+        "adapter": identity.get("adapter"),
+        "harness_fingerprint": run.get("harness_fingerprint") or doc.get("harness_fingerprint"),
+        "harness_git_sha": run.get("harness_git_sha") or doc.get("harness_git_sha"),
+        "host_fingerprint": host.get("fingerprint"),
+        "host_role": host.get("role"),
+        "machine": env.get("machine"),
+        "architecture": env.get("machine"),
+        "python": env.get("python"),
+        "broker_version": (
+            (run.get("broker") or {}).get("version")
+            or (doc.get("broker") or {}).get("version")
+            or ((run.get("sys_counters") or {}).get("broker") or {}).get("version")
+        ),
+        "scaling_governor": env.get("scaling_governor") or (run.get("host_state") or {}).get("scaling_governor"),
+        "scenario": point.get("scenario") or doc.get("scenario"),
+        "protocol": point.get("protocol") or run.get("protocol_effective"),
+        "shared_load_fraction": point.get("shared_load_fraction"),
+        "target_rate": point.get("target_rate"),
+        "C_common": point.get("shared_capacity_msgs_per_s"),
+        "run_id": run.get("run_id"),
+        "run_index": run.get("run_index"),
+        "matrix_slot": run.get("matrix_slot"),
+        "matrix_rotation": run.get("matrix_rotation"),
+        "ab_label": run.get("ab_label"),
+        "slot": run.get("slot"),
+        "order": run.get("order") or doc.get("order"),
+        "status": run.get("status"),
+        "reasons": list(run.get("reasons") or []),
+        "primary_msgs_per_s": run.get("primary_msgs_per_s"),
+        "p50_ms": latency.get("p50_ms"),
+        "p95_ms": latency.get("p95_ms"),
+        "p99_ms": latency.get("p99_ms"),
+        "offered": offered,
+        "submitted": submitted,
+        "completed": completed,
+        "completion": completion,
+        "missed_due_to_backpressure": worker.get("missed_due_to_backpressure"),
+        "backlog_at_end": worker.get("backlog_at_end") if worker.get("backlog_at_end") is not None else worker.get("timeouts"),
+        "publish_path": run.get("publish_path") or worker.get("publish_path"),
+        "native_async": run.get("native_async") if run.get("native_async") is not None else worker.get("native_async"),
+        "io_model": identity.get("io_model"),
+        "completion_mechanism": identity.get("completion_mechanism"),
+        "comparison_metric": run.get("comparison_metric") or doc.get("comparison_metric"),
+        "comparison_direction": run.get("comparison_direction") or doc.get("comparison_direction"),
+        "comparison_value": run.get("comparison_value"),
+        "managed_broker": run.get("managed_broker"),
+        "external_broker_pid": run.get("external_broker_pid"),
+        "broker_cpu_max_pct": run.get("broker_cpu_max_pct"),
+        "broker_telemetry_available": run.get("broker_telemetry_available"),
+        "broker_telemetry_source": run.get("broker_telemetry_source"),
+        "requests_received": responder.get("requests_received"),
+        "responses": responder.get("responses"),
+        "echo_refused": responder.get("echo_refused"),
+        "echo_errors": responder.get("echo_errors"),
+        "pending_at_end": responder.get("pending_at_end"),
+        "echo_unaccounted": responder.get("echo_unaccounted"),
+        "runtime_measure_delta": (worker.get("runtime") or {}).get("measure_delta"),
+        "library_effects": ((worker.get("runtime") or {}).get("library") or {}).get("effects"),
+        "library_writer": ((worker.get("runtime") or {}).get("library") or {}).get("writer"),
+        "non_comparable": run.get("non_comparable"),
+        "pacer_mode": point.get("pacer_mode") or run.get("pacer_mode") or (run.get("pacing") or {}).get("mode"),
+        "pacing_stimulus_valid": (run.get("pacing") or (worker.get("pacing") or {})).get("stimulus_valid"),
+        "temporal_trace_count": ((worker.get("temporal_trace") or run.get("temporal_trace") or {}).get("count")),
+    }
+
+
+def extract_run_rows(doc: dict) -> list:
+    """Flatten a scenario or compare document into persistable per-run rows."""
+    rows = []
+    blocks = list(doc.get("results") or [])
+    if not blocks and doc.get("points"):
+        blocks = list(doc.get("points") or [])
+    if not blocks and doc.get("runs"):
+        blocks = [{"point": doc.get("point") or {}, "runs": doc.get("runs")}]
+    for block in blocks:
+        point = block.get("point") or {}
+        for run in block.get("runs") or []:
+            merged = dict(run)
+            merged.setdefault("point", point)
+            if block.get("order") and not merged.get("order"):
+                merged["order"] = block["order"]
+            rows.append(extract_run_row(merged, document=doc))
+    return rows
+
+
+def _compare_publish_path(doc: dict, block: dict, role: str) -> str | None:
+    """RTT path for baseline/candidate: identity first, then the compare runs."""
+    ident = doc.get(f"{role}_identity") or {}
+    if ident.get("publish_path"):
+        return ident.get("publish_path")
+    if ident.get("rtt_publish_path"):
+        return ident.get("rtt_publish_path")
+    client = doc.get(f"{role}_client")
+    for run in block.get("runs") or []:
+        if client is not None and run.get("client") != client:
+            continue
+        run_ident = run.get("client_identity") or {}
+        path = run_ident.get("publish_path") or run.get("publish_path")
+        if path:
+            return path
+        if client is None:
+            break
+    return None
+
+
+def extract_compare_summaries(doc: dict) -> list:
+    """Persist ABBA / A/A verdicts without raw samples."""
+    if doc.get("baseline_client") is None or not doc.get("points"):
+        return []
+    summaries = []
+    for block in doc.get("points") or []:
+        verdict = block.get("verdict") or {}
+        point = block.get("point") or {}
+        summaries.append(
+            {
+                "kind": "compare_point",
+                "scenario": doc.get("scenario"),
+                "baseline_client": doc.get("baseline_client"),
+                "candidate_client": doc.get("candidate_client"),
+                "protocol": point.get("protocol"),
+                "shared_load_fraction": point.get("shared_load_fraction"),
+                "target_rate": point.get("target_rate"),
+                "C_common": point.get("shared_capacity_msgs_per_s"),
+                "order": block.get("order") or doc.get("order"),
+                "n_blocks": verdict.get("n_blocks"),
+                "block_ratios": verdict.get("block_ratios") or block.get("block_ratios"),
+                "block_designs": verdict.get("block_designs") or block.get("block_designs"),
+                "median_ratio": verdict.get("median_ratio"),
+                "geometric_ratio": verdict.get("geometric_ratio") or verdict.get("median_ratio"),
+                "estimator": verdict.get("estimator"),
+                "ci_low": verdict.get("ci_low"),
+                "ci_high": verdict.get("ci_high"),
+                "absolute_effect_pct": verdict.get("absolute_effect_pct"),
+                "excludes_zero_effect": verdict.get("excludes_zero_effect"),
+                "verdict": verdict.get("verdict"),
+                "n_valid_baseline": len(block.get("baseline_rates") or []),
+                "n_valid_candidate": len(block.get("candidate_rates") or []),
+                "comparison_metric": (
+                    verdict.get("comparison_metric")
+                    or block.get("comparison_metric")
+                    or doc.get("comparison_metric")
+                ),
+                "comparison_direction": (
+                    verdict.get("comparison_direction")
+                    or block.get("comparison_direction")
+                    or doc.get("comparison_direction")
+                ),
+                "publish_path_baseline": _compare_publish_path(doc, block, "baseline"),
+                "publish_path_candidate": _compare_publish_path(doc, block, "candidate"),
+                "adapter_io_model_baseline": (doc.get("baseline_identity") or {}).get(
+                    "adapter_io_model"
+                )
+                or (doc.get("baseline_identity") or {}).get("io_model"),
+                "adapter_io_model_candidate": (doc.get("candidate_identity") or {}).get(
+                    "adapter_io_model"
+                )
+                or (doc.get("candidate_identity") or {}).get("io_model"),
+                "aa_control_pass": doc.get("aa_control_pass"),
+                "aa_control_reason": doc.get("aa_control_reason"),
+                "aa_absolute_effect_pct": doc.get("aa_absolute_effect_pct"),
+                "aa_ci": doc.get("aa_ci"),
+                "aa_variant": doc.get("aa_variant"),
+                "aa_blocks_requested": doc.get("aa_blocks_requested")
+                or doc.get("blocks_requested"),
+                "aa_blocks_complete": doc.get("aa_blocks_complete"),
+                "aa_design_counts": doc.get("aa_design_counts"),
+                "aa_ci_available": doc.get("aa_ci_available"),
+                "aa_bias_pct": doc.get("aa_bias_pct"),
+                "aa_stability_pct": doc.get("aa_stability_pct"),
+                "aa_pair_unit_effects_pct": doc.get("aa_pair_unit_effects_pct"),
+                "aa_gate": doc.get("aa_gate"),
+                "aa_n_pair_units": doc.get("aa_n_pair_units"),
+            }
+        )
+    return summaries

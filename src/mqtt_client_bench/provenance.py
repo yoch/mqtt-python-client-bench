@@ -53,8 +53,12 @@ MEASUREMENT_PATH = (
     "adapters/async_bridge.py",
     "roles/publisher.py",
     "roles/subscriber.py",
+    "roles/rtt_drive.py",
     "roles/rtt_initiator.py",
     "roles/responder.py",
+    "roles/rate_pacer.py",
+    "pacing.py",
+    "temporal_trace.py",
     "scripts/mqtt_hammer.c",
 )
 

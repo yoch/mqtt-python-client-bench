@@ -145,12 +145,12 @@ def _never_run_panel(never_run: Sequence[Tuple[str, str]]) -> str:
             ]
         )
     highlight = ""
-    if any(name == "puback_latency_fixed_rate" for name, _ in never_run):
+    if any(name in ("puback_latency_fixed_rate", "application_rtt_fixed_rate") for name, _ in never_run):
         highlight = (
-            '<p class="note note-warn"><code>puback_latency_fixed_rate</code> is the one the '
-            "documentation calls the public cross-client latency ranking — every client offered "
-            "the same absolute rate — and it has never been run. Until it is, the latency figures "
-            "on this site are intra-client readings only.</p>"
+            '<p class="note note-warn"><code>puback_latency_fixed_rate</code> and '
+            "<code>application_rtt_fixed_rate</code> are the public cross-client latency "
+            "rankings — every client offered the same absolute rate. Until they have been "
+            "run, the latency figures on this site are intra-client readings only.</p>"
         )
     return panel(
         "Catalogued but never run",

@@ -5,19 +5,29 @@ This document describes **what each scenario measures**, how the bench is wired
 itself is the source of truth: `src/mqtt_client_bench/scenarios.py`; the harness
 lives in `harness.py`.
 
-## Measurement model (three protocols, never mixed)
+## Measurement model (never mix these categories)
 
 | Protocol | Question | How load is applied | Primary metric |
 |---|---|---|---|
-| **Capacity** | What throughput does the client sustain? | Closed loop: bounded `outstanding` window, no pacing | `completed_success` / s within `[T0, T1)` |
-| **Latency** | What latency at X % of *its own* capacity? | Open loop at calibrated fractions (`load_fraction`) | Latency distribution (PUBACK or application RTT) |
+| **Capacity** | What ceiling does the client sustain? | Closed loop: same config, bounded `outstanding`, no pacing | `completed_success` / s within `[T0, T1)` |
+| **Matched-load latency** | What latency at the same absolute rate? | Shared `target_rate`, or `shared_load_fraction` × `C_common = min(capacities)` | Latency distribution; completion ratio |
+| **Relative-load** | What latency at X % of *its own* capacity? | Per-client `load_fraction` — **NOT CROSS-CLIENT COMPARABLE** | Intra-client latency curve |
 | **Integrity** | Missing / duplicate / out of order? | Bounded rate + sequence header | Integrity counters (not a throughput ranking) |
 
 Calibration (`calibrate`): for each client and **each supported MQTT protocol**,
 a QoS1 publish capacity and an RTT capacity are measured and stored under
-`protocol_capacities`. Open-loop scenarios derive
-`target_rate = capacity[protocol] × load_fraction`. Without a compatible
-calibration profile (same client / version / protocol), fraction points are refused.
+`protocol_capacities`.
+
+- Relative-load (`load_fraction`): `target_rate = capacity[protocol] × load_fraction`
+  for **that client only**. `run compare` / `run matrix` refuse these points.
+- Matched-load (`shared_load_fraction`): `C_common = min(capacities)` across the
+  clients in the run, then the same `target_rate = round(C_common × fraction)`
+  for every client. If the official capacity is null, only calibrate runs that
+  produced a rate and were voided *exclusively* by `broker_headroom_low` may
+  contribute an observed lower bound (stamped
+  `observed_lower_bound:broker_headroom_low`). A timeout, worker error,
+  host-state failure, or mixed reason list is refused. Without an admissible
+  run the point stays unresolved.
 
 Timing profiles (`PROFILE_SPECS`):
 
@@ -31,7 +41,7 @@ Timing profiles (`PROFILE_SPECS`):
 A minimal **core** subset is expanded into both `MQTTv311` **and** `MQTTv5`:
 
 - `pub_qos_sweep_telemetry`, `sub_exact_telemetry`
-- `puback_latency_qos1`, `rtt_capacity_qos1`, `application_rtt_qos1`
+- `puback_latency_qos1`, `puback_latency_fixed_rate`, `rtt_capacity_qos1`, `application_rtt_qos1`, `application_rtt_fixed_rate`
 
 Rankings and the HTML matrix use `scenario · protocol` rows — **never** a
 cross-protocol comparison. `aiomqtt3` (v5 only) is compared with peers on the
@@ -57,7 +67,17 @@ whole matrix, so the baseline does not move between fractions.
   `inconclusive` (`broker_received_below_completed`), not a published number.
 - **Broker headroom.** Peak broker CPU is recorded per run
   (`broker_cpu_max_pct`); above 70 % the run is `broker_limited` and does not
-  enter a ranking, and 85 % remains the hard saturation signal.
+  enter a ranking, and 85 % remains the hard saturation signal. A managed
+  compose Mosquitto and an isolated native process (`BENCH_BROKER_PID` /
+  `--broker-pid`) share that gate. Standard runs against an external broker
+  without an observable PID fail closed (`broker_pid_required`); a dead or
+  non-Mosquitto PID is `broker_pid_unobserved`. Missing broker CPU is never
+  treated as “broker probably OK”.
+- **`$SYS` on a native broker.** The `$SYS` probe talks to `host:port` and is
+  enabled for an isolated local Mosquitto as well as a compose broker. Publisher
+  reconciliation still applies only to single-publisher topologies. Application
+  RTT does not use it (initiator and responder both publish); broker CPU/headroom
+  is the ranking control there. Drop counts still apply when the probe works.
 
 ## Topologies
 
@@ -230,6 +250,49 @@ Mosquitto 2.1 is single-threaded: do not widen the broker cpuset.
 - **Goal**: open-loop application RTT latency at fractions of **that** RTT capacity.
 - **Topology**: `application_rtt` · fractions `0.50 / 0.75 / 0.90 / 1.00` · tag `dual_protocol`.
 - **Requires**: end-to-end `TCP_NODELAY` (broker + client); otherwise a Nagle artefact of ~84 ms/pair.
+- **Reading**: **NOT CROSS-CLIENT COMPARABLE.** Homogeneous product loop (same
+  library as initiator and responder). `run compare` / `run matrix` refuse this
+  scenario so a per-client `load_fraction` cannot become an A/B ranking.
+- **Refusals**: `awscrt` → `not_implemented:tcp_nodelay`.
+
+### `application_rtt_fixed_rate`
+
+- **Goal**: matched-load application RTT: one shared grid from
+  `C_common = min(client RTT capacities)`, then 25 / 50 / 75 / 90 % of that
+  ceiling. Every client is offered the same absolute pair rate.
+- **Topology**: `application_rtt` · `shared_load_fraction` `0.25 / 0.50 / 0.75 / 0.90` · tag `dual_protocol`.
+- **Requires**: per-client RTT calibrations (official capacity, or a
+  `broker_headroom_low`-only observed lower bound). A single shared
+  `--load-profile` is refused. Pass `--load-profile-dir` to `compare` so it
+  does not re-calibrate.
+- **Reading**: this is the scenario for comparing application RTT *between*
+  clients. Homogeneous product loop (two instances of the same library).
+  Distinct from `rtt_capacity_qos1` (ceiling) and `application_rtt_qos1`
+  (NOT CROSS-CLIENT COMPARABLE). If a client cannot hold a shared point, the
+  point is `offer_limited`; the rate is not lowered.
+- **ABBA / A/A**: `run compare` alternates ABBA and BAAB so each client
+  occupies the same number of inner and outer slots when the block count is
+  even. The published ratio is always candidate / baseline. Consecutive
+  complementary ABBA+BAAB blocks form one experimental unit in the log
+  domain; the centre is the geometric mean of those units, so a position
+  effect that maps to `r` and `1/r` recentres on 1. Same-client A/A is a
+  fail-closed official gate: all requested blocks complete, both designs
+  with ≥2 replications, `|centre effect| ≤ 3 %`, and every complementary
+  pair-unit effect within 3 %. A CI that contains zero is not the gate.
+  Targeted validation may use 4 blocks (2 pair units) as a descriptive
+  control. Official campaigns keep 6 blocks (3 pair units). Neither n is
+  large enough for a bootstrap CI to be an equivalence test, so the gate
+  is bias plus pair-unit stability. Default official A/A variants are 25 %
+  MQTTv311 (index 0) and 75 % MQTTv311 (index 4). A/A runs and must pass
+  before any A/B ranking.
+- **90 % of closed-loop RTT capacity is often not a sustainable open-loop
+  offer.** A client can complete ~C pairs/s when it is allowed to back-pressure
+  itself; offering `0.90 × C_common` as an open-loop `target_rate` can still
+  miss slots. Those runs are `inconclusive` (`open_loop_backpressure_misses`).
+  Do not lower `MATCHED_LOAD_BACKPRESSURE_MAX` (0.2 %) to manufacture a
+  ranking. A 1-run smoke `C_common` can overestimate the official 5/5 median;
+  that is not a reason to change `rtt_capacity_qos1`. A 90 % point that
+  cannot hold the offer stays unpublished.
 - **Refusals**: `awscrt` → `not_implemented:tcp_nodelay`.
 
 ---

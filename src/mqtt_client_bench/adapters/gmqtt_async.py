@@ -140,6 +140,7 @@ class GmqttAsyncAdapter:
             except Exception:  # noqa: BLE001
                 if cb is not None:
                     cb(self, None, mid, 128, None)
+                return None
             return mid
 
         # Mirrors gmqtt's own Client.publish() body: the public call discards the
@@ -163,6 +164,7 @@ class GmqttAsyncAdapter:
                 self._real_to_synth.pop(int(real_mid), None)
             if cb is not None:
                 cb(self, None, mid, 128, None)
+            return None
         return mid
 
     async def publish(self, topic, payload=None, qos=0, retain=False, properties=None):

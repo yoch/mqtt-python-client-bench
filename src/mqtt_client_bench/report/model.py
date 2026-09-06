@@ -79,8 +79,9 @@ _CHART_EXCLUDED_SCENARIOS = frozenset(
         "retained_bootstrap",
         "mqttv5_flow_control",
         # Fraction-of-own-capacity latency is an intra-client question, not a
-        # cross-client ranking. The public latency comparison is
-        # puback_latency_fixed_rate (equal absolute offered rates).
+        # cross-client ranking. The public latency comparisons are
+        # puback_latency_fixed_rate and application_rtt_fixed_rate (equal
+        # absolute offered rates).
         "puback_latency_qos1",
         "application_rtt_qos1",
     }
@@ -139,6 +140,7 @@ _ENVIRONMENT_REASON_PREFIXES = (
     "cpu_governor_unknown",
     "cpu_governor_not_performance:",
     "host_busy_at_start:",
+    "pacer_stimulus_invalid",
 )
 
 # Values within this relative tolerance of the row/series maximum are treated
@@ -353,6 +355,8 @@ _LABEL_AXES = (
     ("topology", "topo"),
     ("inflight", "inflight"),
     ("load_fraction", "load"),
+    ("shared_load_fraction", "shared"),
+    ("target_rate", "rate"),
     ("subscription", "sub"),
     ("topic_topology", "topics"),
     ("callback_filters", "filters"),

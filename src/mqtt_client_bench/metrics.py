@@ -160,38 +160,239 @@ def bootstrap_median_diff(
     }
 
 
-def abba_order(blocks: int) -> List[str]:
-    """Return ABBA repeated `blocks` times.
+ABBA_BLOCK = ("A", "B", "B", "A")
+BAAB_BLOCK = ("B", "A", "A", "B")
 
-    Each ABBA block is A,B,B,A => 2A + 2B per block.
-    4 blocks => 8A + 8B.
+
+def abba_order(blocks: int) -> List[str]:
+    """Return alternating ABBA / BAAB blocks.
+
+    Repeating only ABBA puts B in every inner slot. A warmup or position
+    effect then looks like a client effect, including on A/A. Alternating
+    the two 4-slot designs gives each label the same number of inner and
+    outer slots when ``blocks`` is even.
     """
     if blocks < 1:
         raise ValueError("blocks must be >= 1")
     order: List[str] = []
-    for _ in range(blocks):
-        order.extend(["A", "B", "B", "A"])
+    for i in range(blocks):
+        order.extend(ABBA_BLOCK if i % 2 == 0 else BAAB_BLOCK)
     return order
 
 
-def abba_block_ratios(order: Sequence[str], rates_by_slot: Sequence[Optional[float]]) -> List[float]:
-    """For each complete ABBA block with four valid rates, return median(B)/median(A)."""
-    ratios: List[float] = []
+def abba_block_design(labels: Sequence[str]) -> Optional[str]:
+    seq = tuple(labels)
+    if seq == ABBA_BLOCK:
+        return "ABBA"
+    if seq == BAAB_BLOCK:
+        return "BAAB"
+    return None
+
+
+def abba_position_counts(order: Sequence[str]) -> dict:
+    """Inner (slots 1,2) vs outer (slots 0,3) counts per label, per 4-slot block."""
+    counts = {"A": {"inner": 0, "outer": 0}, "B": {"inner": 0, "outer": 0}}
     for i in range(0, len(order), 4):
-        chunk_labels = list(order[i : i + 4])
-        chunk_rates = list(rates_by_slot[i : i + 4])
-        if chunk_labels != ["A", "B", "B", "A"]:
+        chunk = list(order[i : i + 4])
+        if len(chunk) < 4:
+            break
+        for j, label in enumerate(chunk):
+            if label not in counts:
+                continue
+            pos = "outer" if j in (0, 3) else "inner"
+            counts[label][pos] += 1
+    return counts
+
+
+def geometric_mean(values: Sequence[float]) -> Optional[float]:
+    cleaned = [float(v) for v in values if v is not None and v > 0]
+    if not cleaned:
+        return None
+    return math.exp(sum(math.log(v) for v in cleaned) / len(cleaned))
+
+
+def balanced_geometric_ratio(
+    ratios: Sequence[float],
+    designs: Optional[Sequence[Optional[str]]] = None,
+) -> Optional[float]:
+    """Multiplicative centre of candidate/baseline block ratios.
+
+    When both ABBA and BAAB blocks are present, each design is reduced
+    first, then the two design means are combined. Two ABBA blocks plus
+    one BAAB therefore cannot re-introduce the inner-slot bias. A pure
+    position effect that maps to ``r`` and ``1/r`` recentres on 1.
+    """
+    if not ratios:
+        return None
+    if not designs or len(designs) != len(ratios):
+        return geometric_mean(ratios)
+    grouped: dict[str, List[float]] = {}
+    for ratio, design in zip(ratios, designs):
+        if ratio is None or ratio <= 0 or not design:
             continue
-        if any(r is None for r in chunk_rates):
+        grouped.setdefault(str(design), []).append(float(ratio))
+    means = [geometric_mean(vals) for vals in grouped.values() if vals]
+    means = [m for m in means if m is not None]
+    return geometric_mean(means)
+
+
+def complementary_pair_units(
+    ratios: Sequence[float],
+    designs: Sequence[Optional[str]],
+) -> List[float]:
+    """Turn consecutive complementary ABBA+BAAB blocks into experimental units.
+
+    Each unit is the geometric mean of one ABBA ratio and one BAAB ratio, so
+    a position effect that maps to ``r`` then ``1/r`` becomes 1 *before*
+    any across-pair mean or bootstrap. Bootstrap those units, not the raw
+    blocks: one observation per design makes a stratified bootstrap a point
+    mass around a non-zero effect.
+    """
+    recs = [
+        (str(design), float(ratio))
+        for design, ratio in zip(designs, ratios)
+        if design and ratio is not None and ratio > 0
+    ]
+    units: List[float] = []
+    index = 0
+    while index < len(recs) - 1:
+        (design_a, ratio_a), (design_b, ratio_b) = recs[index], recs[index + 1]
+        if {design_a, design_b} == {"ABBA", "BAAB"}:
+            unit = geometric_mean([ratio_a, ratio_b])
+            if unit is not None:
+                units.append(unit)
+            index += 2
+        else:
+            index += 1
+    return units
+HIGHER_IS_BETTER = "higher_is_better"
+LOWER_IS_BETTER = "lower_is_better"
+LATENCY_P50_METRIC = "latency_p50_ms"
+THROUGHPUT_METRIC = "primary_msgs_per_s"
+_LATENCY_SCENARIOS = frozenset(
+    {
+        "application_rtt_fixed_rate",
+        "application_rtt_qos1",
+    }
+)
+
+
+def comparison_spec(scenario: Optional[str] = None, *, topology: Optional[str] = None) -> dict:
+    """Which value ABBA/A-A ranks, and which way is better.
+
+    Throughput scenarios keep ``primary_msgs_per_s`` / ``higher_is_better``.
+    Application RTT ranks initiator ``p50_ms``; a matched-load pair that
+    holds the offer will have nearly identical completion rates, so ranking
+    those rates would be a tautology.
+    """
+    if scenario in _LATENCY_SCENARIOS or topology == "application_rtt":
+        return {
+            "comparison_metric": LATENCY_P50_METRIC,
+            "comparison_direction": LOWER_IS_BETTER,
+        }
+    return {
+        "comparison_metric": THROUGHPUT_METRIC,
+        "comparison_direction": HIGHER_IS_BETTER,
+    }
+
+
+def _initiator_worker(run: dict) -> dict:
+    for worker in run.get("workers") or []:
+        if worker.get("role") in ("rtt_initiator", "publisher"):
+            return worker
+    return {}
+
+
+def comparison_value(run: dict, scenario: Optional[str] = None) -> dict:
+    """Extract the ABBA/A-A observation from one run.
+
+    ``value`` is what block ratios are built from. p95/p99 travel alongside
+    for latency points but are not the primary verdict.
+    """
+    point = run.get("point") or {}
+    spec = comparison_spec(
+        scenario or point.get("scenario") or run.get("scenario"),
+        topology=point.get("topology"),
+    )
+    extras = {"p95_ms": None, "p99_ms": None}
+    if spec["comparison_metric"] == LATENCY_P50_METRIC:
+        latency = (_initiator_worker(run).get("latency_summary") or {})
+        value = latency.get("p50_ms")
+        extras["p95_ms"] = latency.get("p95_ms")
+        extras["p99_ms"] = latency.get("p99_ms")
+    else:
+        value = run.get("primary_msgs_per_s")
+    return {
+        **spec,
+        "value": sanitize_number(value) if value is not None else None,
+        **extras,
+    }
+
+
+def abba_observation_usable(
+    result: dict,
+    value: Optional[float],
+    *,
+    profile: Optional[str] = None,
+) -> bool:
+    """Whether a run may enter an ABBA/A-A block ratio.
+
+    Official compares drop ``non_comparable`` runs. Smoke tags *every* run
+    that way, so a path-proof p50 would never form a ratio if we kept the
+    official filter. Smoke still requires ``status=valid``.
+    """
+    if value is None:
+        return False
+    if result.get("status") != "valid":
+        return False
+    if profile == "smoke":
+        return True
+    return not result.get("non_comparable")
+
+
+def abba_block_records(
+    order: Sequence[str],
+    rates_by_slot: Sequence[Optional[float]],
+) -> List[dict]:
+    """Complete ABBA or BAAB blocks with a candidate/baseline ratio each.
+
+    Values are grouped by label, not by index, so BAAB is not silently
+    dropped and the ratio stays ``median(B) / median(A)``.
+    """
+    records: List[dict] = []
+    for i in range(0, len(order), 4):
+        labels = list(order[i : i + 4])
+        rates = list(rates_by_slot[i : i + 4])
+        design = abba_block_design(labels)
+        if design is None or len(rates) < 4:
             continue
-        a_vals = [float(chunk_rates[0]), float(chunk_rates[3])]
-        b_vals = [float(chunk_rates[1]), float(chunk_rates[2])]
+        if any(r is None for r in rates):
+            continue
+        a_vals = [float(r) for lab, r in zip(labels, rates) if lab == "A"]
+        b_vals = [float(r) for lab, r in zip(labels, rates) if lab == "B"]
         a_med = median(a_vals)
         b_med = median(b_vals)
         if a_med is None or b_med is None or a_med == 0:
             continue
-        ratios.append(b_med / a_med)
-    return ratios
+        records.append(
+            {
+                "design": design,
+                "ratio": b_med / a_med,
+                "a_median": a_med,
+                "b_median": b_med,
+            }
+        )
+    return records
+
+
+def abba_block_ratios(order: Sequence[str], rates_by_slot: Sequence[Optional[float]]) -> List[float]:
+    """For each complete ABBA or BAAB block, return median(B)/median(A).
+
+    The ratio is always ``candidate / baseline``. Interpretation depends on
+    ``comparison_direction``: for latency, ``ratio < 1`` means the candidate
+    is lower (better).
+    """
+    return [float(rec["ratio"]) for rec in abba_block_records(order, rates_by_slot)]
 
 
 def compare_verdict_from_block_ratios(
@@ -201,47 +402,104 @@ def compare_verdict_from_block_ratios(
     seed: int = 42,
     n_boot: int = 2000,
     confidence: float = 0.95,
+    direction: str = HIGHER_IS_BETTER,
+    designs: Optional[Sequence[Optional[str]]] = None,
 ) -> dict:
-    """Bootstrap the distribution of per-block B/A ratios."""
-    if not block_ratios:
-        return {
-            "verdict": "inconclusive",
-            "median_ratio": None,
-            "ci_low": None,
-            "ci_high": None,
-            "excludes_zero_effect": False,
-            "absolute_effect_pct": None,
-            "n_blocks": 0,
-        }
-    med = median(list(block_ratios))
-    rng = random.Random(seed)
-    diffs = []
-    for _ in range(n_boot):
-        sample = [block_ratios[rng.randrange(len(block_ratios))] for _ in range(len(block_ratios))]
-        m = median(sample)
-        if m is None:
-            continue
-        diffs.append(m - 1.0)
-    alpha = 1.0 - confidence
-    lo = percentile(diffs, 100.0 * (alpha / 2.0)) if diffs else None
-    hi = percentile(diffs, 100.0 * (1.0 - alpha / 2.0)) if diffs else None
-    excludes_zero = lo is not None and hi is not None and (lo > 0 or hi < 0)
-    effect = None if med is None else (med - 1.0) * 100.0
-    if effect is None or not excludes_zero or abs(effect) <= min_effect_pct:
-        verdict = "inconclusive"
-    elif effect > 0:
-        verdict = "improvement"
+    """Bootstrap complementary ABBA+BAAB pair units in the log domain.
+
+    Consecutive complementary blocks form one experimental unit
+    (geometric mean of the two design ratios). The published centre is the
+    geometric mean of those units. A CI is published only when at least two
+    units exist; a single pair is a point mass and must not be dressed as a
+    confidence interval. Missing CI is ``ci_available=false``, never a
+    fake ``excludes_zero_effect=false``.
+    """
+    empty = {
+        "verdict": "inconclusive",
+        "median_ratio": None,
+        "geometric_ratio": None,
+        "ci_low": None,
+        "ci_high": None,
+        "ci_available": False,
+        "excludes_zero_effect": False,
+        "absolute_effect_pct": None,
+        "n_blocks": 0,
+        "n_pair_units": 0,
+        "pair_units": [],
+        "comparison_direction": direction,
+        "block_ratios": [],
+        "block_designs": [],
+        "estimator": None,
+    }
+    cleaned = [float(r) for r in block_ratios if r is not None and r > 0]
+    if not cleaned:
+        return empty
+    design_list: List[Optional[str]] = []
+    if designs is not None and len(designs) == len(block_ratios):
+        design_list = [
+            str(d) if d else None
+            for r, d in zip(block_ratios, designs)
+            if r is not None and r > 0
+        ]
+        if len(design_list) != len(cleaned):
+            design_list = []
+    pair_units = (
+        complementary_pair_units(cleaned, design_list) if design_list else []
+    )
+    if pair_units:
+        centre = geometric_mean(pair_units)
+        boot_values = pair_units
+        estimator = "complementary_pair_geometric_mean"
     else:
-        verdict = "regression"
+        centre = geometric_mean(cleaned)
+        boot_values = cleaned
+        estimator = "geometric_mean"
+    ci_available = len(boot_values) >= 2
+    lo = None
+    hi = None
+    if ci_available:
+        rng = random.Random(seed)
+        diffs = []
+        for _ in range(n_boot):
+            sample = [boot_values[rng.randrange(len(boot_values))] for _ in range(len(boot_values))]
+            m = geometric_mean(sample)
+            if m is None:
+                continue
+            diffs.append(m - 1.0)
+        alpha = 1.0 - confidence
+        lo = percentile(diffs, 100.0 * (alpha / 2.0)) if diffs else None
+        hi = percentile(diffs, 100.0 * (1.0 - alpha / 2.0)) if diffs else None
+    excludes_zero = bool(
+        ci_available and lo is not None and hi is not None and (lo > 0 or hi < 0)
+    )
+    effect = None if centre is None else (centre - 1.0) * 100.0
+    if (
+        effect is None
+        or not ci_available
+        or not excludes_zero
+        or abs(effect) <= min_effect_pct
+    ):
+        verdict = "inconclusive"
+    elif direction == LOWER_IS_BETTER:
+        verdict = "improvement" if effect < 0 else "regression"
+    else:
+        verdict = "improvement" if effect > 0 else "regression"
     return {
         "verdict": verdict,
-        "median_ratio": sanitize_number(med),
+        "median_ratio": sanitize_number(centre),
+        "geometric_ratio": sanitize_number(centre),
         "ci_low": sanitize_number(lo),
         "ci_high": sanitize_number(hi),
+        "ci_available": ci_available,
         "excludes_zero_effect": excludes_zero,
         "absolute_effect_pct": sanitize_number(effect),
-        "n_blocks": len(block_ratios),
-        "block_ratios": [sanitize_number(r) for r in block_ratios],
+        "n_blocks": len(cleaned),
+        "n_pair_units": len(pair_units),
+        "pair_units": [sanitize_number(u) for u in pair_units],
+        "comparison_direction": direction,
+        "block_ratios": [sanitize_number(r) for r in cleaned],
+        "block_designs": design_list,
+        "estimator": estimator,
     }
 
 
