@@ -3143,6 +3143,7 @@ def compare_clients(
         "point": points[0] if len(points) == 1 else None,
         "points": point_results,
         "order": order,
+        "blocks_requested": blocks,
         "baseline_client": baseline_client,
         "candidate_client": candidate_client,
         "baseline_identity": _compare_identity_with_path(

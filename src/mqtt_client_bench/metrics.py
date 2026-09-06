@@ -236,6 +236,35 @@ def balanced_geometric_ratio(
     return geometric_mean(means)
 
 
+def complementary_pair_units(
+    ratios: Sequence[float],
+    designs: Sequence[Optional[str]],
+) -> List[float]:
+    """Turn consecutive complementary ABBA+BAAB blocks into experimental units.
+
+    Each unit is the geometric mean of one ABBA ratio and one BAAB ratio, so
+    a position effect that maps to ``r`` then ``1/r`` becomes 1 *before*
+    any across-pair mean or bootstrap. Bootstrap those units, not the raw
+    blocks: one observation per design makes a stratified bootstrap a point
+    mass around a non-zero effect.
+    """
+    recs = [
+        (str(design), float(ratio))
+        for design, ratio in zip(designs, ratios)
+        if design and ratio is not None and ratio > 0
+    ]
+    units: List[float] = []
+    index = 0
+    while index < len(recs) - 1:
+        (design_a, ratio_a), (design_b, ratio_b) = recs[index], recs[index + 1]
+        if {design_a, design_b} == {"ABBA", "BAAB"}:
+            unit = geometric_mean([ratio_a, ratio_b])
+            if unit is not None:
+                units.append(unit)
+            index += 2
+        else:
+            index += 1
+    return units
 HIGHER_IS_BETTER = "higher_is_better"
 LOWER_IS_BETTER = "lower_is_better"
 LATENCY_P50_METRIC = "latency_p50_ms"
@@ -376,16 +405,14 @@ def compare_verdict_from_block_ratios(
     direction: str = HIGHER_IS_BETTER,
     designs: Optional[Sequence[Optional[str]]] = None,
 ) -> dict:
-    """Bootstrap the multiplicative centre of candidate/baseline ratios.
+    """Bootstrap complementary ABBA+BAAB pair units in the log domain.
 
-    ``median_ratio`` is the geometric centre (kept under that name so
-    existing readers keep working). ``absolute_effect_pct`` is
-    ``(centre - 1) * 100``. Positive means the candidate observation is
-    larger than the baseline. For ``higher_is_better`` that is an
-    improvement; for ``lower_is_better`` (latency) it is a regression.
-
-    CI remains on the ``(ratio - 1)`` scale so ``excludes_zero_effect``
-    still means "the interval is incompatible with ratio 1".
+    Consecutive complementary blocks form one experimental unit
+    (geometric mean of the two design ratios). The published centre is the
+    geometric mean of those units. A CI is published only when at least two
+    units exist; a single pair is a point mass and must not be dressed as a
+    confidence interval. Missing CI is ``ci_available=false``, never a
+    fake ``excludes_zero_effect=false``.
     """
     empty = {
         "verdict": "inconclusive",
@@ -393,9 +420,12 @@ def compare_verdict_from_block_ratios(
         "geometric_ratio": None,
         "ci_low": None,
         "ci_high": None,
+        "ci_available": False,
         "excludes_zero_effect": False,
         "absolute_effect_pct": None,
         "n_blocks": 0,
+        "n_pair_units": 0,
+        "pair_units": [],
         "comparison_direction": direction,
         "block_ratios": [],
         "block_designs": [],
@@ -413,46 +443,42 @@ def compare_verdict_from_block_ratios(
         ]
         if len(design_list) != len(cleaned):
             design_list = []
-    centre = balanced_geometric_ratio(cleaned, design_list or None)
-    present = {d for d in design_list if d}
-    estimator = (
-        "balanced_geometric_mean"
-        if len(present) >= 2
-        else "geometric_mean"
+    pair_units = (
+        complementary_pair_units(cleaned, design_list) if design_list else []
     )
-    grouped: dict[str, List[float]] = {}
-    if design_list and len(design_list) == len(cleaned):
-        for ratio, design in zip(cleaned, design_list):
-            if design:
-                grouped.setdefault(design, []).append(ratio)
-        if len(grouped) < 2:
-            grouped = {}
-    rng = random.Random(seed)
-    diffs = []
-    for _ in range(n_boot):
-        if grouped:
-            means = []
-            ok = True
-            for vals in grouped.values():
-                sample = [vals[rng.randrange(len(vals))] for _ in vals]
-                g = geometric_mean(sample)
-                if g is None:
-                    ok = False
-                    break
-                means.append(g)
-            m = geometric_mean(means) if ok else None
-        else:
-            sample = [cleaned[rng.randrange(len(cleaned))] for _ in range(len(cleaned))]
+    if pair_units:
+        centre = geometric_mean(pair_units)
+        boot_values = pair_units
+        estimator = "complementary_pair_geometric_mean"
+    else:
+        centre = geometric_mean(cleaned)
+        boot_values = cleaned
+        estimator = "geometric_mean"
+    ci_available = len(boot_values) >= 2
+    lo = None
+    hi = None
+    if ci_available:
+        rng = random.Random(seed)
+        diffs = []
+        for _ in range(n_boot):
+            sample = [boot_values[rng.randrange(len(boot_values))] for _ in range(len(boot_values))]
             m = geometric_mean(sample)
-        if m is None:
-            continue
-        diffs.append(m - 1.0)
-    alpha = 1.0 - confidence
-    lo = percentile(diffs, 100.0 * (alpha / 2.0)) if diffs else None
-    hi = percentile(diffs, 100.0 * (1.0 - alpha / 2.0)) if diffs else None
-    excludes_zero = lo is not None and hi is not None and (lo > 0 or hi < 0)
+            if m is None:
+                continue
+            diffs.append(m - 1.0)
+        alpha = 1.0 - confidence
+        lo = percentile(diffs, 100.0 * (alpha / 2.0)) if diffs else None
+        hi = percentile(diffs, 100.0 * (1.0 - alpha / 2.0)) if diffs else None
+    excludes_zero = bool(
+        ci_available and lo is not None and hi is not None and (lo > 0 or hi < 0)
+    )
     effect = None if centre is None else (centre - 1.0) * 100.0
-    if effect is None or not excludes_zero or abs(effect) <= min_effect_pct:
+    if (
+        effect is None
+        or not ci_available
+        or not excludes_zero
+        or abs(effect) <= min_effect_pct
+    ):
         verdict = "inconclusive"
     elif direction == LOWER_IS_BETTER:
         verdict = "improvement" if effect < 0 else "regression"
@@ -464,9 +490,12 @@ def compare_verdict_from_block_ratios(
         "geometric_ratio": sanitize_number(centre),
         "ci_low": sanitize_number(lo),
         "ci_high": sanitize_number(hi),
+        "ci_available": ci_available,
         "excludes_zero_effect": excludes_zero,
         "absolute_effect_pct": sanitize_number(effect),
         "n_blocks": len(cleaned),
+        "n_pair_units": len(pair_units),
+        "pair_units": [sanitize_number(u) for u in pair_units],
         "comparison_direction": direction,
         "block_ratios": [sanitize_number(r) for r in cleaned],
         "block_designs": design_list,

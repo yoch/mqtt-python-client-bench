@@ -311,6 +311,11 @@ def extract_compare_summaries(doc: dict) -> list:
                 "aa_absolute_effect_pct": doc.get("aa_absolute_effect_pct"),
                 "aa_ci": doc.get("aa_ci"),
                 "aa_variant": doc.get("aa_variant"),
+                "aa_blocks_requested": doc.get("aa_blocks_requested")
+                or doc.get("blocks_requested"),
+                "aa_blocks_complete": doc.get("aa_blocks_complete"),
+                "aa_design_counts": doc.get("aa_design_counts"),
+                "aa_ci_available": doc.get("aa_ci_available"),
             }
         )
     return summaries

@@ -272,12 +272,15 @@ Mosquitto 2.1 is single-threaded: do not widen the broker cpuset.
   point is `offer_limited`; the rate is not lowered.
 - **ABBA / A/A**: `run compare` alternates ABBA and BAAB so each client
   occupies the same number of inner and outer slots when the block count is
-  even. The published ratio is always candidate / baseline. The centre is
-  the geometric mean of the two designs, so a pure position effect that
-  maps to `r` and `1/r` recentres on 1. Same-client A/A is a fail-closed
-  official gate: `|effect| ≤ 3 %` and a CI compatible with ratio 1. Default
-  official A/A variants are 25 % MQTTv311 (index 0) and 75 % MQTTv311
-  (index 4).
+  even. The published ratio is always candidate / baseline. Consecutive
+  complementary ABBA+BAAB blocks form one experimental unit in the log
+  domain; the centre is the geometric mean of those units, so a position
+  effect that maps to `r` and `1/r` recentres on 1. A CI requires at
+  least two such units (four blocks). Same-client A/A is a fail-closed
+  official gate: all requested blocks complete, both designs with ≥2
+  replications, a real CI containing ratio 1, and `|effect| ≤ 3 %`.
+  Default official A/A variants are 25 % MQTTv311 (index 0) and 75 %
+  MQTTv311 (index 4). A/A runs and must pass before any A/B ranking.
 - **90 % of closed-loop RTT capacity is often not a sustainable open-loop
   offer.** A client can complete ~C pairs/s when it is allowed to back-pressure
   itself; offering `0.90 × C_common` as an open-loop `target_rate` can still
