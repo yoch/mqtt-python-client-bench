@@ -189,6 +189,9 @@ def extract_run_row(run: dict, *, document: dict | None = None) -> dict:
         "native_async": run.get("native_async") if run.get("native_async") is not None else worker.get("native_async"),
         "io_model": identity.get("io_model"),
         "completion_mechanism": identity.get("completion_mechanism"),
+        "comparison_metric": run.get("comparison_metric") or doc.get("comparison_metric"),
+        "comparison_direction": run.get("comparison_direction") or doc.get("comparison_direction"),
+        "comparison_value": run.get("comparison_value"),
         "managed_broker": run.get("managed_broker"),
         "non_comparable": run.get("non_comparable"),
     }
@@ -242,6 +245,16 @@ def extract_compare_summaries(doc: dict) -> list:
                 "verdict": verdict.get("verdict"),
                 "n_valid_baseline": len(block.get("baseline_rates") or []),
                 "n_valid_candidate": len(block.get("candidate_rates") or []),
+                "comparison_metric": (
+                    verdict.get("comparison_metric")
+                    or block.get("comparison_metric")
+                    or doc.get("comparison_metric")
+                ),
+                "comparison_direction": (
+                    verdict.get("comparison_direction")
+                    or block.get("comparison_direction")
+                    or doc.get("comparison_direction")
+                ),
                 "publish_path_baseline": (doc.get("baseline_identity") or {}).get("publish_path"),
                 "publish_path_candidate": (doc.get("candidate_identity") or {}).get("publish_path"),
             }

@@ -47,6 +47,9 @@ def main(argv=None) -> int:
         "connected": threading.Event(),
         "subscribed": threading.Event(),
         "responses": 0,
+        "echo_refused": 0,
+        "echo_errors": 0,
+        "pending": set(),
         "lock": threading.Lock(),
         "sub_mid": None,
         "loop": None,
@@ -84,7 +87,16 @@ def _run_facade(cfg, plan, identity, state, request_topic, response_topic, qos, 
     lock = state["lock"]
 
     def on_message(client, userdata, msg):
-        adapter.publish(response_topic, payload=msg.payload, qos=qos, retain=False)
+        try:
+            info = adapter.publish(response_topic, payload=msg.payload, qos=qos, retain=False)
+        except Exception:  # noqa: BLE001
+            with lock:
+                state["echo_errors"] += 1
+            return
+        if getattr(info, "rc", 0) != 0 or getattr(info, "mid", 0) is None:
+            with lock:
+                state["echo_refused"] += 1
+            return
         with lock:
             state["responses"] += 1
 
@@ -119,11 +131,20 @@ def _run_facade(cfg, plan, identity, state, request_topic, response_topic, qos, 
     time.sleep(alive)
     with state["lock"]:
         responses = state["responses"]
+        echo_refused = int(state.get("echo_refused") or 0)
+        echo_errors = int(state.get("echo_errors") or 0)
     adapter.disconnect()
     adapter.loop_stop()
     write_json(
         cfg["result_path"],
-        {"ok": True, "role": "responder", "responses": responses, **identity},
+        {
+            "ok": True,
+            "role": "responder",
+            "responses": responses,
+            "echo_refused": echo_refused,
+            "echo_errors": echo_errors,
+            **identity,
+        },
     )
     return 0
 
@@ -147,13 +168,45 @@ def _run_native(cfg, plan, identity, state, request_topic, response_topic, qos, 
         if int(getattr(reason_code, "value", reason_code)) == 0:
             state["connected"].set()
 
-    def on_message(client, userdata, msg):
-        if sync_on_loop:
-            adapter.publish_nowait(response_topic, payload=msg.payload, qos=qos, retain=False)
-        else:
-            loop.create_task(adapter.publish(response_topic, payload=msg.payload, qos=qos, retain=False))
+    async def _echo(payload):
+        try:
+            mid = await adapter.publish(response_topic, payload=payload, qos=qos, retain=False)
+        except Exception:  # noqa: BLE001
+            with lock:
+                state["echo_errors"] += 1
+            return
+        if mid is None:
+            with lock:
+                state["echo_refused"] += 1
+            return
         with lock:
             state["responses"] += 1
+
+    def on_message(client, userdata, msg):
+        try:
+            if sync_on_loop:
+                mid = adapter.publish_nowait(response_topic, payload=msg.payload, qos=qos, retain=False)
+                if mid is None:
+                    with lock:
+                        state["echo_refused"] += 1
+                    return
+                with lock:
+                    state["responses"] += 1
+                return
+            task = loop.create_task(_echo(msg.payload))
+            state["pending"].add(task)
+
+            def _done(done):
+                state["pending"].discard(done)
+                exc = done.exception() if not done.cancelled() else None
+                if exc is not None:
+                    with lock:
+                        state["echo_errors"] += 1
+
+            task.add_done_callback(_done)
+        except Exception:  # noqa: BLE001
+            with lock:
+                state["echo_errors"] += 1
 
     adapter.on_connect = on_connect
     adapter.on_message = on_message
@@ -181,12 +234,30 @@ def _run_native(cfg, plan, identity, state, request_topic, response_topic, qos, 
         barrier.close()
         alive = float(cfg.get("duration_s", 3)) + float(cfg.get("drain_s", 2)) + 2
         await asyncio.sleep(alive)
+        pending = list(state["pending"])
+        if pending:
+            _done, still = await asyncio.wait(pending, timeout=float(cfg.get("drain_s", 2)))
+            for task in still:
+                task.cancel()
+            if still:
+                await asyncio.gather(*still, return_exceptions=True)
+        pending_at_end = len(state["pending"])
         with state["lock"]:
             responses = state["responses"]
+            echo_refused = int(state.get("echo_refused") or 0)
+            echo_errors = int(state.get("echo_errors") or 0)
         await adapter.disconnect()
         write_json(
             cfg["result_path"],
-            {"ok": True, "role": "responder", "responses": responses, **identity},
+            {
+                "ok": True,
+                "role": "responder",
+                "responses": responses,
+                "echo_refused": echo_refused,
+                "echo_errors": echo_errors,
+                "pending_at_end": pending_at_end,
+                **identity,
+            },
         )
         return 0
 

@@ -174,8 +174,77 @@ def abba_order(blocks: int) -> List[str]:
     return order
 
 
+HIGHER_IS_BETTER = "higher_is_better"
+LOWER_IS_BETTER = "lower_is_better"
+LATENCY_P50_METRIC = "latency_p50_ms"
+THROUGHPUT_METRIC = "primary_msgs_per_s"
+_LATENCY_SCENARIOS = frozenset(
+    {
+        "application_rtt_fixed_rate",
+        "application_rtt_qos1",
+    }
+)
+
+
+def comparison_spec(scenario: Optional[str] = None, *, topology: Optional[str] = None) -> dict:
+    """Which value ABBA/A-A ranks, and which way is better.
+
+    Throughput scenarios keep ``primary_msgs_per_s`` / ``higher_is_better``.
+    Application RTT ranks initiator ``p50_ms``; a matched-load pair that
+    holds the offer will have nearly identical completion rates, so ranking
+    those rates would be a tautology.
+    """
+    if scenario in _LATENCY_SCENARIOS or topology == "application_rtt":
+        return {
+            "comparison_metric": LATENCY_P50_METRIC,
+            "comparison_direction": LOWER_IS_BETTER,
+        }
+    return {
+        "comparison_metric": THROUGHPUT_METRIC,
+        "comparison_direction": HIGHER_IS_BETTER,
+    }
+
+
+def _initiator_worker(run: dict) -> dict:
+    for worker in run.get("workers") or []:
+        if worker.get("role") in ("rtt_initiator", "publisher"):
+            return worker
+    return {}
+
+
+def comparison_value(run: dict, scenario: Optional[str] = None) -> dict:
+    """Extract the ABBA/A-A observation from one run.
+
+    ``value`` is what block ratios are built from. p95/p99 travel alongside
+    for latency points but are not the primary verdict.
+    """
+    point = run.get("point") or {}
+    spec = comparison_spec(
+        scenario or point.get("scenario") or run.get("scenario"),
+        topology=point.get("topology"),
+    )
+    extras = {"p95_ms": None, "p99_ms": None}
+    if spec["comparison_metric"] == LATENCY_P50_METRIC:
+        latency = (_initiator_worker(run).get("latency_summary") or {})
+        value = latency.get("p50_ms")
+        extras["p95_ms"] = latency.get("p95_ms")
+        extras["p99_ms"] = latency.get("p99_ms")
+    else:
+        value = run.get("primary_msgs_per_s")
+    return {
+        **spec,
+        "value": sanitize_number(value) if value is not None else None,
+        **extras,
+    }
+
+
 def abba_block_ratios(order: Sequence[str], rates_by_slot: Sequence[Optional[float]]) -> List[float]:
-    """For each complete ABBA block with four valid rates, return median(B)/median(A)."""
+    """For each complete ABBA block with four valid values, return median(B)/median(A).
+
+    The ratio is always ``candidate / baseline``. Interpretation depends on
+    ``comparison_direction``: for latency, ``ratio < 1`` means the candidate
+    is lower (better).
+    """
     ratios: List[float] = []
     for i in range(0, len(order), 4):
         chunk_labels = list(order[i : i + 4])
@@ -201,18 +270,28 @@ def compare_verdict_from_block_ratios(
     seed: int = 42,
     n_boot: int = 2000,
     confidence: float = 0.95,
+    direction: str = HIGHER_IS_BETTER,
 ) -> dict:
-    """Bootstrap the distribution of per-block B/A ratios."""
+    """Bootstrap the distribution of per-block candidate/baseline ratios.
+
+    ``absolute_effect_pct`` is ``(median_ratio - 1) * 100``. Positive means
+    the candidate observation is larger than the baseline. For
+    ``higher_is_better`` that is an improvement; for ``lower_is_better``
+    (latency) it is a regression.
+    """
+    empty = {
+        "verdict": "inconclusive",
+        "median_ratio": None,
+        "ci_low": None,
+        "ci_high": None,
+        "excludes_zero_effect": False,
+        "absolute_effect_pct": None,
+        "n_blocks": 0,
+        "comparison_direction": direction,
+        "block_ratios": [],
+    }
     if not block_ratios:
-        return {
-            "verdict": "inconclusive",
-            "median_ratio": None,
-            "ci_low": None,
-            "ci_high": None,
-            "excludes_zero_effect": False,
-            "absolute_effect_pct": None,
-            "n_blocks": 0,
-        }
+        return empty
     med = median(list(block_ratios))
     rng = random.Random(seed)
     diffs = []
@@ -229,10 +308,10 @@ def compare_verdict_from_block_ratios(
     effect = None if med is None else (med - 1.0) * 100.0
     if effect is None or not excludes_zero or abs(effect) <= min_effect_pct:
         verdict = "inconclusive"
-    elif effect > 0:
-        verdict = "improvement"
+    elif direction == LOWER_IS_BETTER:
+        verdict = "improvement" if effect < 0 else "regression"
     else:
-        verdict = "regression"
+        verdict = "improvement" if effect > 0 else "regression"
     return {
         "verdict": verdict,
         "median_ratio": sanitize_number(med),
@@ -241,6 +320,7 @@ def compare_verdict_from_block_ratios(
         "excludes_zero_effect": excludes_zero,
         "absolute_effect_pct": sanitize_number(effect),
         "n_blocks": len(block_ratios),
+        "comparison_direction": direction,
         "block_ratios": [sanitize_number(r) for r in block_ratios],
     }
 

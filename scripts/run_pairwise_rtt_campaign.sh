@@ -88,46 +88,22 @@ run_pair() {
     --output-dir "$pair_dir" \
     >"$LOG_DIR/matrix-${label}-rtt_capacity_qos1.log" 2>&1
 
-  python - "$pair_dir" "$cal_dir" "$pair" <<'PY'
+  python - "$pair_dir" "$cal_dir" "$pair" "$MATRIX_RUNS" <<'PY'
 import json
 import sys
 from pathlib import Path
 
+from mqtt_client_bench.pairwise import write_official_rtt_calibrations
+
 out = Path(sys.argv[1])
 cal = Path(sys.argv[2])
 clients = tuple(sys.argv[3].split(","))
-required = {"MQTTv311", "MQTTv5"}
-errors = []
-all_caps = {}
-for client in clients:
-    doc = json.loads((out / f"{client}-rtt_capacity_qos1.json").read_text())
-    caps = {}
-    for block in doc.get("results") or []:
-        proto = (block.get("point") or {}).get("protocol")
-        median = (block.get("summary") or {}).get("median")
-        valid_runs = [r for r in (block.get("runs") or []) if r.get("status") == "valid"]
-        paths = {r.get("publish_path") for r in (block.get("runs") or [])}
-        if client in ("mqttium", "gmqtt") and paths - {None, "native_async"}:
-            errors.append(f"{client}:non_native_rtt_path:{sorted(paths)}")
-        if proto in required and median is not None and valid_runs:
-            caps[str(proto)] = float(median)
-    missing = sorted(required - set(caps))
-    if missing:
-        errors.append(f"{client}:missing_valid_rtt_capacity:{','.join(missing)}")
-    profile = {
-        "schema_version": 1,
-        "source": "interleaved_rtt_capacity_matrix",
-        "client": client,
-        "protocol_capacities": {
-            proto: {"rtt_capacity_msgs_per_s": value}
-            for proto, value in caps.items()
-        },
-    }
-    (cal / f"{client}-load.json").write_text(json.dumps(profile, indent=2) + "\n")
-    all_caps[client] = caps
-print(json.dumps({"valid_rtt_capacities": all_caps}, indent=2))
-if errors:
-    raise SystemExit("strict pairwise RTT capacity gate failed: " + "; ".join(errors))
+required = int(sys.argv[4])
+try:
+    payload = write_official_rtt_calibrations(out, cal, clients, required_valid=required)
+except ValueError as exc:
+    raise SystemExit(str(exc)) from exc
+print(json.dumps(payload, indent=2, default=str))
 PY
 
   echo "==> [$label] matched-load application RTT ($pair)"
