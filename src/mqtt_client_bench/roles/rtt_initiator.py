@@ -13,7 +13,11 @@ import time
 
 from mqtt_client_bench.adapters.registry import adapter_identity
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
-from mqtt_client_bench.roles.rtt_drive import drive_identity, select_rtt_drive
+from mqtt_client_bench.roles.rtt_drive import (
+    drive_identity,
+    require_native_for_async_peer,
+    select_rtt_drive,
+)
 from mqtt_client_bench.sampling import DEFAULT_METRIC_SAMPLE_LIMIT, ReservoirSampler
 from mqtt_client_bench.workloads import HEADER_SIZE, decode_header_fields, encode_header
 
@@ -27,7 +31,10 @@ def main(argv=None) -> int:
 
     client_name = cfg.get("client", "paho")
     client_path = cfg.get("client_path")
-    plan = select_rtt_drive(client_name, native_async=bool(cfg.get("native_async", True)))
+    want_native = bool(cfg.get("native_async", True))
+    plan = select_rtt_drive(client_name, native_async=want_native)
+    if want_native:
+        require_native_for_async_peer(client_name, plan)
     identity = drive_identity(plan, adapter_identity(client_name, client_path))
 
     request_topic = cfg["request_topic"]
