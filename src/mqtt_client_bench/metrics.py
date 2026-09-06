@@ -238,6 +238,27 @@ def comparison_value(run: dict, scenario: Optional[str] = None) -> dict:
     }
 
 
+def abba_observation_usable(
+    result: dict,
+    value: Optional[float],
+    *,
+    profile: Optional[str] = None,
+) -> bool:
+    """Whether a run may enter an ABBA/A-A block ratio.
+
+    Official compares drop ``non_comparable`` runs. Smoke tags *every* run
+    that way, so a path-proof p50 would never form a ratio if we kept the
+    official filter. Smoke still requires ``status=valid``.
+    """
+    if value is None:
+        return False
+    if result.get("status") != "valid":
+        return False
+    if profile == "smoke":
+        return True
+    return not result.get("non_comparable")
+
+
 def abba_block_ratios(order: Sequence[str], rates_by_slot: Sequence[Optional[float]]) -> List[float]:
     """For each complete ABBA block with four valid values, return median(B)/median(A).
 

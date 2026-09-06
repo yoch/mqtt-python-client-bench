@@ -2,6 +2,12 @@
 
 Capacity that sizes ``C_common`` must be 5/5 valid on the official path.
 Dispersion is recorded so a wild median cannot hide in a compact summary.
+
+Smoke is path proof only. ``PROFILE=smoke`` tags every run ``non_comparable``,
+and a contended runner may also void a completed native run with an exclusive
+broker-CPU reason. Those runs may size a *non-comparable* calibration so
+matched-load / ABBA machinery can be exercised. They never size an official
+``C_common``.
 """
 
 from __future__ import annotations
@@ -15,6 +21,18 @@ from mqtt_client_bench.metrics import sanitize_number, summarize_runs
 
 REQUIRED_OFFICIAL_CAPACITY_RUNS = 5
 REQUIRED_PROTOCOLS = ("MQTTv311", "MQTTv5")
+
+# Exclusive environmental voids that a smoke path-proof may still admit.
+# Timeouts, worker errors, host_busy and mixed reasons stay refused.
+_PATH_PROOF_ENV_REASONS = frozenset(
+    {
+        "broker_headroom_low",
+        "container_cpu_high",
+        "cpu_governor_unknown",
+        "clock_unpinned",
+        "non_comparable",
+    }
+)
 
 
 def _spread(values: list[float]) -> dict:
@@ -42,6 +60,39 @@ def _spread(values: list[float]) -> dict:
     }
 
 
+def _reason_keys(run: dict) -> set[str]:
+    keys = {str(reason).split(":", 1)[0] for reason in (run.get("reasons") or [])}
+    if run.get("non_comparable"):
+        keys.add("non_comparable")
+    return {key for key in keys if key}
+
+
+def _completed_measurement(run: dict) -> bool:
+    if run.get("ok") is False or run.get("error"):
+        return False
+    return run.get("primary_msgs_per_s") is not None
+
+
+def _officially_valid(run: dict) -> bool:
+    return (
+        run.get("status") == "valid"
+        and not run.get("non_comparable")
+        and _completed_measurement(run)
+    )
+
+
+def _path_proof_admitted(run: dict) -> bool:
+    """Smoke-only: completed native runs, including exclusive broker-CPU voids."""
+    if not _completed_measurement(run):
+        return False
+    if run.get("status") == "valid":
+        return True
+    if run.get("status") != "inconclusive":
+        return False
+    extra = _reason_keys(run) - _PATH_PROOF_ENV_REASONS
+    return not extra
+
+
 def official_rtt_capacity_block(
     block: dict,
     client: str,
@@ -49,20 +100,32 @@ def official_rtt_capacity_block(
     required_valid: int = REQUIRED_OFFICIAL_CAPACITY_RUNS,
     allow_non_comparable: bool = False,
 ) -> dict:
-    """Inspect one protocol block. Fail closed unless every requested run is valid."""
+    """Inspect one protocol block. Fail closed unless every requested run is valid.
+
+    Official: ``status=valid`` and not ``non_comparable``. Smoke path-proof may
+    also admit exclusive environmental voids so the rest of the campaign can
+    run as ``non_comparable``.
+    """
     proto = str((block.get("point") or {}).get("protocol") or "")
     runs = list(block.get("runs") or [])
+    admitted = []
     valid = []
     invalid = []
     for run in runs:
-        is_valid = run.get("status") == "valid"
-        if is_valid and (allow_non_comparable or not run.get("non_comparable")):
-            valid.append(run)
+        take = (
+            _path_proof_admitted(run)
+            if allow_non_comparable
+            else _officially_valid(run)
+        )
+        if take:
+            admitted.append(run)
+            if run.get("status") == "valid":
+                valid.append(run)
         else:
             invalid.append(run)
     rates = [
         float(r["primary_msgs_per_s"])
-        for r in valid
+        for r in admitted
         if r.get("primary_msgs_per_s") is not None
     ]
     paths = {r.get("publish_path") for r in runs}
@@ -71,7 +134,7 @@ def official_rtt_capacity_block(
         errors.append(f"{client}:{proto}:non_native_rtt_path:{sorted(paths)}")
     if client == "paho" and paths - {None, "sync_facade"}:
         errors.append(f"{client}:{proto}:non_sync_rtt_path:{sorted(paths)}")
-    if len(valid) < required_valid:
+    if len(admitted) < required_valid:
         reasons = []
         for run in invalid:
             extra = list(run.get("reasons") or [])
@@ -80,16 +143,21 @@ def official_rtt_capacity_block(
             reasons.extend(extra or [run.get("status") or "invalid"])
         errors.append(
             f"{client}:{proto}:insufficient_valid_rtt_capacity:"
-            f"{len(valid)}/{required_valid}:{','.join(reasons) or 'none'}"
+            f"{len(admitted)}/{required_valid}:{','.join(reasons) or 'none'}"
         )
     if len(runs) < required_valid:
         errors.append(f"{client}:{proto}:incomplete_rtt_capacity:{len(runs)}/{required_valid}")
     stats = _spread(rates)
+    admission = "official_valid"
+    if allow_non_comparable:
+        admission = "smoke_path_proof"
     return {
         "protocol": proto,
         "n_runs": len(runs),
         "n_valid": len(valid),
+        "n_admitted": len(admitted),
         "n_invalid": len(invalid),
+        "admission": admission,
         "publish_paths": sorted(p for p in paths if p),
         "errors": errors,
         **stats,
@@ -129,6 +197,7 @@ def official_rtt_capacities(
         "ok": not errors,
         "errors": errors,
         "protocols": protocols,
+        "path_proof": bool(allow_non_comparable),
     }
 
 
@@ -165,6 +234,8 @@ def write_official_rtt_calibrations(
             "source": "interleaved_rtt_capacity_matrix",
             "client": client,
             "required_valid_runs": required_valid,
+            "path_proof": bool(allow_non_comparable),
+            "non_comparable": bool(allow_non_comparable),
             "capacity_blocks": inspected["protocols"],
             "protocol_capacities": {
                 proto: {"rtt_capacity_msgs_per_s": value}
@@ -173,7 +244,7 @@ def write_official_rtt_calibrations(
         }
         (cal_dir / f"{client}-load.json").write_text(json.dumps(profile, indent=2) + "\n")
         all_caps[client] = inspected
-    payload = {"valid_rtt_capacities": all_caps}
+    payload = {"valid_rtt_capacities": all_caps, "path_proof": bool(allow_non_comparable)}
     if errors:
         raise ValueError("strict pairwise RTT capacity gate failed: " + "; ".join(errors))
     return payload
