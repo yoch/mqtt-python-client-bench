@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
-# Focused three-way performance campaign for a stable ARM64 runner.
+# Focused three-way RTT campaign for the stable ARM64 runner.
 #
 # Primary comparison: mqttium 1.0.0rc13, gmqtt 0.7.0 and Paho 2.1.0.
 # Paho is a synchronous contextual reference, not an asyncio peer.
 #
+# This ARM64 runner has native Mosquitto but no Docker. Therefore this script
+# deliberately limits the official ARM64 campaign to application-RTT scenarios:
+# publisher-only capacity/PUBACK rankings require the harness's managed-broker
+# $SYS + broker-headroom gates and would be inconclusive on an external broker.
+#
 # Fairness rules:
-# - capacity scenarios give every client the same workload and measure its ceiling;
-# - latency scenarios give every client the exact same absolute target_rate;
-# - application_rtt_fixed_rate derives one C_common=min(RTT capacities) across
-#   ALL THREE clients, then resolves one shared target_rate grid;
-# - this runner campaign deliberately refuses the observed-lower-bound fallback:
-#   every client/protocol needs a fresh official RTT capacity or the campaign
-#   stops before the matched-load matrix.
+# - rtt_capacity_qos1 gives every client the same workload and measures its ceiling;
+# - the capacity matrix is interleaved across ALL THREE clients on this host;
+# - application_rtt_fixed_rate derives one C_common=min(valid RTT capacities)
+#   across ALL THREE clients, then every client receives the exact same target_rate;
+# - no fraction-of-own-capacity result is used as a cross-client comparison;
+# - no observed/inconclusive lower-bound fallback is accepted.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,8 +28,14 @@ MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc13}"
 GMQTT_VER="${GMQTT_VER:-0.7.0}"
 PAHO_VER="${PAHO_VER:-2.1.0}"
 MATRIX_RUNS="${MATRIX_RUNS:-5}"
+BENCH_BROKER="${BENCH_BROKER:-}"
 CLIENTS=(mqttium gmqtt paho)
 CLIENT_CSV="mqttium,gmqtt,paho"
+
+if [ -z "$BENCH_BROKER" ]; then
+  echo "BENCH_BROKER is required for the native ARM64 campaign" >&2
+  exit 2
+fi
 
 HOST_DIR="${RESULTS_DIR:-$(python - <<'PY'
 from mqtt_client_bench.hostcal import resolve_host_profile, results_dir_for
@@ -52,87 +62,77 @@ print("gmqtt", version("gmqtt"))
 print("paho-mqtt", version("paho-mqtt"))
 PY
 
-python -m mqtt_client_bench.run broker up
+# First measure the RTT ceiling on this exact host/broker in one interleaved
+# three-client matrix. These are the ONLY capacities allowed to define C_common.
+echo "==> three-way RTT capacity matrix"
+python -m mqtt_client_bench.run matrix \
+  --clients "$CLIENT_CSV" \
+  --scenario rtt_capacity_qos1 \
+  --profile standard \
+  --runs "$MATRIX_RUNS" \
+  --broker "$BENCH_BROKER" \
+  --output-dir "$OUT" \
+  >"$LOG_DIR/matrix-rtt_capacity_qos1.log" 2>&1
 
-# Fresh calibration on this ARM64 machine. Do not reuse workstation profiles.
-for client in "${CLIENTS[@]}"; do
-  echo "=== calibrate ${client} ==="
-  python -m mqtt_client_bench.run calibrate \
-    --client "$client" \
-    --profile standard \
-    --output "$CAL_DIR/${client}-load.json" \
-    | tee "$LOG_DIR/calibrate-${client}.log"
-done
-
-# Fail closed: for this official three-way run we do NOT accept an arbitrary
-# inconclusive delivered rate as a capacity lower bound. Every client must have
-# an official positive RTT capacity for both protocols. This guarantees that the
-# shared grid is derived only from valid calibrations.
-python - "$CAL_DIR" <<'PY'
+# Convert only VALID matrix medians into the minimal load-profile shape consumed
+# by shared_load_fraction. Any missing protocol/median fails closed. We do not
+# read raw inconclusive rates and therefore cannot hit the permissive lower-bound
+# fallback currently present in the experimental harness.
+python - "$OUT" "$CAL_DIR" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-root = Path(sys.argv[1])
+out = Path(sys.argv[1])
+cal = Path(sys.argv[2])
 clients = ("mqttium", "gmqtt", "paho")
-protocols = ("MQTTv311", "MQTTv5")
+required = {"MQTTv311", "MQTTv5"}
+all_caps = {}
 errors = []
-rows = {}
 for client in clients:
-    path = root / f"{client}-load.json"
-    data = json.loads(path.read_text())
-    rows[client] = {}
-    for proto in protocols:
-        bucket = (data.get("protocol_capacities") or {}).get(proto) or {}
-        cap = bucket.get("rtt_capacity_msgs_per_s")
-        rows[client][proto] = cap
-        if cap is None or float(cap) <= 0:
-            errors.append(f"{client}:{proto}:missing_valid_rtt_capacity")
-print(json.dumps({"official_rtt_capacities": rows}, indent=2))
+    doc = json.loads((out / f"{client}-rtt_capacity_qos1.json").read_text())
+    caps = {}
+    for block in doc.get("results") or []:
+        point = block.get("point") or {}
+        proto = point.get("protocol")
+        median = (block.get("summary") or {}).get("median")
+        valid_runs = [r for r in (block.get("runs") or []) if r.get("status") == "valid"]
+        if proto in required and median is not None and valid_runs:
+            caps[str(proto)] = float(median)
+    missing = sorted(required - set(caps))
+    if missing:
+        errors.append(f"{client}:missing_valid_rtt_capacity:{','.join(missing)}")
+    profile = {
+        "schema_version": 1,
+        "source": "interleaved_rtt_capacity_matrix",
+        "client": client,
+        "protocol_capacities": {
+            proto: {"rtt_capacity_msgs_per_s": value}
+            for proto, value in caps.items()
+        },
+    }
+    (cal / f"{client}-load.json").write_text(json.dumps(profile, indent=2) + "\n")
+    all_caps[client] = caps
+print(json.dumps({"valid_rtt_capacities": all_caps}, indent=2))
 if errors:
-    raise SystemExit("strict calibration gate failed: " + ", ".join(errors))
+    raise SystemExit("strict RTT capacity gate failed: " + "; ".join(errors))
 PY
 
-# Capacity + headline publish comparison. Same point/config for all three;
-# different ceilings are the measurement.
-CAPACITY_SCENARIOS=(
-  pub_qos_sweep_telemetry
-  pub_payload_sweep_qos0
-  rtt_capacity_qos1
-)
-for scenario in "${CAPACITY_SCENARIOS[@]}"; do
-  echo "==> three-way capacity matrix ${scenario}"
-  python -m mqtt_client_bench.run matrix \
-    --clients "$CLIENT_CSV" \
-    --scenario "$scenario" \
-    --profile standard \
-    --runs "$MATRIX_RUNS" \
-    --output-dir "$OUT" \
-    >"$LOG_DIR/matrix-${scenario}.log" 2>&1
-done
+# Same absolute target_rate for mqttium, gmqtt and Paho at every point.
+echo "==> three-way matched-load application RTT matrix"
+python -m mqtt_client_bench.run matrix \
+  --clients "$CLIENT_CSV" \
+  --scenario application_rtt_fixed_rate \
+  --profile standard \
+  --runs "$MATRIX_RUNS" \
+  --broker "$BENCH_BROKER" \
+  --load-profile-dir "$CAL_DIR" \
+  --output-dir "$OUT" \
+  >"$LOG_DIR/matrix-application_rtt_fixed_rate.log" 2>&1
 
-# Matched-load latency. The application RTT point is resolved ONCE from
-# C_common=min(mqttium,gmqtt,paho) for each protocol, so all three receive the
-# exact same target_rate. PUBACK uses explicit catalogue target_rate values.
-LATENCY_SCENARIOS=(
-  application_rtt_fixed_rate
-  puback_latency_fixed_rate
-)
-for scenario in "${LATENCY_SCENARIOS[@]}"; do
-  echo "==> three-way matched-load matrix ${scenario}"
-  python -m mqtt_client_bench.run matrix \
-    --clients "$CLIENT_CSV" \
-    --scenario "$scenario" \
-    --profile standard \
-    --runs "$MATRIX_RUNS" \
-    --load-profile-dir "$CAL_DIR" \
-    --output-dir "$OUT" \
-    >"$LOG_DIR/matrix-${scenario}.log" 2>&1
-done
-
-# Machine-readable campaign summary: versions, official capacities, and the
-# exact common target_rate grid recorded by the matrix documents.
-python - "$OUT" "$CAL_DIR" <<'PY'
+# Machine-readable provenance + the exact shared grid. Paho is explicitly
+# labelled as a synchronous reference; no asyncio ranking is implied.
+python - "$OUT" "$CAL_DIR" "$BENCH_BROKER" <<'PY'
 import json
 import sys
 from importlib.metadata import version
@@ -140,19 +140,22 @@ from pathlib import Path
 
 out = Path(sys.argv[1])
 cal = Path(sys.argv[2])
+broker = sys.argv[3]
 clients = ("mqttium", "gmqtt", "paho")
 summary = {
+    "broker": {"mode": "external_native", "endpoint": broker},
     "clients": {
         "mqttium": {"version": version("mqttium"), "io_model": "asyncio"},
         "gmqtt": {"version": version("gmqtt"), "io_model": "asyncio"},
         "paho": {"version": version("paho-mqtt"), "io_model": "sync_reference"},
     },
-    "official_rtt_capacities": {},
+    "rtt_capacities": {},
     "shared_application_rtt_grid": [],
+    "scope_note": "ARM64 corroboration: RTT capacity + matched-load application RTT only; publisher-only rankings require managed-broker gates.",
 }
 for client in clients:
     data = json.loads((cal / f"{client}-load.json").read_text())
-    summary["official_rtt_capacities"][client] = {
+    summary["rtt_capacities"][client] = {
         proto: ((data.get("protocol_capacities") or {}).get(proto) or {}).get("rtt_capacity_msgs_per_s")
         for proto in ("MQTTv311", "MQTTv5")
     }
@@ -172,4 +175,4 @@ for block in probe.get("results") or []:
 print(json.dumps(summary, indent=2))
 PY
 
-echo "THREE_WAY_ARM64_MATCHED_LOAD_DONE"
+echo "THREE_WAY_ARM64_MATCHED_RTT_DONE"
