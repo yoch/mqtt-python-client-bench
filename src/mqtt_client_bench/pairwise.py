@@ -8,6 +8,11 @@ and a contended runner may also void a completed native run with an exclusive
 broker-CPU reason. Those runs may size a *non-comparable* calibration so
 matched-load / ABBA machinery can be exercised. They never size an official
 ``C_common``.
+
+Same-client A/A is a fail-closed publication gate, not a decorative verdict.
+A non-neutral control (absolute effect above 3 %, or a CI that excludes
+ratio 1) blocks the official ranking even when the compare itself says
+``inconclusive``.
 """
 
 from __future__ import annotations
@@ -297,3 +302,128 @@ def _pair_common_capacities(all_caps: dict, clients: list[str] | tuple[str, ...]
             values.append(float(value))
         common[proto] = min(values)
     return common
+
+
+# Official A/A: 25 % MQTTv311 (ARM-observed non-neutrality) and 75 % MQTTv311
+# (representative load). expand_scenario crosses fraction then protocol.
+OFFICIAL_AA_VARIANT_INDEXES = (0, 4)
+AA_CONTROL_MAX_ABS_EFFECT_PCT = 3.0
+
+
+def evaluate_aa_control(
+    doc: dict,
+    *,
+    max_abs_effect_pct: float = AA_CONTROL_MAX_ABS_EFFECT_PCT,
+) -> dict:
+    """Fail-closed gate for a same-client compare document.
+
+    Pass requires every point to have at least one complete block, an
+    absolute effect at most ``max_abs_effect_pct``, and a CI compatible
+    with ratio 1 (``excludes_zero_effect`` is false). A huge effect with a
+    wide CI that happens to include 1 still fails.
+    """
+    baseline = doc.get("baseline_client")
+    candidate = doc.get("candidate_client")
+    points = list(doc.get("points") or [])
+    variant = None
+    if points:
+        point = points[0].get("point") or {}
+        variant = {
+            "shared_load_fraction": point.get("shared_load_fraction"),
+            "protocol": point.get("protocol"),
+            "target_rate": point.get("target_rate"),
+        }
+    first = (points[0].get("verdict") or {}) if points else {}
+    payload = {
+        "aa_control_pass": False,
+        "aa_control_reason": None,
+        "aa_absolute_effect_pct": first.get("absolute_effect_pct") if points else None,
+        "aa_ci": {
+            "ci_low": first.get("ci_low"),
+            "ci_high": first.get("ci_high"),
+            "excludes_zero_effect": first.get("excludes_zero_effect"),
+            "median_ratio": first.get("median_ratio"),
+        }
+        if points
+        else None,
+        "aa_variant": variant,
+        "aa_n_blocks": first.get("n_blocks") if points else 0,
+        "aa_designs": list(first.get("block_designs") or []),
+    }
+    if baseline != candidate:
+        payload["aa_control_pass"] = None
+        payload["aa_control_reason"] = "not_same_client"
+        return payload
+    if not points:
+        payload["aa_control_reason"] = "no_compare_points"
+        return payload
+    reasons = []
+    for index, block in enumerate(points):
+        verdict = block.get("verdict") or {}
+        n_blocks = int(verdict.get("n_blocks") or 0)
+        effect = verdict.get("absolute_effect_pct")
+        excludes = bool(verdict.get("excludes_zero_effect"))
+        if n_blocks < 1:
+            reasons.append(f"point{index}:no_complete_blocks")
+            continue
+        if effect is None:
+            reasons.append(f"point{index}:missing_effect")
+            continue
+        if abs(float(effect)) > max_abs_effect_pct:
+            reasons.append(
+                f"point{index}:abs_effect_{float(effect):.4f}_exceeds_{max_abs_effect_pct}"
+            )
+        if excludes:
+            reasons.append(f"point{index}:ci_excludes_zero")
+    if reasons:
+        payload["aa_control_pass"] = False
+        payload["aa_control_reason"] = ";".join(reasons)
+        return payload
+    payload["aa_control_pass"] = True
+    payload["aa_control_reason"] = "neutral"
+    return payload
+
+
+def attach_aa_control(doc: dict) -> dict:
+    """Persist A/A gate fields on a compare document (no-op for A/B)."""
+    control = evaluate_aa_control(doc)
+    doc.update(control)
+    return doc
+
+
+def enforce_aa_controls(
+    root: str | Path,
+    *,
+    enforce: bool = True,
+    require_files: bool = False,
+) -> dict:
+    """Scan ``compare-aa-*.json`` under ``root`` and optionally fail closed."""
+    root = Path(root)
+    reports = []
+    failures = []
+    files = sorted(root.rglob("compare-aa-*.json"))
+    for path in files:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            reports.append({"file": str(path), "aa_control_pass": False, "aa_control_reason": str(exc)})
+            failures.append(f"{path}:unreadable")
+            continue
+        control = evaluate_aa_control(doc)
+        reports.append({"file": str(path), **control})
+        if control.get("aa_control_pass") is not True:
+            failures.append(
+                f"{path.name}:{control.get('aa_control_reason') or 'aa_control_failed'}"
+            )
+    if require_files and not files:
+        failures.append("missing_aa_compare_documents")
+    payload = {
+        "ok": not failures,
+        "n_files": len(files),
+        "failures": failures,
+        "reports": reports,
+        "enforced": bool(enforce),
+    }
+    if enforce and failures:
+        raise ValueError("A/A control failed: " + "; ".join(failures))
+    return payload

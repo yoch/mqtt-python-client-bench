@@ -12,7 +12,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from mqtt_client_bench.adapters.registry import (
     EXPERIMENTAL_CLIENTS,
@@ -53,7 +53,7 @@ from mqtt_client_bench.loadgen import (
 )
 from mqtt_client_bench.metrics import (
     abba_order,
-    abba_block_ratios,
+    abba_block_records,
     compare_verdict_from_block_ratios,
     abba_observation_usable,
     comparison_spec,
@@ -64,6 +64,7 @@ from mqtt_client_bench.metrics import (
     sanitize_number,
     summarize_valid_runs,
 )
+from mqtt_client_bench.pairwise import attach_aa_control
 from mqtt_client_bench.network import PROFILES as NETWORK_PROFILES
 from mqtt_client_bench.network import apply_profile, clear_profile, qdisc_stats
 from mqtt_client_bench.paths import PROJECT_ROOT
@@ -2889,6 +2890,42 @@ def calibrate(
 ABBA_COOLDOWN_S = 5.0
 
 
+def _publish_path_from_compare_runs(point_results: Sequence[dict], client: str) -> Optional[str]:
+    """First recorded RTT drive path for ``client`` in a compare document."""
+    for block in point_results:
+        for run in block.get("runs") or []:
+            if run.get("client") != client:
+                continue
+            identity = run.get("client_identity") or {}
+            path = identity.get("publish_path") or run.get("publish_path")
+            if path:
+                return str(path)
+    return None
+
+
+def _compare_identity_with_path(
+    client: str,
+    client_path: Optional[str],
+    point_results: Sequence[dict],
+) -> dict:
+    """Adapter identity plus the RTT path actually measured in this compare.
+
+    ``io_model`` stays the adapter architecture. ``publish_path`` is the
+    drive used for application RTT and must not be read as a second
+    ``io_model``.
+    """
+    identity = dict(adapter_identity(client, client_path) or {})
+    adapter_io = identity.get("io_model")
+    path = _publish_path_from_compare_runs(point_results, client)
+    if path:
+        identity["publish_path"] = path
+        identity["rtt_publish_path"] = path
+    if adapter_io:
+        identity["adapter_io_model"] = adapter_io
+        identity.setdefault("io_model", adapter_io)
+    return identity
+
+
 def _load_profiles_from_dir(directory: str, clients: List[str]) -> Dict[str, dict]:
     """Read ``<client>-load.json`` files already produced by ``calibrate``."""
     root = Path(directory)
@@ -3049,10 +3086,13 @@ def compare_clients(
                     else:
                         candidate_values.append(float(value))
 
-            block_ratios = abba_block_ratios(order, slot_values)
+            block_records = abba_block_records(order, slot_values)
+            block_ratios = [float(rec["ratio"]) for rec in block_records]
+            block_designs = [rec["design"] for rec in block_records]
             verdict = compare_verdict_from_block_ratios(
                 block_ratios,
                 direction=spec["comparison_direction"],
+                designs=block_designs,
             )
             verdict["comparison_metric"] = spec["comparison_metric"]
             verdict["comparison_direction"] = spec["comparison_direction"]
@@ -3069,6 +3109,7 @@ def compare_clients(
                     "slot_p95_ms": slot_p95,
                     "slot_p99_ms": slot_p99,
                     "block_ratios": block_ratios,
+                    "block_designs": block_designs,
                     "verdict": verdict,
                     "runs": raw,
                     "calibrations": {
@@ -3104,8 +3145,12 @@ def compare_clients(
         "order": order,
         "baseline_client": baseline_client,
         "candidate_client": candidate_client,
-        "baseline_identity": adapter_identity(baseline_client, client_paths.get(baseline_client)),
-        "candidate_identity": adapter_identity(candidate_client, client_paths.get(candidate_client)),
+        "baseline_identity": _compare_identity_with_path(
+            baseline_client, client_paths.get(baseline_client), point_results
+        ),
+        "candidate_identity": _compare_identity_with_path(
+            candidate_client, client_paths.get(candidate_client), point_results
+        ),
         "cooldown_s": ABBA_COOLDOWN_S,
         "broker": meta,
         "loadgen": {
@@ -3121,6 +3166,7 @@ def compare_clients(
         payload["baseline_rates"] = point_results[0]["baseline_rates"]
         payload["candidate_rates"] = point_results[0]["candidate_rates"]
         payload["runs"] = point_results[0]["runs"]
+    attach_aa_control(payload)
     if output:
         write_json(output, payload)
     return payload

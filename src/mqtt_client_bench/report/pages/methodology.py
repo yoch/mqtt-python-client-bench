@@ -78,7 +78,9 @@ _PEERS = """
           directly.</li>
           <li><code>asyncio_bridged</code> — an asyncio library driven through a private event-loop
           thread. That bridge has a cost, it is assumed and documented, and it is paid equally by
-          every bridged client.</li>
+          every bridged client. <code>io_model</code> names this architecture; it is not the
+          application-RTT drive. mqttium and gmqtt stay <code>asyncio_bridged</code> even when
+          <code>publish_path=native_async</code>.</li>
           <li><code>crt_event_loop</code> — a native (non-Python) engine; not comparable with
           pure-Python clients.</li>
         </ul>
@@ -125,7 +127,16 @@ _LIMITS = """
           <li>Application RTT drives both sides with the same library, which amplifies stack cost on
           purpose; it is not a neutral peer RTT. mqttium and gmqtt take the
           worker's native asyncio loop; Paho stays on its sync facade.
-          Bridged historical RTT is not evidence of a native ranking.</li>
+          Bridged historical RTT is not evidence of a native ranking.
+          Read <code>publish_path</code> for the measured RTT path;
+          <code>io_model</code> is the adapter class.</li>
+          <li>Official ABBA / A/A alternates ABBA and BAAB. The centre is a
+          geometric mean of the two designs so a slot effect that maps to
+          <code>r</code> and <code>1/r</code> does not become a client
+          improvement. Same-client A/A is fail-closed at 3&nbsp;% and a CI
+          compatible with ratio 1. 90&nbsp;% of closed-loop RTT capacity is
+          not assumed to be a sustainable open-loop offer;
+          <code>MATCHED_LOAD_BACKPRESSURE_MAX</code> stays 0.2&nbsp;%.</li>
           <li>The ARM three-way grid that sized <code>C_common</code> with Paho
           is <code>superseded</code> / contextual only. Official replacement:
           two pairwise campaigns in <code>scripts/run_pairwise_rtt_campaign.sh</code>.</li>

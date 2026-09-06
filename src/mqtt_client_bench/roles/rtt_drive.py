@@ -58,11 +58,20 @@ def select_rtt_drive(client: str, *, native_async: bool = True) -> dict:
 
 
 def drive_identity(plan: dict, identity: dict) -> dict:
-    """Merge adapter identity with the path that will actually run."""
+    """Merge adapter identity with the path that will actually run.
+
+    ``io_model`` names the adapter architecture (``sync`` /
+    ``asyncio_bridged`` / ``crt_event_loop``). It is not the application-RTT
+    drive. mqttium stays ``asyncio_bridged`` even when this role publishes
+    via ``native_async``. Read ``publish_path`` for the measured path.
+    """
     merged = dict(identity)
     merged["publish_path"] = plan["publish_path"]
     merged["native_async"] = plan["native_async"]
-    merged["io_model"] = plan.get("io_model") or identity.get("io_model")
+    adapter_io = identity.get("io_model") or plan.get("io_model")
+    merged["adapter_io_model"] = adapter_io
+    merged["io_model"] = adapter_io
+    merged["rtt_publish_path"] = plan["publish_path"]
     merged["completion_mechanism"] = (
         plan.get("completion_mechanism") or identity.get("completion_mechanism")
     )

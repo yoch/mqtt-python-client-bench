@@ -234,6 +234,26 @@ def extract_run_rows(doc: dict) -> list:
     return rows
 
 
+def _compare_publish_path(doc: dict, block: dict, role: str) -> str | None:
+    """RTT path for baseline/candidate: identity first, then the compare runs."""
+    ident = doc.get(f"{role}_identity") or {}
+    if ident.get("publish_path"):
+        return ident.get("publish_path")
+    if ident.get("rtt_publish_path"):
+        return ident.get("rtt_publish_path")
+    client = doc.get(f"{role}_client")
+    for run in block.get("runs") or []:
+        if client is not None and run.get("client") != client:
+            continue
+        run_ident = run.get("client_identity") or {}
+        path = run_ident.get("publish_path") or run.get("publish_path")
+        if path:
+            return path
+        if client is None:
+            break
+    return None
+
+
 def extract_compare_summaries(doc: dict) -> list:
     """Persist ABBA / A/A verdicts without raw samples."""
     if doc.get("baseline_client") is None or not doc.get("points"):
@@ -255,7 +275,10 @@ def extract_compare_summaries(doc: dict) -> list:
                 "order": block.get("order") or doc.get("order"),
                 "n_blocks": verdict.get("n_blocks"),
                 "block_ratios": verdict.get("block_ratios") or block.get("block_ratios"),
+                "block_designs": verdict.get("block_designs") or block.get("block_designs"),
                 "median_ratio": verdict.get("median_ratio"),
+                "geometric_ratio": verdict.get("geometric_ratio") or verdict.get("median_ratio"),
+                "estimator": verdict.get("estimator"),
                 "ci_low": verdict.get("ci_low"),
                 "ci_high": verdict.get("ci_high"),
                 "absolute_effect_pct": verdict.get("absolute_effect_pct"),
@@ -273,8 +296,21 @@ def extract_compare_summaries(doc: dict) -> list:
                     or block.get("comparison_direction")
                     or doc.get("comparison_direction")
                 ),
-                "publish_path_baseline": (doc.get("baseline_identity") or {}).get("publish_path"),
-                "publish_path_candidate": (doc.get("candidate_identity") or {}).get("publish_path"),
+                "publish_path_baseline": _compare_publish_path(doc, block, "baseline"),
+                "publish_path_candidate": _compare_publish_path(doc, block, "candidate"),
+                "adapter_io_model_baseline": (doc.get("baseline_identity") or {}).get(
+                    "adapter_io_model"
+                )
+                or (doc.get("baseline_identity") or {}).get("io_model"),
+                "adapter_io_model_candidate": (doc.get("candidate_identity") or {}).get(
+                    "adapter_io_model"
+                )
+                or (doc.get("candidate_identity") or {}).get("io_model"),
+                "aa_control_pass": doc.get("aa_control_pass"),
+                "aa_control_reason": doc.get("aa_control_reason"),
+                "aa_absolute_effect_pct": doc.get("aa_absolute_effect_pct"),
+                "aa_ci": doc.get("aa_ci"),
+                "aa_variant": doc.get("aa_variant"),
             }
         )
     return summaries
