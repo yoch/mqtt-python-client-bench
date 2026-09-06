@@ -22,7 +22,12 @@ _PROTOCOLS = """
           Different ceilings are the measurement.</li>
           <li><strong>Matched-load latency</strong> — the same absolute <code>target_rate</code>
           for every client, either written on the point or resolved once from
-          <code>shared_load_fraction</code> × <code>C_common = min(capacities)</code>.
+          <code>shared_load_fraction</code> × <code>C_common = min(capacities)</code>
+          of <em>that matrix or compare only</em>. A third, slower client
+          (Paho) must never size an asyncio pairwise grid.
+          Official matched-load cells fail closed above
+          <code>MATCHED_LOAD_BACKPRESSURE_MAX</code> (0.2&nbsp;% missed slots);
+          relative-load characterization still uses 2&nbsp;%.
           If official capacity is null, only calibrate runs voided
           <em>exclusively</em> by <code>broker_headroom_low</code> may
           contribute an observed lower bound; timeouts and mixed failures
@@ -112,7 +117,12 @@ _LIMITS = """
           <li>Netem profiles (<code>lan</code>/<code>wan</code>/<code>edge</code>) and smoke runs are
           diagnostic and marked non-comparable.</li>
           <li>Application RTT drives both sides with the same library, which amplifies stack cost on
-          purpose; it is not a neutral peer RTT.</li>
+          purpose; it is not a neutral peer RTT. mqttium and gmqtt take the
+          worker's native asyncio loop; Paho stays on its sync facade.
+          Bridged historical RTT is not evidence of a native ranking.</li>
+          <li>The ARM three-way grid that sized <code>C_common</code> with Paho
+          is <code>superseded</code> / contextual only. Official replacement:
+          two pairwise campaigns in <code>scripts/run_pairwise_rtt_campaign.sh</code>.</li>
           <li>The 64 KiB and 1 MiB payload points are broker bound: the ranking inverts there and
           should not be read as a comparison between libraries.</li>
         </ul>"""

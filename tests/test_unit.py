@@ -3872,6 +3872,7 @@ class DualProtocolTests(unittest.TestCase):
         # Every module the fingerprint covers must exist, or it silently
         # degrades to hashing the word "missing".
         self.assertIn("scripts/mqtt_hammer.c", MEASUREMENT_PATH)
+        self.assertIn("roles/rtt_drive.py", MEASUREMENT_PATH)
         for rel in MEASUREMENT_PATH:
             self.assertTrue(_measurement_file(rel).exists(), f"{rel} is not in the tree")
 
@@ -4534,6 +4535,7 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertIn("publish_path", drive)
         for src, name in ((initiator, "rtt_initiator"), (responder, "responder")):
             self.assertIn("select_rtt_drive", src, name)
+            self.assertIn("require_native_for_async_peer", src, name)
             self.assertIn("native_async", src, name)
             self.assertIn("_run_native", src, name)
 
@@ -4556,12 +4558,16 @@ class NativeRttDriveTests(unittest.TestCase):
             {
                 "client": "mqttium",
                 "harness_fingerprint": "abc",
+                "harness_git_sha": "00b7a2ae",
                 "publish_path": "native_async",
                 "native_async": True,
                 "status": "valid",
                 "reasons": [],
                 "primary_msgs_per_s": 1000.0,
                 "run_id": "deadbeef",
+                "ab_label": "A",
+                "slot": 0,
+                "broker": {"version": "2.1.2"},
                 "point": {
                     "scenario": "application_rtt_fixed_rate",
                     "protocol": "MQTTv311",
@@ -4596,7 +4602,95 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertEqual(row["publish_path"], "native_async")
         self.assertTrue(row["native_async"])
         self.assertEqual(row["p50_ms"], 0.5)
+        self.assertEqual(row["ab_label"], "A")
+        self.assertEqual(row["slot"], 0)
+        self.assertEqual(row["broker_version"], "2.1.2")
+        self.assertEqual(row["architecture"], "aarch64")
+        self.assertEqual(row["harness_git_sha"], "00b7a2ae")
         self.assertNotIn("latencies_ns", row)
+
+    def test_compare_document_rows_and_verdicts_are_persisted(self):
+        from mqtt_client_bench.archive import extract_compare_summaries, extract_run_rows
+
+        doc = {
+            "scenario": "application_rtt_fixed_rate",
+            "baseline_client": "mqttium",
+            "candidate_client": "gmqtt",
+            "order": ["A", "B", "B", "A"],
+            "baseline_identity": {"publish_path": "native_async"},
+            "candidate_identity": {"publish_path": "native_async"},
+            "points": [
+                {
+                    "point": {
+                        "protocol": "MQTTv311",
+                        "shared_load_fraction": 0.75,
+                        "target_rate": 10558.0,
+                        "shared_capacity_msgs_per_s": 14077.0,
+                    },
+                    "order": ["A", "B", "B", "A"],
+                    "baseline_rates": [1200.0, 1190.0],
+                    "candidate_rates": [1300.0, 1280.0],
+                    "block_ratios": [1.08, 1.07],
+                    "verdict": {
+                        "verdict": "inconclusive",
+                        "median_ratio": 1.075,
+                        "ci_low": -0.01,
+                        "ci_high": 0.09,
+                        "absolute_effect_pct": 7.5,
+                        "excludes_zero_effect": False,
+                        "n_blocks": 2,
+                        "block_ratios": [1.08, 1.07],
+                    },
+                    "runs": [
+                        {
+                            "client": "mqttium",
+                            "status": "valid",
+                            "ab_label": "A",
+                            "slot": 0,
+                            "publish_path": "native_async",
+                            "native_async": True,
+                            "point": {
+                                "scenario": "application_rtt_fixed_rate",
+                                "protocol": "MQTTv311",
+                                "target_rate": 10558.0,
+                            },
+                            "workers": [
+                                {
+                                    "role": "rtt_initiator",
+                                    "offered": 1000,
+                                    "submitted": 1000,
+                                    "completed_in_window": 1000,
+                                    "missed_due_to_backpressure": 0,
+                                    "latency_summary": {"p50_ms": 0.5, "p95_ms": 0.6, "p99_ms": 0.7},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        rows = extract_run_rows(doc)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["ab_label"], "A")
+        self.assertEqual(rows[0]["target_rate"], 10558.0)
+        summaries = extract_compare_summaries(doc)
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["verdict"], "inconclusive")
+        self.assertEqual(summaries[0]["n_blocks"], 2)
+        self.assertEqual(summaries[0]["block_ratios"], [1.08, 1.07])
+
+    def test_require_native_raises_on_silent_facade(self):
+        from mqtt_client_bench.roles.rtt_drive import (
+            require_native_for_async_peer,
+            select_rtt_drive,
+        )
+
+        require_native_for_async_peer("mqttium", select_rtt_drive("mqttium"))
+        require_native_for_async_peer("paho", select_rtt_drive("paho"))
+        with self.assertRaises(RuntimeError):
+            require_native_for_async_peer("mqttium", select_rtt_drive("mqttium", native_async=False))
+        with self.assertRaises(RuntimeError):
+            require_native_for_async_peer("gmqtt", select_rtt_drive("gmqtt", native_async=False))
 
     def test_official_pairwise_script_never_builds_a_three_way_grid(self):
         official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()

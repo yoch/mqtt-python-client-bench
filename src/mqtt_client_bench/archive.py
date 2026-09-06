@@ -149,10 +149,17 @@ def extract_run_row(run: dict, *, document: dict | None = None) -> dict:
         "client_version": identity.get("client_version"),
         "adapter": identity.get("adapter"),
         "harness_fingerprint": run.get("harness_fingerprint") or doc.get("harness_fingerprint"),
+        "harness_git_sha": run.get("harness_git_sha") or doc.get("harness_git_sha"),
         "host_fingerprint": host.get("fingerprint"),
         "host_role": host.get("role"),
         "machine": env.get("machine"),
+        "architecture": env.get("machine"),
         "python": env.get("python"),
+        "broker_version": (
+            (run.get("broker") or {}).get("version")
+            or (doc.get("broker") or {}).get("version")
+            or ((run.get("sys_counters") or {}).get("broker") or {}).get("version")
+        ),
         "scaling_governor": env.get("scaling_governor") or (run.get("host_state") or {}).get("scaling_governor"),
         "scenario": point.get("scenario") or doc.get("scenario"),
         "protocol": point.get("protocol") or run.get("protocol_effective"),
@@ -163,6 +170,9 @@ def extract_run_row(run: dict, *, document: dict | None = None) -> dict:
         "run_index": run.get("run_index"),
         "matrix_slot": run.get("matrix_slot"),
         "matrix_rotation": run.get("matrix_rotation"),
+        "ab_label": run.get("ab_label"),
+        "slot": run.get("slot"),
+        "order": run.get("order") or doc.get("order"),
         "status": run.get("status"),
         "reasons": list(run.get("reasons") or []),
         "primary_msgs_per_s": run.get("primary_msgs_per_s"),
@@ -185,12 +195,55 @@ def extract_run_row(run: dict, *, document: dict | None = None) -> dict:
 
 
 def extract_run_rows(doc: dict) -> list:
-    """Flatten a scenario document into persistable per-run rows."""
+    """Flatten a scenario or compare document into persistable per-run rows."""
     rows = []
-    for block in doc.get("results") or []:
+    blocks = list(doc.get("results") or [])
+    if not blocks and doc.get("points"):
+        blocks = list(doc.get("points") or [])
+    if not blocks and doc.get("runs"):
+        blocks = [{"point": doc.get("point") or {}, "runs": doc.get("runs")}]
+    for block in blocks:
         point = block.get("point") or {}
         for run in block.get("runs") or []:
             merged = dict(run)
             merged.setdefault("point", point)
+            if block.get("order") and not merged.get("order"):
+                merged["order"] = block["order"]
             rows.append(extract_run_row(merged, document=doc))
     return rows
+
+
+def extract_compare_summaries(doc: dict) -> list:
+    """Persist ABBA / A/A verdicts without raw samples."""
+    if doc.get("baseline_client") is None or not doc.get("points"):
+        return []
+    summaries = []
+    for block in doc.get("points") or []:
+        verdict = block.get("verdict") or {}
+        point = block.get("point") or {}
+        summaries.append(
+            {
+                "kind": "compare_point",
+                "scenario": doc.get("scenario"),
+                "baseline_client": doc.get("baseline_client"),
+                "candidate_client": doc.get("candidate_client"),
+                "protocol": point.get("protocol"),
+                "shared_load_fraction": point.get("shared_load_fraction"),
+                "target_rate": point.get("target_rate"),
+                "C_common": point.get("shared_capacity_msgs_per_s"),
+                "order": block.get("order") or doc.get("order"),
+                "n_blocks": verdict.get("n_blocks"),
+                "block_ratios": verdict.get("block_ratios") or block.get("block_ratios"),
+                "median_ratio": verdict.get("median_ratio"),
+                "ci_low": verdict.get("ci_low"),
+                "ci_high": verdict.get("ci_high"),
+                "absolute_effect_pct": verdict.get("absolute_effect_pct"),
+                "excludes_zero_effect": verdict.get("excludes_zero_effect"),
+                "verdict": verdict.get("verdict"),
+                "n_valid_baseline": len(block.get("baseline_rates") or []),
+                "n_valid_candidate": len(block.get("candidate_rates") or []),
+                "publish_path_baseline": (doc.get("baseline_identity") or {}).get("publish_path"),
+                "publish_path_candidate": (doc.get("candidate_identity") or {}).get("publish_path"),
+            }
+        )
+    return summaries
