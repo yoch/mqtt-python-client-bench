@@ -285,6 +285,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         load_profile_dir=getattr(args, "load_profile_dir", None),
         host_profile_path=getattr(args, "host_profile", None),
         variant_index=args.variant_index,
+        broker=getattr(args, "broker", None),
     )
     print(json.dumps({"verdict": payload.get("verdict"), "order": payload.get("order"), "points": len(payload.get("points") or [])}, indent=2))
     return 0
@@ -449,6 +450,7 @@ def build_parser() -> argparse.ArgumentParser:
     cmp_p.add_argument("--blocks", type=int, default=4)
     cmp_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
     cmp_p.add_argument("--variant-index", type=int, default=None, help="Compare a single variant index (default: all)")
+    cmp_p.add_argument("--broker", help="External broker host:port")
     cmp_p.add_argument("--load-profile")
     cmp_p.add_argument(
         "--load-profile-dir",

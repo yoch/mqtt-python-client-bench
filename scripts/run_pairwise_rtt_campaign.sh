@@ -168,7 +168,7 @@ PY
       --blocks "$AA_BLOCKS" \
       --variant-index "$AA_VARIANT_INDEX" \
       "${BROKER_ARGS[@]}" \
-      --load-profile-dir "$cal_dir" \
+      --load-profile-dir "$cal_dir/aa" \
       --output "${pair_dir}/compare-aa-${a_client}-application_rtt_fixed_rate-v${AA_VARIANT_INDEX}.json" \
       >"$LOG_DIR/aa-${label}-${a_client}-v${AA_VARIANT_INDEX}.log" 2>&1
     echo "==> [$label] A/A ${b_client} variant=${AA_VARIANT_INDEX}"
@@ -179,7 +179,7 @@ PY
       --blocks "$AA_BLOCKS" \
       --variant-index "$AA_VARIANT_INDEX" \
       "${BROKER_ARGS[@]}" \
-      --load-profile-dir "$cal_dir" \
+      --load-profile-dir "$cal_dir/aa" \
       --output "${pair_dir}/compare-aa-${b_client}-application_rtt_fixed_rate-v${AA_VARIANT_INDEX}.json" \
       >"$LOG_DIR/aa-${label}-${b_client}-v${AA_VARIANT_INDEX}.log" 2>&1
   fi

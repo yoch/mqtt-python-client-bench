@@ -244,7 +244,44 @@ def write_official_rtt_calibrations(
         }
         (cal_dir / f"{client}-load.json").write_text(json.dumps(profile, indent=2) + "\n")
         all_caps[client] = inspected
-    payload = {"valid_rtt_capacities": all_caps, "path_proof": bool(allow_non_comparable)}
     if errors:
         raise ValueError("strict pairwise RTT capacity gate failed: " + "; ".join(errors))
+    common = _pair_common_capacities(all_caps, clients)
+    aa_dir = cal_dir / "aa"
+    aa_dir.mkdir(parents=True, exist_ok=True)
+    for client in clients:
+        aa_profile = {
+            "schema_version": 1,
+            "source": "pairwise_c_common_for_aa",
+            "client": client,
+            "c_common_of": list(clients),
+            "path_proof": bool(allow_non_comparable),
+            "non_comparable": bool(allow_non_comparable),
+            "protocol_capacities": {
+                proto: {"rtt_capacity_msgs_per_s": value}
+                for proto, value in common.items()
+            },
+        }
+        (aa_dir / f"{client}-load.json").write_text(json.dumps(aa_profile, indent=2) + "\n")
+    payload = {
+        "valid_rtt_capacities": all_caps,
+        "path_proof": bool(allow_non_comparable),
+        "c_common": common,
+        "aa_load_dir": str(aa_dir),
+    }
     return payload
+
+
+def _pair_common_capacities(all_caps: dict, clients: list[str] | tuple[str, ...]) -> dict:
+    """C_common is min of the pair. A/A of the faster client must use this, not its own ceiling."""
+    common = {}
+    for proto in REQUIRED_PROTOCOLS:
+        values = []
+        for client in clients:
+            block = (all_caps[client].get("protocols") or {}).get(proto) or {}
+            value = block.get("capacity_msgs_per_s")
+            if value is None:
+                raise ValueError(f"{client}:{proto}:missing_c_common_capacity")
+            values.append(float(value))
+        common[proto] = min(values)
+    return common
