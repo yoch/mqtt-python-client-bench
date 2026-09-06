@@ -13,6 +13,10 @@ Same-client A/A is a fail-closed publication gate, not a decorative verdict.
 Capacity, then A/A, then enforce. Ranking ABBA A/B runs only after the
 control passes. A missing CI, a single complementary pair, or an
 incomplete block all fail closed.
+
+``PROFILE=standard`` cannot weaken those invariants through environment
+overrides. ``validate_official_pairwise_policy`` is the auditable check;
+smoke and targeted paths are left free to use four A/A blocks or skip ranking.
 """
 
 from __future__ import annotations
@@ -307,9 +311,119 @@ def _pair_common_capacities(all_caps: dict, clients: list[str] | tuple[str, ...]
 # Official A/A: 25 % MQTTv311 (ARM-observed non-neutrality) and 75 % MQTTv311
 # (representative load). expand_scenario crosses fraction then protocol.
 OFFICIAL_AA_VARIANT_INDEXES = (0, 4)
+OFFICIAL_AA_BLOCKS = 6
 AA_CONTROL_MAX_ABS_EFFECT_PCT = 3.0
 MIN_AA_BLOCKS = 4
 MIN_AA_REPLICATIONS_PER_DESIGN = 2
+
+
+def _canonical_flag(value) -> str:
+    if value is True or value == 1:
+        return "1"
+    if value is False or value == 0:
+        return "0"
+    return str(value).strip()
+
+
+def parse_aa_variant_indexes(raw) -> list:
+    """Parse ``0,4`` / ``[0, 4]`` into ints. Empty or unparsable → []."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        values = list(raw)
+    else:
+        values = [part for part in str(raw).replace(" ", "").split(",") if part]
+    indexes = []
+    for item in values:
+        try:
+            indexes.append(int(item))
+        except (TypeError, ValueError):
+            return []
+    return indexes
+
+
+def validate_official_pairwise_policy(
+    *,
+    profile: str,
+    run_aa="1",
+    aa_control_enforce="1",
+    aa_blocks=OFFICIAL_AA_BLOCKS,
+    aa_variant_indexes=None,
+) -> dict:
+    """Refuse a weakened official campaign. Non-standard profiles always pass.
+
+    Insufficient official values error out; they are never silently raised
+    to the legal minimum. Smoke / targeted may keep ``AA_BLOCKS=4``,
+    ``RUN_ABBA=0`` and ``RUN_LOAD_MATRIX=0``.
+    """
+    official = str(profile).strip() == "standard"
+    payload = {
+        "ok": True,
+        "official": official,
+        "violations": [],
+    }
+    if not official:
+        return payload
+    run_flag = _canonical_flag(run_aa)
+    enforce_flag = _canonical_flag(aa_control_enforce)
+    if run_flag != "1":
+        payload["violations"].append(f"official_policy_violation:RUN_AA={run_flag}")
+    if enforce_flag != "1":
+        payload["violations"].append(
+            f"official_policy_violation:AA_CONTROL_ENFORCE={enforce_flag}"
+        )
+    raw_blocks = aa_blocks
+    try:
+        n_blocks = int(str(aa_blocks).strip())
+    except (TypeError, ValueError):
+        n_blocks = None
+        payload["violations"].append(
+            f"official_policy_violation:AA_BLOCKS={raw_blocks}"
+        )
+    if n_blocks is not None:
+        if n_blocks % 2 != 0:
+            payload["violations"].append(
+                f"official_policy_violation:AA_BLOCKS_odd={n_blocks}"
+            )
+        if n_blocks < OFFICIAL_AA_BLOCKS:
+            payload["violations"].append(
+                f"official_policy_violation:AA_BLOCKS={n_blocks}"
+            )
+        per_design = n_blocks // 2 if n_blocks >= 0 else 0
+        if per_design < MIN_AA_REPLICATIONS_PER_DESIGN:
+            payload["violations"].append(
+                "official_policy_violation:insufficient_replication_per_design:"
+                f"AA_BLOCKS={n_blocks}"
+            )
+    indexes = parse_aa_variant_indexes(aa_variant_indexes)
+    if aa_variant_indexes not in (None, "") and not indexes:
+        payload["violations"].append(
+            f"official_policy_violation:AA_VARIANT_INDEXES={aa_variant_indexes}"
+        )
+    required = set(OFFICIAL_AA_VARIANT_INDEXES)
+    present = set(indexes)
+    for missing in sorted(required - present):
+        payload["violations"].append(
+            f"official_policy_violation:missing_AA_variant:{missing}"
+        )
+    payload["ok"] = not payload["violations"]
+    return payload
+
+
+def continue_to_ab_ranking(aa_gate_passed: bool) -> bool:
+    """A/B ranking runs only after a successful A/A gate."""
+    return bool(aa_gate_passed)
+
+
+def ab_compare_outputs(root: str | Path) -> list:
+    """Compare documents that are not same-client A/A controls."""
+    root = Path(root)
+    names = []
+    for path in sorted(root.rglob("compare-*.json")):
+        if path.name.startswith("compare-aa-"):
+            continue
+        names.append(str(path.relative_to(root)))
+    return names
 
 
 def _design_counts(designs: list) -> dict:
@@ -489,3 +603,30 @@ def enforce_aa_controls(
     if enforce and failures:
         raise ValueError("A/A control failed: " + "; ".join(failures))
     return payload
+
+
+def maybe_run_ab_ranking_after_aa(
+    root: str | Path,
+    *,
+    enforce: bool,
+    rank,
+) -> dict:
+    """Call ``rank`` only when the A/A gate passed.
+
+    A failing enforced control raises before ``rank``. A failed or missing
+    gate never produces a new A/B compare.
+    """
+    payload = enforce_aa_controls(root, enforce=enforce, require_files=enforce)
+    if not continue_to_ab_ranking(payload.get("ok") is True):
+        return {
+            "ranked": False,
+            "aa": payload,
+            "ab_outputs": ab_compare_outputs(root),
+        }
+    rank()
+    return {
+        "ranked": True,
+        "aa": payload,
+        "ab_outputs": ab_compare_outputs(root),
+    }
+
