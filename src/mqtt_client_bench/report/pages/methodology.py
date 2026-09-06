@@ -23,8 +23,11 @@ _PROTOCOLS = """
           <li><strong>Matched-load latency</strong> — the same absolute <code>target_rate</code>
           for every client, either written on the point or resolved once from
           <code>shared_load_fraction</code> × <code>C_common = min(capacities)</code>.
-          A client that cannot hold the shared point is <code>offer_limited</code>;
-          the rate is never lowered. <code>puback_latency_fixed_rate</code> and
+          A broker-headroom void on one client's official capacity still
+          contributes an observed delivered rate as a lower bound, so the
+          slower valid peer can set <code>C_common</code>. A client that cannot
+          hold the shared point is <code>offer_limited</code>; the rate is never
+          lowered. <code>puback_latency_fixed_rate</code> and
           <code>application_rtt_fixed_rate</code>.</li>
           <li><strong>Relative-load characterization</strong> — fractions of <em>that client's
           own</em> capacity (<code>puback_latency_qos1</code>,

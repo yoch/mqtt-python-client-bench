@@ -282,6 +282,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         profile=args.profile,
         output=args.output,
         load_profile_path=args.load_profile,
+        load_profile_dir=getattr(args, "load_profile_dir", None),
         host_profile_path=getattr(args, "host_profile", None),
         variant_index=args.variant_index,
     )
@@ -449,6 +450,10 @@ def build_parser() -> argparse.ArgumentParser:
     cmp_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
     cmp_p.add_argument("--variant-index", type=int, default=None, help="Compare a single variant index (default: all)")
     cmp_p.add_argument("--load-profile")
+    cmp_p.add_argument(
+        "--load-profile-dir",
+        help="Directory of <client>-load.json calibrations (required for shared_load_fraction; do not pass a single --load-profile)",
+    )
     cmp_p.add_argument("--host-profile")
     cmp_p.add_argument("--output")
     cmp_p.set_defaults(func=cmd_compare)
