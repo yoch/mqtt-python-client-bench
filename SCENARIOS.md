@@ -275,12 +275,16 @@ Mosquitto 2.1 is single-threaded: do not widen the broker cpuset.
   even. The published ratio is always candidate / baseline. Consecutive
   complementary ABBA+BAAB blocks form one experimental unit in the log
   domain; the centre is the geometric mean of those units, so a position
-  effect that maps to `r` and `1/r` recentres on 1. A CI requires at
-  least two such units (four blocks). Same-client A/A is a fail-closed
-  official gate: all requested blocks complete, both designs with ≥2
-  replications, a real CI containing ratio 1, and `|effect| ≤ 3 %`.
-  Default official A/A variants are 25 % MQTTv311 (index 0) and 75 %
-  MQTTv311 (index 4). A/A runs and must pass before any A/B ranking.
+  effect that maps to `r` and `1/r` recentres on 1. Same-client A/A is a
+  fail-closed official gate: all requested blocks complete, both designs
+  with ≥2 replications, `|centre effect| ≤ 3 %`, and every complementary
+  pair-unit effect within 3 %. A CI that contains zero is not the gate.
+  Targeted validation may use 4 blocks (2 pair units) as a descriptive
+  control. Official campaigns keep 6 blocks (3 pair units). Neither n is
+  large enough for a bootstrap CI to be an equivalence test, so the gate
+  is bias plus pair-unit stability. Default official A/A variants are 25 %
+  MQTTv311 (index 0) and 75 % MQTTv311 (index 4). A/A runs and must pass
+  before any A/B ranking.
 - **90 % of closed-loop RTT capacity is often not a sustainable open-loop
   offer.** A client can complete ~C pairs/s when it is allowed to back-pressure
   itself; offering `0.90 × C_common` as an open-loop `target_rate` can still

@@ -15,6 +15,8 @@ from mqtt_client_bench.adapters.registry import adapter_identity
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
 from mqtt_client_bench.roles.rtt_drive import (
     drive_identity,
+    measure_runtime_report,
+    process_runtime_snapshot,
     require_native_for_async_peer,
     select_rtt_drive,
 )
@@ -149,8 +151,20 @@ def _on_message(state, msg):
         event.set()
 
 
-def _result_body(state, identity, window, timeouts, latencies, latency_sampling, completed, sent, offered, missed):
-    return {
+def _result_body(
+    state,
+    identity,
+    window,
+    timeouts,
+    latencies,
+    latency_sampling,
+    completed,
+    sent,
+    offered,
+    missed,
+    runtime=None,
+):
+    body = {
         "ok": True,
         "role": "rtt_initiator",
         "duration_s": window,
@@ -170,6 +184,9 @@ def _result_body(state, identity, window, timeouts, latencies, latency_sampling,
         "msgs_per_s": completed / window,
         **identity,
     }
+    if runtime:
+        body["runtime"] = runtime
+    return body
 
 
 def _reset_measure_counters(state):
@@ -283,9 +300,11 @@ def _run_facade(
     barrier.close()
 
     state["phase"] = "measure"
+    runtime_start = process_runtime_snapshot()
     t0 = time.perf_counter()
     _send_loop(adapter, state, request_topic, qos, run_id, outstanding, target_rate, t0 + duration_s, sequence_start=0)
     t1 = time.perf_counter()
+    runtime = measure_runtime_report(adapter, runtime_start, process_runtime_snapshot())
     state["phase"] = "drain"
     deadline = time.perf_counter() + drain_s
     while time.perf_counter() < deadline:
@@ -300,7 +319,19 @@ def _run_facade(
     window = max(t1 - t0, 1e-9)
     write_json(
         cfg["result_path"],
-        _result_body(state, identity, window, timeouts, latencies, latency_sampling, completed, sent, offered, missed),
+        _result_body(
+            state,
+            identity,
+            window,
+            timeouts,
+            latencies,
+            latency_sampling,
+            completed,
+            sent,
+            offered,
+            missed,
+            runtime=runtime,
+        ),
     )
     return 0
 
@@ -394,6 +425,7 @@ def _run_native(
         barrier.close()
 
         state["phase"] = "measure"
+        runtime_start = process_runtime_snapshot()
         t0 = time.perf_counter()
         await _send_loop_async(
             adapter,
@@ -408,6 +440,7 @@ def _run_native(
             sync_on_loop=plan["publish_sync_on_loop"],
         )
         t1 = time.perf_counter()
+        runtime = measure_runtime_report(adapter, runtime_start, process_runtime_snapshot())
         state["phase"] = "drain"
         deadline = time.perf_counter() + drain_s
         while time.perf_counter() < deadline:
@@ -422,7 +455,7 @@ def _run_native(
             cfg["result_path"],
             _result_body(
                 state, identity, window, timeouts, latencies, latency_sampling,
-                completed, sent, offered, missed,
+                completed, sent, offered, missed, runtime=runtime,
             ),
         )
         return 0
