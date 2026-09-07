@@ -18,6 +18,15 @@
 # test. Default A/A variants are 25 % and 75 %
 # MQTTv311 (indexes 0,4). Targeted ARM validation uses AA_BLOCKS=4.
 #
+# Open-loop application RTT is always externally paced in the official
+# standard campaign. The old in-loop asyncio pacer is a causal/diagnostic
+# control only: it feeds the workload from the SUT event loop and is not a
+# valid clock for the published sub-millisecond matched-load comparison.
+# The extra non-paired matched-load matrix is intentionally skipped in
+# standard: it is redundant with ABBA for ranking and its matrix CLI has no
+# pacer-mode surface. Closed-loop RTT capacity remains unchanged and still
+# freezes C_common before A/A and A/B.
+#
 # PROFILE=standard refuses weakened overrides (RUN_AA=0, AA_CONTROL_ENFORCE=0,
 # AA_BLOCKS<6 or odd, missing variant 0 or 4) before any measurement. Smoke
 # and targeted paths may keep AA_BLOCKS=4 and skip ranking.
@@ -26,7 +35,7 @@
 #   bash scripts/run_pairwise_rtt_campaign.sh
 #   PROFILE=smoke bash scripts/run_pairwise_rtt_campaign.sh   # functional only
 #   bash scripts/run_targeted_aa_validation.sh                  # A/A recheck
-#   BENCH_BROKER=127.0.0.1:11883 BENCH_BROKER_PID=$pid \\
+#   BENCH_BROKER=127.0.0.1:11883 BENCH_BROKER_PID=$pid \
 #     bash scripts/run_pairwise_rtt_campaign.sh
 set -euo pipefail
 
@@ -48,6 +57,7 @@ RUN_AA="${RUN_AA:-1}"
 RUN_LOAD_MATRIX="${RUN_LOAD_MATRIX:-1}"
 RUN_ASYNCIO_PAIR="${RUN_ASYNCIO_PAIR:-1}"
 RUN_SYNC_REFERENCE_PAIR="${RUN_SYNC_REFERENCE_PAIR:-1}"
+PACER_MODE="${PACER_MODE:-external}"
 # Empty = every expanded point. Smoke may set e.g. 0,1 (25% v311 and 25% v5).
 ABBA_VARIANT_INDEXES="${ABBA_VARIANT_INDEXES:-}"
 # expand order: fraction then protocol → 0 = 25% MQTTv311, 4 = 75% MQTTv311.
@@ -59,6 +69,17 @@ if [ -z "${AA_CONTROL_ENFORCE:-}" ]; then
   else
     AA_CONTROL_ENFORCE=0
   fi
+fi
+
+if [ "$PROFILE" = "standard" ]; then
+  if [ "$PACER_MODE" != "external" ]; then
+    echo "standard pairwise RTT requires PACER_MODE=external; in_loop is diagnostic only" >&2
+    exit 2
+  fi
+  # The non-paired load matrix is not used by the gate or ABBA estimator and
+  # currently has no explicit pacer-mode CLI. Do not spend standard-run time on
+  # an in-loop workload whose numbers cannot be published.
+  RUN_LOAD_MATRIX=0
 fi
 
 if [ "${CLIENTS:-}" = "mqttium,gmqtt,paho" ] || [ "${CLIENTS:-}" = "mqttium,paho,gmqtt" ]; then
@@ -177,25 +198,27 @@ run_aa() {
   for idx in "${aa_idxs[@]}"; do
     idx="${idx// /}"
     [ -n "$idx" ] || continue
-    echo "==> [$label] A/A ${a_client} variant=${idx} blocks=${AA_BLOCKS}"
+    echo "==> [$label] A/A ${a_client} variant=${idx} blocks=${AA_BLOCKS} pacer=${PACER_MODE}"
     python -m mqtt_client_bench.run compare \
       --clients "${a_client},${a_client}" \
       --scenario application_rtt_fixed_rate \
       --profile "$PROFILE" \
       --blocks "$AA_BLOCKS" \
       --variant-index "$idx" \
+      --pacer-mode "$PACER_MODE" \
       "${BROKER_ARGS[@]}" \
       --load-profile-dir "$cal_dir/aa" \
       --output "${pair_dir}/compare-aa-${a_client}-application_rtt_fixed_rate-v${idx}.json" \
       >"$LOG_DIR/aa-${label}-${a_client}-v${idx}.log" 2>&1
     if [ "$a_client" != "$b_client" ]; then
-      echo "==> [$label] A/A ${b_client} variant=${idx} blocks=${AA_BLOCKS}"
+      echo "==> [$label] A/A ${b_client} variant=${idx} blocks=${AA_BLOCKS} pacer=${PACER_MODE}"
       python -m mqtt_client_bench.run compare \
         --clients "${b_client},${b_client}" \
         --scenario application_rtt_fixed_rate \
         --profile "$PROFILE" \
         --blocks "$AA_BLOCKS" \
         --variant-index "$idx" \
+        --pacer-mode "$PACER_MODE" \
         "${BROKER_ARGS[@]}" \
         --load-profile-dir "$cal_dir/aa" \
         --output "${pair_dir}/compare-aa-${b_client}-application_rtt_fixed_rate-v${idx}.json" \
@@ -222,14 +245,14 @@ run_ranking() {
       --output-dir "$pair_dir" \
       >"$LOG_DIR/matrix-${label}-application_rtt_fixed_rate.log" 2>&1
   else
-    echo "==> [$label] skipping matched-load matrix (RUN_LOAD_MATRIX=0)"
+    echo "==> [$label] skipping non-paired matched-load matrix (RUN_LOAD_MATRIX=0); ABBA uses pacer=${PACER_MODE}"
   fi
 
   if [ "$RUN_ABBA" != "1" ]; then
     echo "==> [$label] skipping A/B ABBA ranking (RUN_ABBA=0)"
     return 0
   fi
-  echo "==> [$label] ABBA $pair application_rtt_fixed_rate blocks=${ABBA_BLOCKS}"
+  echo "==> [$label] ABBA $pair application_rtt_fixed_rate blocks=${ABBA_BLOCKS} pacer=${PACER_MODE}"
   if [ -n "$ABBA_VARIANT_INDEXES" ]; then
     IFS=',' read -ra idxs <<< "$ABBA_VARIANT_INDEXES"
     for idx in "${idxs[@]}"; do
@@ -239,6 +262,7 @@ run_ranking() {
         --profile "$PROFILE" \
         --blocks "$ABBA_BLOCKS" \
         --variant-index "$idx" \
+        --pacer-mode "$PACER_MODE" \
         "${BROKER_ARGS[@]}" \
         --load-profile-dir "$cal_dir" \
         --output "${pair_dir}/compare-${label}-application_rtt_fixed_rate-v${idx}.json" \
@@ -250,6 +274,7 @@ run_ranking() {
       --scenario application_rtt_fixed_rate \
       --profile "$PROFILE" \
       --blocks "$ABBA_BLOCKS" \
+      --pacer-mode "$PACER_MODE" \
       "${BROKER_ARGS[@]}" \
       --load-profile-dir "$cal_dir" \
       --output "${pair_dir}/compare-${label}-application_rtt_fixed_rate.json" \
@@ -306,7 +331,7 @@ fi
 
 persist_evidence
 enforce_aa
-echo "AA_GATE_PASSED profile=${PROFILE} aa_indexes=${AA_VARIANT_INDEXES} aa_blocks=${AA_BLOCKS}"
+echo "AA_GATE_PASSED profile=${PROFILE} aa_indexes=${AA_VARIANT_INDEXES} aa_blocks=${AA_BLOCKS} pacer=${PACER_MODE}"
 
 python - <<'PY'
 from mqtt_client_bench.pairwise import continue_to_ab_ranking
@@ -323,4 +348,4 @@ if [ "$RUN_ABBA" = "1" ] || [ "$RUN_LOAD_MATRIX" = "1" ]; then
   persist_evidence
 fi
 
-echo "PAIRWISE_NATIVE_RTT_DONE profile=${PROFILE} out=${OUT} aa_indexes=${AA_VARIANT_INDEXES} aa_enforce=${AA_CONTROL_ENFORCE}"
+echo "PAIRWISE_NATIVE_RTT_DONE profile=${PROFILE} out=${OUT} aa_indexes=${AA_VARIANT_INDEXES} aa_enforce=${AA_CONTROL_ENFORCE} pacer=${PACER_MODE}"
