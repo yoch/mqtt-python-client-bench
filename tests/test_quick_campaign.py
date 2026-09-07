@@ -22,12 +22,14 @@ class QuickCampaignTests(unittest.TestCase):
         self.assertIn('export AA_CONTROL_ENFORCE="${AA_CONTROL_ENFORCE:-0}"', self.script)
         self.assertIn('export PROFILE="${PROFILE:-smoke}"', self.script)
 
-    def test_quick_campaign_still_runs_both_pairs_and_full_ab_grid(self) -> None:
+    def test_quick_campaign_runs_both_pairs(self) -> None:
         self.assertIn('export RUN_ASYNCIO_PAIR="${RUN_ASYNCIO_PAIR:-1}"', self.script)
         self.assertIn('export RUN_SYNC_REFERENCE_PAIR="${RUN_SYNC_REFERENCE_PAIR:-1}"', self.script)
         self.assertIn('export RUN_ABBA="${RUN_ABBA:-1}"', self.script)
         self.assertIn('export RUN_LOAD_MATRIX="${RUN_LOAD_MATRIX:-0}"', self.script)
-        self.assertNotIn("ABBA_VARIANT_INDEXES=", self.script)
+
+    def test_quick_defaults_to_25_and_50_percent_for_both_protocols(self) -> None:
+        self.assertIn('export ABBA_VARIANT_INDEXES="${ABBA_VARIANT_INDEXES:-0,1,2,3}"', self.script)
 
 
 if __name__ == "__main__":
