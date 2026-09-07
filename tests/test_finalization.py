@@ -54,11 +54,16 @@ class OfficialPairwisePacingTests(unittest.TestCase):
         )
 
     def test_standard_skips_nonpaired_matched_load_matrix(self) -> None:
-        # Closed-loop capacity still runs; only the redundant fixed-rate matrix
-        # is disabled so no in-loop result can masquerade as published RTT.
-        standard_guard = self.script.split('if [ "$PROFILE" = "standard" ]; then', 1)[1]
-        standard_guard = standard_guard.split("fi", 1)[0]
-        self.assertIn("RUN_LOAD_MATRIX=0", standard_guard)
+        # Match the actual standard guard, not the earlier AA default branch
+        # which has the same shell condition.
+        self.assertIn(
+            'if [ "$PROFILE" = "standard" ]; then\n'
+            '  if [ "$PACER_MODE" != "external" ]; then',
+            self.script,
+        )
+        self.assertIn(
+            '  RUN_LOAD_MATRIX=0\nfi\n\nif [ "${CLIENTS:-}"', self.script
+        )
         self.assertIn("rtt_capacity_qos1", self.script)
 
     def test_every_official_compare_receives_explicit_pacer_mode(self) -> None:
