@@ -16,8 +16,8 @@ class DailyCampaignTests(unittest.TestCase):
     def test_daily_uses_two_balanced_blocks(self) -> None:
         self.assertIn('export ABBA_BLOCKS="${ABBA_BLOCKS:-2}"', self.script)
 
-    def test_daily_only_samples_25_and_75_v311(self) -> None:
-        self.assertIn('export ABBA_VARIANT_INDEXES="${ABBA_VARIANT_INDEXES:-0,4}"', self.script)
+    def test_daily_only_samples_25_and_50_v311(self) -> None:
+        self.assertIn('export ABBA_VARIANT_INDEXES="${ABBA_VARIANT_INDEXES:-0,2}"', self.script)
 
     def test_daily_delegates_to_quick_campaign(self) -> None:
         self.assertIn('run_pairwise_rtt_quick.sh', self.script)
