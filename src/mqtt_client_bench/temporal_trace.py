@@ -552,35 +552,67 @@ def overlay_svg(
     return "".join(parts)
 
 
+def _as_dict(value) -> Optional[dict]:
+    return value if isinstance(value, dict) else None
+
+
+def _as_list(value) -> List[Any]:
+    return value if isinstance(value, list) else []
+
+
 def extract_run_traces(doc: dict) -> List[dict]:
-    """Pull temporal traces out of a compare or scenario document."""
+    """Pull temporal traces out of a compare or scenario document.
+
+    Ignore JSON that is not a compare/run document. Never iterate a
+    non-list ``runs`` field (manifests and calibrations may store an int).
+    """
     found = []
-    blocks = list(doc.get("points") or [])
-    if not blocks and doc.get("runs"):
-        blocks = [{"point": doc.get("point") or {}, "runs": doc.get("runs")}]
+    root = _as_dict(doc)
+    if root is None:
+        return found
+    blocks = _as_list(root.get("points"))
+    if not blocks:
+        runs = root.get("runs")
+        if isinstance(runs, list):
+            point = _as_dict(root.get("point")) or {}
+            blocks = [{"point": point, "runs": runs}]
     for block in blocks:
-        point = block.get("point") or doc.get("point") or {}
-        for run in block.get("runs") or []:
-            workers = run.get("workers") or []
-            initiator = next((w for w in workers if w.get("role") == "rtt_initiator"), None)
+        block_d = _as_dict(block)
+        if block_d is None:
+            continue
+        point = _as_dict(block_d.get("point")) or _as_dict(root.get("point")) or {}
+        for run in _as_list(block_d.get("runs")):
+            run_d = _as_dict(run)
+            if run_d is None:
+                continue
+            workers = _as_list(run_d.get("workers"))
+            initiator = next(
+                (w for w in workers if isinstance(w, dict) and w.get("role") == "rtt_initiator"),
+                None,
+            )
             if initiator is None:
                 continue
-            payload = initiator.get("temporal_trace") or run.get("temporal_trace")
+            payload = initiator.get("temporal_trace") or run_d.get("temporal_trace")
             records = traces_from_columnar(payload) if isinstance(payload, dict) else []
+            if not records:
+                continue
+            run_point = _as_dict(run_d.get("point")) or point
             found.append(
                 {
-                    "run_id": run.get("run_id"),
-                    "client": run.get("client"),
-                    "ab_label": run.get("ab_label"),
-                    "slot": run.get("slot"),
-                    "pacer_mode": (run.get("point") or point).get("pacer_mode")
-                    or (initiator.get("pacing") or {}).get("mode"),
-                    "target_rate": (run.get("point") or point).get("target_rate"),
-                    "pacing": initiator.get("pacing") or run.get("pacing"),
+                    "run_id": run_d.get("run_id"),
+                    "client": run_d.get("client"),
+                    "ab_label": run_d.get("ab_label"),
+                    "slot": run_d.get("slot"),
+                    "pacer_mode": run_point.get("pacer_mode")
+                    or (_as_dict(initiator.get("pacing")) or {}).get("mode"),
+                    "target_rate": run_point.get("target_rate"),
+                    "pacing": initiator.get("pacing") or run_d.get("pacing"),
                     "records": records,
                     "analysis": analyze_trace(
                         records,
-                        interval_ns=(initiator.get("pacing") or {}).get("target_interval_ns"),
+                        interval_ns=(_as_dict(initiator.get("pacing")) or {}).get(
+                            "target_interval_ns"
+                        ),
                     ),
                 }
             )
@@ -704,14 +736,18 @@ def write_trace_artifacts(doc: dict, output_dir: str | Path) -> dict:
 
 def _load_docs(input_path: Path) -> List[dict]:
     docs = []
+    paths: List[Path]
     if input_path.is_file():
-        docs.append(json.loads(input_path.read_text(encoding="utf-8")))
-        return docs
-    for path in sorted(input_path.glob("*.json")):
+        paths = [input_path]
+    else:
+        paths = sorted(input_path.glob("*.json"))
+    for path in paths:
         try:
-            docs.append(json.loads(path.read_text(encoding="utf-8")))
-        except json.JSONDecodeError:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
             continue
+        if isinstance(payload, dict):
+            docs.append(payload)
     return docs
 
 
@@ -728,11 +764,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     docs = _load_docs(input_path)
     summaries = []
     for idx, doc in enumerate(docs):
+        traces = extract_run_traces(doc)
+        if not traces:
+            continue
         target = output_root / (doc.get("baseline_client") or f"doc{idx}")
         if doc.get("pacer_mode"):
             target = Path(str(target) + f"-{doc['pacer_mode']}")
-        if doc.get("points") and (doc["points"][0].get("point") or {}).get("shared_load_fraction"):
-            frac = (doc["points"][0]["point"] or {}).get("shared_load_fraction")
+        points = doc.get("points")
+        first_point = None
+        if isinstance(points, list) and points:
+            first = points[0] if isinstance(points[0], dict) else None
+            if first is not None:
+                first_point = first.get("point") if isinstance(first.get("point"), dict) else None
+        if isinstance(first_point, dict) and first_point.get("shared_load_fraction") is not None:
+            frac = first_point.get("shared_load_fraction")
             target = Path(str(target) + f"-f{frac}")
         summaries.append(write_trace_artifacts(doc, target))
     (output_root / "index.json").write_text(json.dumps(summaries, indent=2) + "\n", encoding="utf-8")

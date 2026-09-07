@@ -20,8 +20,10 @@ from mqtt_client_bench.temporal_trace import (
     TemporalTraceSampler,
     analyze_trace,
     clock_chain_ok,
+    extract_run_traces,
     lag1_autocorr,
     load_jsonl,
+    main as temporal_trace_main,
     round_trip_records,
     trace_stride,
     traces_from_columnar,
@@ -220,6 +222,107 @@ class AnalysisTests(unittest.TestCase):
             html = Path(summary["html"]).read_text()
             self.assertIn("application_e2e_latency", html)
             self.assertGreater(summary["n_runs"], 0)
+
+
+class ExtractorSchemaTests(unittest.TestCase):
+    def _compare_doc(self):
+        sampler = TemporalTraceSampler(max_points=2, stride=1)
+        sampler.add(sequence=0, send_ns=10, receive_ns=20)
+        sampler.add(sequence=1, send_ns=30, receive_ns=40)
+        return {
+            "baseline_client": "mqttium",
+            "pacer_mode": "external",
+            "points": [
+                {
+                    "point": {
+                        "pacer_mode": "external",
+                        "target_rate": 3844.0,
+                        "shared_load_fraction": 0.25,
+                    },
+                    "runs": [
+                        {
+                            "run_id": "run-a",
+                            "client": "mqttium",
+                            "slot": 0,
+                            "workers": [
+                                {
+                                    "role": "rtt_initiator",
+                                    "pacing": {"mode": "external", "target_interval_ns": 260000},
+                                    "temporal_trace": sampler.to_columnar(),
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def test_compare_json_with_traces(self):
+        traces = extract_run_traces(self._compare_doc())
+        self.assertEqual(len(traces), 1)
+        self.assertEqual(len(traces[0]["records"]), 2)
+
+    def test_runs_as_integer_is_ignored(self):
+        self.assertEqual(extract_run_traces({"client": "mqttium", "runs": 3}), [])
+        mixed = {
+            "runs": 3,
+            "points": [
+                {
+                    "point": {"pacer_mode": "in_loop"},
+                    "runs": 5,
+                }
+            ],
+        }
+        self.assertEqual(extract_run_traces(mixed), [])
+        self.assertEqual(extract_run_traces({"runs": {"count": 3}}), [])
+        self.assertEqual(extract_run_traces({"runs": "3"}), [])
+
+    def test_calibration_and_manifest_and_trace_less_docs(self):
+        calibration = {
+            "client": "mqttium",
+            "protocol_capacities": {"MQTTv311": {"rtt": 15000.0}},
+            "runs": 3,
+        }
+        manifest = {"kind": "campaign_manifest", "runs": 3, "files": ["a.json"]}
+        empty_compare = {
+            "baseline_client": "gmqtt",
+            "points": [{"point": {"pacer_mode": "in_loop"}, "runs": [{"client": "gmqtt", "workers": []}]}],
+        }
+        self.assertEqual(extract_run_traces(calibration), [])
+        self.assertEqual(extract_run_traces(manifest), [])
+        self.assertEqual(extract_run_traces(empty_compare), [])
+        self.assertEqual(extract_run_traces("not-a-doc"), [])
+
+    def test_cli_skips_incompatible_json_and_exits_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inp = root / "in"
+            out = root / "out"
+            inp.mkdir()
+            (inp / "compare-aa-mqttium-application_rtt_fixed_rate-v0-external.json").write_text(
+                json.dumps(self._compare_doc()), encoding="utf-8"
+            )
+            (inp / "mqttium-rtt_capacity_qos1.json").write_text(
+                json.dumps({"client": "mqttium", "scenario": "rtt_capacity_qos1", "runs": 3}),
+                encoding="utf-8",
+            )
+            (inp / "calibrations.json").write_text(
+                json.dumps({"protocol_capacities": {"MQTTv311": {"rtt": 1.0}}, "runs": 3}),
+                encoding="utf-8",
+            )
+            (inp / "manifest.json").write_text(
+                json.dumps({"kind": "manifest", "runs": 3}),
+                encoding="utf-8",
+            )
+            (inp / "compare-empty.json").write_text(
+                json.dumps({"baseline_client": "paho", "points": []}),
+                encoding="utf-8",
+            )
+            rc = temporal_trace_main(["--input", str(inp), "--output", str(out)])
+            self.assertEqual(rc, 0)
+            index = json.loads((out / "index.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(index), 1)
+            self.assertTrue(Path(index[0]["html"]).is_file())
 
 
 if __name__ == "__main__":

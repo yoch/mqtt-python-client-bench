@@ -25,6 +25,7 @@ from mqtt_client_bench.pacing import (
     SystemClock,
     absolute_start_ns_from_start_command,
     datagram_send_fn,
+    phase_id_from_start_command,
 )
 
 
@@ -67,6 +68,7 @@ def _run(socket_path: str, stats_path: str, default_spin_ns: int) -> int:
         spin_ns = int(cmd.get("spin_ns") or default_spin_ns)
         try:
             start_ns = absolute_start_ns_from_start_command(cmd)
+            phase_id = phase_id_from_start_command(cmd)
         except ValueError as exc:
             _send({"ok": False, "error": str(exc)})
             continue
@@ -79,13 +81,16 @@ def _run(socket_path: str, stats_path: str, default_spin_ns: int) -> int:
         )
         until_ns = start_ns + duration_ns
         recorder = pacer.emit_until(until_ns)
+        recorder.phase_id = phase_id
         summary = recorder.summary(duration_s=duration_ns / 1_000_000_000.0)
         summary["start_ns"] = start_ns
         summary["until_ns"] = until_ns
         summary["phase_start_ns"] = start_ns
         summary["first_scheduled_deadline_ns"] = start_ns
+        summary["phase_id"] = phase_id
         summary["pid"] = os.getpid()
         write_json(stats_path, summary)
+        _send({"ok": True, "event": "phase_complete", "phase_id": phase_id})
     return 0
 
 

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
+import json
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -15,6 +18,7 @@ if str(SRC) not in sys.path:
 from mqtt_client_bench.harness import validate_run
 from mqtt_client_bench.pacing import (
     DEFAULT_PACE_SAMPLE_LIMIT,
+    DEFAULT_PACER_RECEIVE_GRACE_NS,
     DEFAULT_PACER_SPIN_NS,
     DEFAULT_PACER_STARTUP_GUARD_NS,
     ExternalRatePacer,
@@ -23,22 +27,29 @@ from mqtt_client_bench.pacing import (
     PACE_SAMPLE_COLUMNS,
     PaceRecorder,
     PaceToken,
+    PacerClient,
+    PacerPhaseError,
     STIMULUS_DUPLICATE,
     STIMULUS_EMITTED_VS_SCHEDULED,
     STIMULUS_INTERNAL_GAP,
+    STIMULUS_OUT_OF_WINDOW,
     STIMULUS_PREFIX_LOSS,
     STIMULUS_RECEIVED_VS_EMITTED,
     STIMULUS_SEND_FAILURE,
+    STIMULUS_STALE_PHASE,
     STIMULUS_SUFFIX_LOSS,
     absolute_start_ns_from_start_command,
     choose_absolute_start_ns,
     interval_ns_for_rate,
+    load_phase_stats,
     pack_token,
     pacer_stimulus_reasons,
+    receive_window_open,
     resolve_pacer_mode,
     stimulus_invalid_reasons,
     tokens_expected_in_window,
     unpack_token,
+    wait_for_phase_complete,
 )
 from mqtt_client_bench.pairwise import (
     AA_CONTROL_MAX_ABS_EFFECT_PCT,
@@ -465,6 +476,232 @@ class InLoopRecorderCostTests(unittest.TestCase):
         # slot and fails if the recorder grows lists or does extra syscalls.
         self.assertLess(rec_ns, 10_000)
         self.assertLess(rec_ns - empty_ns, 10_000)
+        self.assertEqual(DEFAULT_PACER_RECEIVE_GRACE_NS, DEFAULT_PACER_STARTUP_GUARD_NS)
+        self.assertEqual(DEFAULT_PACER_RECEIVE_GRACE_NS, 5_000_000)
+
+
+class PhaseProtocolTests(unittest.TestCase):
+    def _write_stats(self, path, phase_id, tokens_emitted):
+        Path(path).write_text(
+            json.dumps(
+                {
+                    "phase_id": phase_id,
+                    "tokens_emitted": tokens_emitted,
+                    "tokens_scheduled": tokens_emitted,
+                    "tokens_received": tokens_emitted,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_warmup_stats_are_not_accepted_as_measure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "pacer.stats.json")
+            self._write_stats(path, "warmup-1-1", 3844)
+            with self.assertRaises(PacerPhaseError) as ctx:
+                load_phase_stats(path, "measure-2-2")
+            self.assertEqual(ctx.exception.reason, "stale_phase")
+            self.assertEqual(ctx.exception.stimulus_reason(), STIMULUS_STALE_PHASE)
+
+    def test_read_before_measure_complete_does_not_return_warmup_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "pacer.stats.json")
+            self._write_stats(path, "warmup-1-1", 3844)
+            loaded = {"n": 0}
+
+            def load_stats():
+                loaded["n"] += 1
+                return load_phase_stats(path, "measure-2-2")
+
+            with self.assertRaises(PacerPhaseError) as ctx:
+                wait_for_phase_complete(
+                    phase_id="measure-2-2",
+                    readline=lambda: None,
+                    poll=lambda: None,
+                    load_stats=load_stats,
+                    timeout_s=1.0,
+                    clock=lambda: 0.0,
+                    wait_readable=lambda remaining: False,
+                )
+            self.assertEqual(ctx.exception.reason, "phase_timeout")
+            self.assertEqual(loaded["n"], 0)
+            with self.assertRaises(PacerPhaseError) as stale:
+                load_phase_stats(path, "measure-2-2")
+            self.assertEqual(stale.exception.reason, "stale_phase")
+
+    def test_phase_complete_ack_mismatch_fails(self):
+        with self.assertRaises(PacerPhaseError) as ctx:
+            wait_for_phase_complete(
+                phase_id="measure-2-2",
+                readline=lambda: {"event": "phase_complete", "phase_id": "warmup-1-1"},
+                poll=lambda: None,
+                load_stats=lambda: {"tokens_emitted": 3844},
+                timeout_s=1.0,
+                clock=lambda: 0.0,
+                wait_readable=lambda remaining: True,
+            )
+        self.assertEqual(ctx.exception.reason, "phase_mismatch")
+
+    def test_missing_stats_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "absent.stats.json")
+            with self.assertRaises(PacerPhaseError) as ctx:
+                load_phase_stats(path, "measure-1-1")
+            self.assertEqual(ctx.exception.reason, "missing_stats")
+
+    def test_read_stats_requires_phase_id(self):
+        sig = inspect.signature(PacerClient.read_stats)
+        self.assertIn("phase_id", sig.parameters)
+        self.assertIs(sig.parameters["phase_id"].default, inspect.Parameter.empty)
+
+    def test_phase_id_mismatch_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "pacer.stats.json")
+            self._write_stats(path, "measure-1-1", 10)
+            with self.assertRaises(PacerPhaseError) as ctx:
+                load_phase_stats(path, "measure-9-9")
+            self.assertEqual(ctx.exception.reason, "stale_phase")
+
+    def test_expected_phase_completes_and_accepts_exact_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "pacer.stats.json")
+            self._write_stats(path, "measure-2-99", 11532)
+            messages = [{"event": "phase_complete", "phase_id": "measure-2-99"}]
+
+            def readline():
+                return messages.pop(0) if messages else None
+
+            stats = wait_for_phase_complete(
+                phase_id="measure-2-99",
+                readline=readline,
+                poll=lambda: None,
+                load_stats=lambda: load_phase_stats(path, "measure-2-99"),
+                timeout_s=1.0,
+                clock=lambda: 0.0,
+                wait_readable=lambda remaining: True,
+            )
+            self.assertEqual(stats["tokens_emitted"], 11532)
+            self.assertEqual(stats["phase_id"], "measure-2-99")
+
+    def test_pacer_death_before_completion_fails(self):
+        def readline():
+            return None
+
+        with self.assertRaises(PacerPhaseError) as ctx:
+            wait_for_phase_complete(
+                phase_id="measure-1-1",
+                readline=readline,
+                poll=lambda: 1,
+                load_stats=lambda: {},
+                timeout_s=1.0,
+                clock=lambda: 0.0,
+                wait_readable=lambda remaining: True,
+            )
+        self.assertEqual(ctx.exception.reason, "pacer_exited")
+
+    def test_phase_completion_timeout_fails(self):
+        ticks = {"n": 0}
+
+        def clock():
+            ticks["n"] += 1
+            return 0.0 if ticks["n"] == 1 else 10.0
+
+        with self.assertRaises(PacerPhaseError) as ctx:
+            wait_for_phase_complete(
+                phase_id="measure-1-1",
+                readline=lambda: None,
+                poll=lambda: None,
+                load_stats=lambda: {},
+                timeout_s=1.0,
+                clock=clock,
+                wait_readable=lambda remaining: False,
+            )
+        self.assertEqual(ctx.exception.reason, "phase_timeout")
+
+    def test_source_handshake_is_phase_id_not_sleep(self):
+        initiator = (ROOT / "src/mqtt_client_bench/roles/rtt_initiator.py").read_text()
+        pacer = (ROOT / "src/mqtt_client_bench/roles/rate_pacer.py").read_text()
+        client = (ROOT / "src/mqtt_client_bench/pacing.py").read_text()
+        self.assertIn("wait_phase_complete", initiator)
+        self.assertIn("phase_id", initiator)
+        self.assertIn("phase_complete", pacer)
+        self.assertIn("phase_id_from_start_command", pacer)
+        self.assertIn("wait_phase_complete", client)
+
+
+class BoundaryTokenTests(unittest.TestCase):
+    def test_token_just_after_nominal_until_is_in_window(self):
+        rec = PaceRecorder(mode="external", target_rate=1000.0, target_interval_ns=1_000)
+        rec.set_window(0, 10_000, 1_000, grace_ns=5_000_000)
+        self.assertEqual(rec.tokens_expected_in_measure_window, 10)
+        for seq in range(10):
+            recv = seq * 1_000 + 2 if seq < 9 else 10_000 + 50
+            rec.record_receiver(PaceToken(seq, seq * 1_000, seq * 1_000 + 1), recv)
+        rec.tokens_scheduled = 10
+        rec.tokens_emitted = 10
+        rec.token_send_failures = 0
+        self.assertEqual(rec.tokens_received, 10)
+        self.assertEqual(rec.last_sequence, 9)
+        self.assertEqual(rec.tokens_received_after_nominal_until, 1)
+        self.assertEqual(rec.receiver_after_nominal_until_max_ns, 50)
+        self.assertTrue(rec.stimulus_valid())
+        self.assertTrue(
+            receive_window_open(
+                now_ns=10_000 + 50,
+                nominal_until_ns=10_000,
+                grace_ns=5_000_000,
+                tokens_received=9,
+                expected_tokens=10,
+            )
+        )
+
+    def test_suffix_loss_after_bounded_grace_fails(self):
+        self.assertFalse(
+            receive_window_open(
+                now_ns=10_000 + 5_000_000,
+                nominal_until_ns=10_000,
+                grace_ns=5_000_000,
+                tokens_received=9,
+                expected_tokens=10,
+            )
+        )
+        rec = PaceRecorder(mode="external", target_rate=1000.0, target_interval_ns=1_000)
+        rec.set_window(0, 10_000, 1_000, grace_ns=5_000_000)
+        for seq in range(9):
+            rec.record_receiver(PaceToken(seq, seq * 1_000, seq * 1_000 + 1), seq * 1_000 + 2)
+        rec.tokens_scheduled = 10
+        rec.tokens_emitted = 10
+        self.assertIn(STIMULUS_SUFFIX_LOSS, rec.completeness_reasons())
+        self.assertFalse(rec.stimulus_valid())
+
+    def test_sequence_equal_to_expected_is_out_of_window(self):
+        rec = PaceRecorder(mode="external", target_rate=1000.0, target_interval_ns=1_000)
+        rec.set_window(0, 10_000, 1_000)
+        for seq in range(10):
+            rec.record_receiver(PaceToken(seq, seq * 1_000, seq * 1_000 + 1), seq * 1_000 + 2)
+        rec.record_receiver(PaceToken(10, 10_000, 10_001), 10_002)
+        rec.tokens_scheduled = 10
+        rec.tokens_emitted = 10
+        self.assertEqual(rec.tokens_received, 10)
+        self.assertEqual(rec.last_sequence, 9)
+        self.assertEqual(rec.invalid_tokens, 1)
+        self.assertIn(STIMULUS_OUT_OF_WINDOW, rec.completeness_reasons())
+        self.assertFalse(rec.stimulus_valid())
+
+    def test_grace_does_not_create_tokens_or_shift_deadlines(self):
+        clock = FakeClock(0)
+        pacer = ExternalRatePacer(
+            interval_ns=1_000,
+            start_ns=0,
+            spin_ns=0,
+            clock=clock,
+            send_fn=lambda token: True,
+        )
+        rec = pacer.emit_until(10_000)
+        self.assertEqual(rec.tokens_scheduled, 10)
+        self.assertEqual(pacer.deadline(9), 9_000)
+        self.assertLess(pacer.deadline(9), 10_000)
+        self.assertEqual(DEFAULT_PACER_RECEIVE_GRACE_NS, 5_000_000)
 
 
 if __name__ == "__main__":

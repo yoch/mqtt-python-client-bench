@@ -39,6 +39,17 @@ Semantics
   ``deadline(n) = absolute_start_ns + n * interval_ns`` and must not emit
   before ``absolute_start_ns``. The guard is a few milliseconds; it is
   not tuned from ARM results.
+* Phase identity: every START carries ``phase_id``. The pacer writes that
+  id into its stats and emits ``phase_complete`` on stdout only after the
+  file is durable. The initiator accepts stats only for the id it started.
+  A leftover warmup file cannot contaminate measure. Handshake is at phase
+  boundaries only — not per token.
+* External receive window: the schedule is ``[absolute_start, nominal_until)``.
+  Every token with ``deadline(n) < nominal_until`` belongs to the phase.
+  After ``nominal_until`` the receiver may wait up to ``receive_grace_ns``
+  to drain already-scheduled datagrams. Grace creates no tokens, shifts no
+  deadlines, and is not fitted to a campaign result. Offer rate is
+  ``N / nominal duration``.
 * Catch-up event: token *n* is emitted at or after ``deadline(n+1)`` — at
   least one later scheduled deadline has already elapsed.
 * Microburst emission: successive emission interval ``< 0.5 * target
@@ -51,6 +62,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import select
 import socket
 import struct
 import subprocess
@@ -73,6 +85,10 @@ DEFAULT_PACER_SPIN_NS = 50_000
 # fitted to a campaign result. The receive loop must be armed before this
 # instant; the pacer must not emit earlier.
 DEFAULT_PACER_STARTUP_GUARD_NS = 5_000_000
+# Bounded IPC drain after the exclusive schedule window. Milliseconds, the
+# same order as the startup guard, not fitted to an ARM observation. Does
+# not extend the calendar or create tokens.
+DEFAULT_PACER_RECEIVE_GRACE_NS = 5_000_000
 DEFAULT_PACE_SAMPLE_LIMIT = DEFAULT_TEMPORAL_TRACE_POINTS
 PACE_SAMPLE_COLUMNS = (
     "lateness_ns",
@@ -95,8 +111,21 @@ STIMULUS_DUPLICATE = f"{PACER_STIMULUS_INVALID}:duplicate"
 STIMULUS_SEND_FAILURE = f"{PACER_STIMULUS_INVALID}:send_failure"
 STIMULUS_EMITTED_VS_SCHEDULED = f"{PACER_STIMULUS_INVALID}:emitted_vs_scheduled"
 STIMULUS_RECEIVED_VS_EMITTED = f"{PACER_STIMULUS_INVALID}:received_vs_emitted"
+STIMULUS_OUT_OF_WINDOW = f"{PACER_STIMULUS_INVALID}:out_of_window"
+STIMULUS_STALE_PHASE = f"{PACER_STIMULUS_INVALID}:stale_phase"
+STIMULUS_PHASE_MISMATCH = f"{PACER_STIMULUS_INVALID}:phase_mismatch"
+STIMULUS_PHASE_TIMEOUT = f"{PACER_STIMULUS_INVALID}:phase_timeout"
+STIMULUS_PACER_EXITED = f"{PACER_STIMULUS_INVALID}:pacer_exited"
+STIMULUS_MISSING_STATS = f"{PACER_STIMULUS_INVALID}:missing_stats"
 SNDBUF_BYTES = 1 << 20
 RCVBUF_BYTES = 1 << 20
+PHASE_ERROR_REASONS = {
+    "stale_phase": STIMULUS_STALE_PHASE,
+    "phase_mismatch": STIMULUS_PHASE_MISMATCH,
+    "phase_timeout": STIMULUS_PHASE_TIMEOUT,
+    "pacer_exited": STIMULUS_PACER_EXITED,
+    "missing_stats": STIMULUS_MISSING_STATS,
+}
 
 
 def resolve_pacer_mode(point: Optional[dict], target_rate: Optional[float]) -> str:
@@ -230,6 +259,132 @@ def absolute_start_ns_from_start_command(cmd: dict) -> int:
     return int(raw)
 
 
+def phase_id_from_start_command(cmd: dict) -> str:
+    raw = cmd.get("phase_id")
+    if raw is None or str(raw).strip() == "":
+        raise ValueError("missing_phase_id")
+    return str(raw)
+
+
+def allocate_phase_id(label: str, seq: int, now_ns: int) -> str:
+    return f"{label}-{int(seq)}-{int(now_ns)}"
+
+
+def receive_window_open(
+    *,
+    now_ns: int,
+    nominal_until_ns: int,
+    grace_ns: int,
+    tokens_received: int,
+    expected_tokens: Optional[int],
+) -> bool:
+    """True while the receiver should still wait for in-window tokens.
+
+    The calendar itself ends at ``nominal_until_ns``. ``grace_ns`` only
+    covers datagrams whose deadline was already inside that window.
+    """
+    if expected_tokens is not None and int(tokens_received) >= int(expected_tokens):
+        return False
+    return int(now_ns) < int(nominal_until_ns) + max(0, int(grace_ns))
+
+
+class PacerPhaseError(RuntimeError):
+    """Fail-closed phase handshake: never silently reuse another phase's stats."""
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        self.reason = str(reason)
+        self.detail = str(detail)
+        suffix = f":{self.detail}" if self.detail else ""
+        super().__init__(f"pacer_phase:{self.reason}{suffix}")
+
+    def stimulus_reason(self) -> str:
+        return PHASE_ERROR_REASONS.get(
+            self.reason, f"{PACER_STIMULUS_INVALID}:{self.reason}"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class PacerPhase:
+    phase_id: str
+    absolute_start_ns: int
+    interval_ns: int
+    duration_ns: int
+    until_ns: int
+    expected_tokens: int
+    label: str = "measure"
+
+    @property
+    def nominal_duration_s(self) -> float:
+        return self.duration_ns / 1_000_000_000.0
+
+
+def load_phase_stats(path: str, phase_id: str) -> dict:
+    """Return stats only when the document is for ``phase_id``.
+
+    A leftover warmup file with a different id is ``stale_phase``, not a
+    successful read. Missing file / missing id is ``missing_stats``.
+    """
+    if not path or not os.path.exists(path):
+        raise PacerPhaseError("missing_stats")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            stats = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PacerPhaseError("missing_stats", str(exc)) from exc
+    if not isinstance(stats, dict):
+        raise PacerPhaseError("missing_stats", "stats_not_object")
+    got = stats.get("phase_id")
+    if got is None or str(got).strip() == "":
+        raise PacerPhaseError("missing_stats", "missing_phase_id")
+    if str(got) != str(phase_id):
+        raise PacerPhaseError("stale_phase", f"wanted={phase_id} got={got}")
+    return stats
+
+
+def wait_for_phase_complete(
+    *,
+    phase_id: str,
+    readline: Callable[[], Optional[dict]],
+    poll: Callable[[], Optional[int]],
+    load_stats: Callable[[], dict],
+    timeout_s: float,
+    clock: Callable[[], float],
+    wait_readable: Callable[[float], bool],
+) -> dict:
+    """Block until ``phase_complete`` for ``phase_id``, then load matching stats.
+
+    Per-token hot path is not involved. This runs only at a phase boundary.
+    """
+    deadline = float(clock()) + float(timeout_s)
+    while True:
+        remaining = deadline - float(clock())
+        if remaining <= 0:
+            raise PacerPhaseError("phase_timeout")
+        exited = poll()
+        if exited is not None:
+            msg = readline()
+            if isinstance(msg, dict) and msg.get("event") == "phase_complete":
+                if str(msg.get("phase_id") or "") != str(phase_id):
+                    raise PacerPhaseError("phase_mismatch", str(msg.get("phase_id")))
+                return load_stats()
+            raise PacerPhaseError("pacer_exited", str(exited))
+        if not wait_readable(max(remaining, 0.0)):
+            raise PacerPhaseError("phase_timeout")
+        msg = readline()
+        if msg is None:
+            if poll() is not None:
+                raise PacerPhaseError("pacer_exited")
+            raise PacerPhaseError("phase_timeout")
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("event") != "phase_complete":
+            continue
+        got = str(msg.get("phase_id") or "")
+        if got != str(phase_id):
+            raise PacerPhaseError("phase_mismatch", got)
+        return load_stats()
+
+
 class PaceTraceSampler:
     """Every-Nth signed deltas, hard-capped, preallocated.
 
@@ -327,6 +482,11 @@ class PaceRecorder:
         "first_sequence",
         "tokens_expected_in_measure_window",
         "phase_start_ns",
+        "nominal_until_ns",
+        "receiver_grace_ns",
+        "tokens_received_after_nominal_until",
+        "receiver_after_nominal_until_max_ns",
+        "phase_id",
         "first_scheduled_deadline_ns",
         "first_emission_ns",
         "first_receiver_ns",
@@ -366,6 +526,11 @@ class PaceRecorder:
         self.first_sequence: Optional[int] = None
         self.tokens_expected_in_measure_window: Optional[int] = None
         self.phase_start_ns: Optional[int] = None
+        self.nominal_until_ns: Optional[int] = None
+        self.receiver_grace_ns = 0
+        self.tokens_received_after_nominal_until = 0
+        self.receiver_after_nominal_until_max_ns = 0
+        self.phase_id: Optional[str] = None
         self.first_scheduled_deadline_ns: Optional[int] = None
         self.first_emission_ns: Optional[int] = None
         self.first_receiver_ns: Optional[int] = None
@@ -388,15 +553,30 @@ class PaceRecorder:
     def sample_count(self) -> int:
         return self._sampler.sample_count()
 
-    def set_window(self, start_ns: int, until_ns: int, interval_ns: int) -> None:
+    def set_window(
+        self,
+        start_ns: int,
+        until_ns: int,
+        interval_ns: int,
+        *,
+        grace_ns: int = 0,
+        phase_id: Optional[str] = None,
+    ) -> None:
         self.phase_start_ns = int(start_ns)
+        self.nominal_until_ns = int(until_ns)
         self.first_scheduled_deadline_ns = int(start_ns)
+        self.receiver_grace_ns = max(0, int(grace_ns))
+        if phase_id is not None:
+            self.phase_id = str(phase_id)
         self.tokens_expected_in_measure_window = tokens_expected_in_window(
             start_ns, until_ns, interval_ns
         )
         expected = self.tokens_expected_in_measure_window
         if expected:
             self._sampler.stride = trace_stride(float(expected), self._sampler.max_points)
+
+    def note_phase_error(self, reason: str) -> None:
+        self._flag(reason)
 
     def _flag(self, reason: str) -> None:
         if reason not in self._sequence_flags:
@@ -470,11 +650,21 @@ class PaceRecorder:
         if token is None:
             self.invalid_tokens += 1
             return
+        expected = self.tokens_expected_in_measure_window
+        if expected is not None and int(token.sequence) >= int(expected):
+            self.invalid_tokens += 1
+            self._flag(STIMULUS_OUT_OF_WINDOW)
+            return
         self.tokens_received += 1
         self.note_gap(token.sequence)
         recv_ns = int(receiver_ns)
         if self.first_receiver_ns is None:
             self.first_receiver_ns = recv_ns
+        if self.nominal_until_ns is not None and recv_ns >= int(self.nominal_until_ns):
+            self.tokens_received_after_nominal_until += 1
+            delay = recv_ns - int(self.nominal_until_ns)
+            if delay > self.receiver_after_nominal_until_max_ns:
+                self.receiver_after_nominal_until_max_ns = delay
         recv_interval = None
         if self._last_receiver_ns is not None:
             recv_interval = recv_ns - int(self._last_receiver_ns)
@@ -549,12 +739,20 @@ class PaceRecorder:
             self.tokens_expected_in_measure_window = int(
                 stats["tokens_expected_in_measure_window"]
             )
+        if stats.get("phase_id"):
+            self.phase_id = str(stats["phase_id"])
+        if stats.get("until_ns") is not None and self.nominal_until_ns is None:
+            self.nominal_until_ns = int(stats["until_ns"])
 
     def actual_offered_rate(self, duration_s: float) -> Optional[float]:
-        if duration_s <= 0:
+        nominal = None
+        if self.phase_start_ns is not None and self.nominal_until_ns is not None:
+            nominal = (int(self.nominal_until_ns) - int(self.phase_start_ns)) / 1_000_000_000.0
+        window = nominal if nominal and nominal > 0 else duration_s
+        if window is None or window <= 0:
             return None
         count = self.tokens_received or self.tokens_emitted
-        return float(count) / float(duration_s)
+        return float(count) / float(window)
 
     def completeness_reasons(self) -> List[str]:
         reasons: List[str] = []
@@ -604,12 +802,18 @@ class PaceRecorder:
             "tokens_emitted": self.tokens_emitted,
             "tokens_received": self.tokens_received,
             "tokens_expected_in_measure_window": self.tokens_expected_in_measure_window,
+            "phase_id": self.phase_id,
             "first_sequence": self.first_sequence,
             "last_sequence": self.last_sequence,
             "sequence_gaps": self.sequence_gaps,
             "token_send_failures": self.token_send_failures,
             "invalid_tokens": self.invalid_tokens,
             "phase_start_ns": self.phase_start_ns,
+            "nominal_until_ns": self.nominal_until_ns,
+            "receiver_grace_ns": self.receiver_grace_ns,
+            "tokens_received_after_nominal_until": self.tokens_received_after_nominal_until,
+            "last_receiver_ns": self._last_receiver_ns,
+            "receiver_after_nominal_until_max_ns": self.receiver_after_nominal_until_max_ns,
             "first_scheduled_deadline_ns": self.first_scheduled_deadline_ns,
             "first_emission_ns": self.first_emission_ns,
             "first_receiver_ns": self.first_receiver_ns,
@@ -790,6 +994,7 @@ class PacerClient:
         self.socket_path = socket_path
         self.stats_path = stats_path
         self.spin_ns = int(spin_ns)
+        self._phase_seq = 0
         env = os.environ.copy()
         env.setdefault("PYTHONNOUSERSITE", "1")
         env["PYTHONUNBUFFERED"] = "1"
@@ -830,16 +1035,60 @@ class PacerClient:
             return {"ok": False, "raw": line.decode("utf-8", "replace")}
 
     def start_phase(
-        self, *, absolute_start_ns: int, interval_ns: int, duration_ns: int
-    ) -> None:
+        self,
+        *,
+        absolute_start_ns: int,
+        interval_ns: int,
+        duration_ns: int,
+        label: str = "measure",
+    ) -> PacerPhase:
+        self._phase_seq += 1
+        phase_id = allocate_phase_id(label, self._phase_seq, time.monotonic_ns())
+        until_ns = int(absolute_start_ns) + int(duration_ns)
+        phase = PacerPhase(
+            phase_id=phase_id,
+            absolute_start_ns=int(absolute_start_ns),
+            interval_ns=int(interval_ns),
+            duration_ns=int(duration_ns),
+            until_ns=until_ns,
+            expected_tokens=tokens_expected_in_window(
+                absolute_start_ns, until_ns, interval_ns
+            ),
+            label=str(label),
+        )
+        try:
+            os.unlink(self.stats_path)
+        except FileNotFoundError:
+            pass
         self._command(
             {
                 "cmd": "start",
-                "absolute_start_ns": int(absolute_start_ns),
-                "interval_ns": int(interval_ns),
-                "duration_ns": int(duration_ns),
+                "phase_id": phase.phase_id,
+                "absolute_start_ns": phase.absolute_start_ns,
+                "interval_ns": phase.interval_ns,
+                "duration_ns": phase.duration_ns,
                 "spin_ns": self.spin_ns,
             }
+        )
+        return phase
+
+    def wait_phase_complete(self, phase: PacerPhase, timeout_s: float) -> dict:
+        stdout = self.proc.stdout
+
+        def wait_readable(remaining: float) -> bool:
+            if stdout is None:
+                return False
+            ready, _, _ = select.select([stdout], [], [], max(remaining, 0.0))
+            return bool(ready)
+
+        return wait_for_phase_complete(
+            phase_id=phase.phase_id,
+            readline=self._readline,
+            poll=self.proc.poll,
+            load_stats=lambda: load_phase_stats(self.stats_path, phase.phase_id),
+            timeout_s=timeout_s,
+            clock=time.monotonic,
+            wait_readable=wait_readable,
         )
 
     def stop_phase(self) -> None:
@@ -851,11 +1100,8 @@ class PacerClient:
         self.proc.stdin.write((json.dumps(payload) + "\n").encode("ascii"))
         self.proc.stdin.flush()
 
-    def read_stats(self) -> Optional[dict]:
-        if not os.path.exists(self.stats_path):
-            return None
-        with open(self.stats_path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
+    def read_stats(self, phase_id: str) -> dict:
+        return load_phase_stats(self.stats_path, phase_id)
 
     def close(self) -> None:
         try:
