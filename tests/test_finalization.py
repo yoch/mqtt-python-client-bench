@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from mqtt_client_bench.metrics import abba_block_records, median, percentile
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class FinalReducerTests(unittest.TestCase):
@@ -35,6 +39,33 @@ class FinalReducerTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["design"], "BAAB")
         self.assertAlmostEqual(records[0]["ratio"], 1.1)
+
+
+class OfficialPairwisePacingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.script = (ROOT / "scripts" / "run_pairwise_rtt_campaign.sh").read_text(
+            encoding="utf-8"
+        )
+
+    def test_standard_defaults_to_external_pacer(self) -> None:
+        self.assertIn('PACER_MODE="${PACER_MODE:-external}"', self.script)
+        self.assertIn(
+            'standard pairwise RTT requires PACER_MODE=external', self.script
+        )
+
+    def test_standard_skips_nonpaired_matched_load_matrix(self) -> None:
+        # Closed-loop capacity still runs; only the redundant fixed-rate matrix
+        # is disabled so no in-loop result can masquerade as published RTT.
+        standard_guard = self.script.split('if [ "$PROFILE" = "standard" ]; then', 1)[1]
+        standard_guard = standard_guard.split("fi", 1)[0]
+        self.assertIn("RUN_LOAD_MATRIX=0", standard_guard)
+        self.assertIn("rtt_capacity_qos1", self.script)
+
+    def test_every_official_compare_receives_explicit_pacer_mode(self) -> None:
+        compare_calls = self.script.count("python -m mqtt_client_bench.run compare")
+        pacer_args = self.script.count('--pacer-mode "$PACER_MODE"')
+        self.assertGreaterEqual(compare_calls, 4)
+        self.assertEqual(pacer_args, compare_calls)
 
 
 if __name__ == "__main__":
