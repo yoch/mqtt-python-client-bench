@@ -47,6 +47,20 @@ The one-line output reports four independent questions:
 : The evidence may still explain scheduler, batching, GC, pacing or other
   mechanisms, but must not be promoted into a ranking/baseline claim.
 
+## ABBA reducer semantics
+
+Each complete ABBA/BAAB block contains exactly two observations per arm. The
+block ratio is `median(B) / median(A)`, where **median means the conventional
+sample median**: for two observations it is their arithmetic mean. It must not
+be implemented as nearest-rank p50, because nearest-rank p50 of two values is
+just the smaller value and can silently discard the slow regime of one arm.
+
+Per-message latency percentiles remain nearest-rank. This change only fixes the
+small-sample reducer used to combine run-level observations.
+
+Complementary ABBA+BAAB blocks are then combined multiplicatively as pair units,
+which preserves the existing position-balance design.
+
 ## Why catch-up is a stimulus property
 
 An external pacer uses an absolute calendar. A catch-up event means token `n`
@@ -98,3 +112,16 @@ client result is surprising. Keep every attempt in the artifact and cap retries.
 A client-side overload/backpressure result by itself is not a retry reason; if a
 pacer temporal failure occurred at the same time, retry because the stimulus was
 invalid and retain the original attempt as evidence.
+
+## Known diagnostic limitation
+
+The bounded temporal RTT trace is **diagnostic only** and is not used for the
+published p50/p95/p99, run validity, ABBA ratios or ranking verdict. A discovered
+sampling bug can cause the retained trace to over-represent the beginning of a
+run instead of covering the full measure window at the advertised stride. Until
+that sampler is corrected, use the trace for qualitative inspection only and do
+not infer the timing of a mid-run regime switch from its saved sequence range.
+
+This limitation does not affect the main latency reservoir or the paired
+comparison reducer, so it is intentionally not a blocker for normal benchmark
+campaigns.
