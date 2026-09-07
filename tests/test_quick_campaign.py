@@ -17,7 +17,8 @@ class QuickCampaignTests(unittest.TestCase):
         self.assertIn('export ABBA_BLOCKS="${ABBA_BLOCKS:-2}"', self.script)
         self.assertIn('export AA_VARIANT_INDEXES="${AA_VARIANT_INDEXES:-4}"', self.script)
 
-    def test_quick_aa_is_advisory_not_publication_gate(self) -> None:
+    def test_quick_aa_is_opt_in_and_never_a_publication_gate(self) -> None:
+        self.assertIn('export RUN_AA="${RUN_AA:-0}"', self.script)
         self.assertIn('export AA_CONTROL_ENFORCE="${AA_CONTROL_ENFORCE:-0}"', self.script)
         self.assertIn('export PROFILE="${PROFILE:-smoke}"', self.script)
 
