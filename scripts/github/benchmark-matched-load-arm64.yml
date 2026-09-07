@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: smoke is non_comparable path proof; aa-validation rechecks A/A only; pacer-causal compares in_loop vs external pacing (no ranking); standard is the official campaign (do not run until A/A is neutral)
+        description: smoke is non_comparable path proof; aa-validation rechecks A/A only; pacer-causal compares in_loop vs external pacing (no ranking); standard is the official fail-closed campaign
         type: choice
         options: [smoke, aa-validation, pacer-causal, standard]
         default: smoke
@@ -22,7 +22,7 @@ jobs:
     runs-on: [self-hosted, linux, ARM64]
     timeout-minutes: 480
     env:
-      BENCH_SHA: 7e75d44b97a96e7fecd572a88e420771dd404283
+      BENCH_SHA: e23fef843695fe817048fbb6beaeb1745cf079d9
       MQTTIUM_VER: "1.0.0rc13"
       GMQTT_VER: "0.7.0"
       PAHO_VER: "2.1.0"
@@ -37,6 +37,8 @@ jobs:
           echo "BENCH_BROKER=127.0.0.1:11883" >> "$GITHUB_ENV"
           if [ "$CAMPAIGN" = "standard" ]; then
             echo "PROFILE=standard" >> "$GITHUB_ENV"
+            echo "PACER_MODE=external" >> "$GITHUB_ENV"
+            echo "RUN_LOAD_MATRIX=0" >> "$GITHUB_ENV"
           else
             echo "PROFILE=smoke" >> "$GITHUB_ENV"
           fi
@@ -72,7 +74,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: yoch/mqtt-python-client-bench
-          ref: 7e75d44b97a96e7fecd572a88e420771dd404283
+          ref: e23fef843695fe817048fbb6beaeb1745cf079d9
           path: bench
           persist-credentials: false
 
@@ -126,6 +128,9 @@ jobs:
           cd bench
           . .venv/bin/activate
           PYTHONPATH=src python -m unittest -v \
+            tests.test_finalization \
+            tests.test_quality \
+            tests.test_version_compare \
             tests.test_unit.CrossClientLoadTests \
             tests.test_unit.NativeRttDriveTests \
             tests.test_unit.PairwiseCapacityGateTests \
