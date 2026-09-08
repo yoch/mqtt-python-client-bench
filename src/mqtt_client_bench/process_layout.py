@@ -1,13 +1,15 @@
-"""Explicit process-layout control for benchmark role workers.
+"""Explicit diagnostic control of benchmark role-process ASLR.
 
-The benchmark orchestrator is intentionally left untouched.  Only Python role
-processes spawned through :func:`mqtt_client_bench.harness._spawn_role` are
-wrapped.  This keeps the control narrowly scoped to the processes whose
-allocator/page layout can affect the measured MQTT path.
+The representative benchmark condition is always the host's normal ASLR policy.
+This module exists only to run causal controls: ``disabled`` launches Python role
+workers through ``setarch <machine> -R`` while leaving the orchestrator and broker
+unchanged.  Results produced that way are marked non-publishable/non-comparable;
+turning ASLR off must never become a way to make an official benchmark look more
+stable.
 
-``system`` preserves the host's normal ASLR policy. ``disabled`` launches role
-workers through ``setarch <machine> -R`` and fails closed unless the resulting
-process personality is verified to contain ``ADDR_NO_RANDOMIZE``.
+``system`` leaves the host policy untouched and is publication-eligible.  The
+launcher records the selected policy in every result it writes so diagnostic and
+representative evidence cannot be mixed silently.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from typing import Iterator
 
 ADDR_NO_RANDOMIZE = 0x00040000
 WORKER_ASLR_MODES = ("system", "disabled")
+DIAGNOSTIC_REASON = "diagnostic_worker_aslr_disabled"
 
 
 def _setarch() -> str:
@@ -74,23 +77,27 @@ def _write_disabled_python_wrapper(directory: Path) -> Path:
 
 
 def _metadata(mode: str, personality: int | None) -> dict:
+    disabled = mode == "disabled"
     return {
         "worker_aslr": mode,
         "orchestrator_aslr": "unchanged",
         "scope": "python_roles_spawned_by_harness._spawn_role",
-        "mechanism": "setarch -R" if mode == "disabled" else "host_default",
+        "mechanism": "setarch -R" if disabled else "host_default",
         "verified_worker_personality": (
             f"0x{personality:08x}" if personality is not None else None
         ),
         "addr_no_randomize": bool(
             personality is not None and personality & ADDR_NO_RANDOMIZE
         ),
+        "experimental_control": disabled,
+        "representative_aslr": not disabled,
+        "publication_eligible": not disabled,
     }
 
 
 @contextmanager
 def worker_process_layout(mode: str) -> Iterator[dict]:
-    """Apply an ASLR policy to role workers while leaving the orchestrator alone."""
+    """Apply a diagnostic ASLR policy to roles while leaving the orchestrator alone."""
     if mode not in WORKER_ASLR_MODES:
         raise ValueError(f"unknown worker ASLR mode: {mode}")
     if mode == "system":
@@ -110,6 +117,44 @@ def worker_process_layout(mode: str) -> Iterator[dict]:
             harness._python = original_python
 
 
+def _append_reason(run: dict, reason: str) -> None:
+    reasons = [str(item) for item in (run.get("reasons") or [])]
+    if reason not in reasons:
+        reasons.append(reason)
+    run["reasons"] = reasons
+
+
+def _mark_non_publishable(payload: dict, reason: str) -> None:
+    """Fail closed when a diagnostic layout control was used.
+
+    Existing statistical output remains available for causal analysis, but every
+    run is tagged ``non_comparable`` and the document itself is explicitly
+    ineligible for publication.  This prevents a disabled-ASLR result from being
+    mistaken for a representative benchmark merely because it is less noisy.
+    """
+    payload["diagnostic_control"] = True
+    payload["publication_eligible"] = False
+    payload["non_comparable"] = True
+    payload["non_comparable_reason"] = reason
+
+    top_runs = payload.get("runs")
+    if isinstance(top_runs, list):
+        for run in top_runs:
+            if isinstance(run, dict):
+                run["non_comparable"] = True
+                _append_reason(run, reason)
+
+    results = payload.get("results")
+    if isinstance(results, list):
+        for block in results:
+            if not isinstance(block, dict):
+                continue
+            for run in block.get("runs") or []:
+                if isinstance(run, dict):
+                    run["non_comparable"] = True
+                    _append_reason(run, reason)
+
+
 def annotate_result(path: Path, metadata: dict) -> bool:
     """Add process-layout provenance to an existing JSON benchmark document."""
     if not path.is_file() or path.suffix != ".json":
@@ -121,5 +166,7 @@ def annotate_result(path: Path, metadata: dict) -> bool:
     if not isinstance(payload, dict) or "schema_version" not in payload:
         return False
     payload["role_process_layout"] = dict(metadata)
+    if not bool(metadata.get("publication_eligible", True)):
+        _mark_non_publishable(payload, DIAGNOSTIC_REASON)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return True
