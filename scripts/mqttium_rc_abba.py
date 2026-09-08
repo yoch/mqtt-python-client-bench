@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from mqtt_client_bench.harness import ABBA_COOLDOWN_S, broker_up, read_json, run_point
 from mqtt_client_bench.hostcal import resolve_host_profile
-from mqtt_client_bench.metrics import abba_block_ratios, abba_order, compare_verdict_from_block_ratios
+from mqtt_client_bench.metrics import abba_block_records, abba_order, compare_verdict_from_block_ratios
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, expand_scenario
 from mqtt_client_bench.telemetry import allocate_cpuset, environment_metadata, pin_current_process
 
@@ -136,8 +136,12 @@ def run_abba_point(
         if lat.get("p50_ms") is not None:
             slot_latency_p50[label].append(float(lat["p50_ms"]))
 
-    block_ratios = abba_block_ratios(order, slot_rates)
-    verdict = compare_verdict_from_block_ratios(block_ratios)
+    records = abba_block_records(order, slot_rates)
+    block_ratios = [rec["ratio"] for rec in records]
+    verdict = compare_verdict_from_block_ratios(
+        block_ratios,
+        designs=[rec["design"] for rec in records],
+    )
     a_rates = [r for r, lab in zip(slot_rates, order) if lab == "A" and r is not None]
     b_rates = [r for r, lab in zip(slot_rates, order) if lab == "B" and r is not None]
 

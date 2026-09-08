@@ -91,6 +91,111 @@ def process_stats(pid: int) -> dict:
     }
 
 
+def process_alive(pid: int) -> bool:
+    """True when ``/proc/<pid>`` still exists."""
+    try:
+        return os.path.isdir(f"/proc/{int(pid)}")
+    except (TypeError, ValueError):
+        return False
+
+
+def process_comm(pid: int) -> Optional[str]:
+    text = _read_text(f"/proc/{int(pid)}/comm")
+    return text.strip() if text else None
+
+
+def clk_tck() -> float:
+    try:
+        return float(os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, AttributeError):
+        return 100.0
+
+
+# Isolated native Mosquitto on the ARM runner is not a compose container, so
+# the harness samples its PID the same way it samples role workers — with a
+# derived cpu_pct so broker headroom uses one threshold everywhere.
+EXTERNAL_BROKER_COMM = "mosquitto"
+
+
+def resolve_external_broker_pid(
+    broker_pid: Optional[int | str] = None,
+    *,
+    environ: Optional[dict] = None,
+) -> Optional[int]:
+    """CLI ``--broker-pid`` wins; otherwise ``BENCH_BROKER_PID``."""
+    raw = broker_pid
+    if raw is None or raw == "":
+        env = os.environ if environ is None else environ
+        raw = env.get("BENCH_BROKER_PID")
+    if raw is None or raw == "":
+        return None
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"external broker pid is not an integer: {raw!r}") from exc
+    if pid <= 0:
+        raise ValueError(f"external broker pid must be a live process id, got {pid}")
+    return pid
+
+
+def inspect_external_broker_pid(pid: int) -> dict:
+    """Fail closed when the announced PID is dead, unreadable, or not Mosquitto."""
+    try:
+        pid_i = int(pid)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "broker_pid_unobserved", "pid": pid, "alive": False}
+    if pid_i <= 0:
+        return {"ok": False, "reason": "broker_pid_unobserved", "pid": pid_i, "alive": False}
+    if not process_alive(pid_i):
+        return {"ok": False, "reason": "broker_pid_unobserved", "pid": pid_i, "alive": False}
+    comm = process_comm(pid_i)
+    if not comm:
+        return {
+            "ok": False,
+            "reason": "broker_pid_unobserved",
+            "pid": pid_i,
+            "alive": True,
+            "comm": comm,
+        }
+    if comm != EXTERNAL_BROKER_COMM:
+        return {
+            "ok": False,
+            "reason": "broker_pid_unobserved",
+            "pid": pid_i,
+            "alive": True,
+            "comm": comm,
+        }
+    return {"ok": True, "reason": None, "pid": pid_i, "alive": True, "comm": comm}
+
+
+class ProcessCpuSampler:
+    """Per-process CPU percent, same 100% = one core convention as cgroup stats."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = int(pid)
+        self._last: Optional[tuple] = None
+        self._clk_tck = clk_tck()
+
+    def sample(self) -> Optional[dict]:
+        if not process_alive(self.pid):
+            return None
+        stats = process_stats(self.pid)
+        now = time.monotonic()
+        ticks = stats.get("cpu_ticks")
+        cpu_pct = None
+        if ticks is not None and self._last is not None:
+            last_ts, last_ticks = self._last
+            elapsed = now - last_ts
+            if elapsed > 0 and last_ticks is not None and self._clk_tck > 0:
+                cpu_pct = 100.0 * ((ticks - last_ticks) / self._clk_tck) / elapsed
+        if ticks is not None:
+            self._last = (now, ticks)
+        stats["cpu_pct"] = cpu_pct
+        stats["comm"] = process_comm(self.pid)
+        stats["alive"] = True
+        return stats
+
+
 def self_rss_kb() -> Optional[int]:
     """Resident set size of the calling process, in KiB."""
     text = _read_text("/proc/self/status")
@@ -415,7 +520,12 @@ def temporarily_pinned(cpuset: Optional[str]):
 
 
 class TelemetrySampler:
-    def __init__(self, pids: Optional[Dict[str, int]] = None, containers: Optional[List[str]] = None):
+    def __init__(
+        self,
+        pids: Optional[Dict[str, int]] = None,
+        containers: Optional[List[str]] = None,
+        broker_pid: Optional[int] = None,
+    ):
         self.pids = pids or {}
         self.containers = containers or []
         self.samples: List[dict] = []
@@ -424,6 +534,7 @@ class TelemetrySampler:
         # Resolve cgroup paths up front: the one docker inspect per container
         # happens before the measure window, not inside it.
         self._container_samplers = [ContainerSampler(name) for name in self.containers]
+        self._broker_sampler = ProcessCpuSampler(int(broker_pid)) if broker_pid else None
 
     def start(self) -> None:
         self._stop.clear()
@@ -438,10 +549,13 @@ class TelemetrySampler:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            processes = {name: process_stats(pid) for name, pid in self.pids.items()}
+            if self._broker_sampler is not None:
+                processes["broker"] = self._broker_sampler.sample()
             sample = {
                 "ts": time.time(),
                 "loadavg": loadavg(),
-                "processes": {name: process_stats(pid) for name, pid in self.pids.items()},
+                "processes": processes,
                 "containers": {s.name: s.sample() for s in self._container_samplers},
             }
             self.samples.append(sample)

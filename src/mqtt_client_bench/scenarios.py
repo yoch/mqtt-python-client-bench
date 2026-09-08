@@ -353,8 +353,8 @@ SCENARIOS: List[Scenario] = [
         topology="application_rtt",
         description=(
             "Open-loop application RTT latency at fractions of that client's "
-            "RTT capacity. Same library drives initiator and responder "
-            "(homogeneous product loop)."
+            "own RTT capacity (NOT CROSS-CLIENT COMPARABLE). Same library "
+            "drives initiator and responder (homogeneous product loop)."
         ),
         qos_publish=1,
         qos_subscribe=1,
@@ -363,6 +363,32 @@ SCENARIOS: List[Scenario] = [
         outstanding=32,
         subscribers=1,
         variants=tuple({"load_fraction": f} for f in (0.50, 0.75, 0.90, 1.00)),
+    ),
+    Scenario(
+        # Matched-load application RTT: one shared grid from
+        # C_common = min(client RTT capacities), not a fraction of each
+        # client's own ceiling. compare/matrix resolve shared_load_fraction
+        # once, then every client sees the same target_rate. A client that
+        # cannot hold a shared point is offer_limited; the rate is not lowered.
+        name="application_rtt_fixed_rate",
+        suite="core",
+        tags=("representative", "dual_protocol"),
+        topology="application_rtt",
+        description=(
+            "Open-loop application RTT at shared fractions of C_common = "
+            "min(client RTT capacities). Same absolute pair rate for every "
+            "client. Homogeneous product loop (initiator and responder are "
+            "the same library)."
+        ),
+        qos_publish=1,
+        qos_subscribe=1,
+        payload="telemetry256",
+        cadence="loaded75",
+        outstanding=32,
+        subscribers=1,
+        variants=tuple(
+            {"shared_load_fraction": f} for f in (0.25, 0.50, 0.75, 0.90)
+        ),
     ),
     # --- full suite ---
     Scenario(

@@ -12,7 +12,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from mqtt_client_bench.adapters.registry import (
     EXPERIMENTAL_CLIENTS,
@@ -53,14 +53,19 @@ from mqtt_client_bench.loadgen import (
 )
 from mqtt_client_bench.metrics import (
     abba_order,
-    abba_block_ratios,
+    abba_block_records,
     compare_verdict_from_block_ratios,
+    abba_observation_usable,
+    comparison_spec,
+    comparison_value,
     integrity_counts,
     latency_summary,
     median,
     sanitize_number,
     summarize_valid_runs,
 )
+from mqtt_client_bench.pacing import DEFAULT_PACER_SPIN_NS, pacer_stimulus_reasons
+from mqtt_client_bench.pairwise import attach_aa_control
 from mqtt_client_bench.network import PROFILES as NETWORK_PROFILES
 from mqtt_client_bench.network import apply_profile, clear_profile, qdisc_stats
 from mqtt_client_bench.paths import PROJECT_ROOT
@@ -83,11 +88,13 @@ from mqtt_client_bench.telemetry import (
     TelemetrySampler,
     allocate_cpuset,
     environment_metadata,
+    inspect_external_broker_pid,
     loadavg,
     scaling_governor,
     pin_current_process,
     process_exit_metadata,
     process_memory_peaks,
+    resolve_external_broker_pid,
     temporarily_pinned,
 )
 from mqtt_client_bench.retained import clear_retained_snapshot, seed_retained_snapshot
@@ -110,6 +117,22 @@ SYS_SETTLE_S = 1.5
 # Computed once: a result is only comparable with another from the same
 # measurement path (see provenance.py).
 HARNESS_FINGERPRINT = harness_fingerprint()
+
+# Open-loop offer clock may drift ±2 %. That is a paceur check, not a licence
+# to keep a latency sample after the client refused a material share of slots.
+OPEN_LOOP_OFFER_TOLERANCE = 0.02
+OPEN_LOOP_BACKPRESSURE_MAX = 0.02
+# Matched-load latency (shared_load_fraction) is a percentile comparison of the
+# *offered* shape. A 2 % miss rate can drop the congested tail and still look
+# valid. 0.2 % keeps completion near-full without treating a single missed
+# slot on a short smoke window as a ranking.
+MATCHED_LOAD_BACKPRESSURE_MAX = 0.002
+# Initiator timeouts and responder echo refusals use the same ceiling as
+# matched-load admission misses. A 1 % timeout budget would let a latency
+# ranking drop the congested tail that matched-load already refuses at 0.2 %.
+RTT_FAILURE_MAX = MATCHED_LOAD_BACKPRESSURE_MAX
+BROKER_CPU_SATURATION_PCT = 85.0
+BROKER_PROCESS_SAMPLE_KEY = "broker"
 
 # Target offer for core sub_* QoS0 exact-topic capacity (paced mqtt_hammer).
 # emqtt-bench -I is milliseconds and cannot hold this on one loadgen core;
@@ -172,7 +195,8 @@ BROKER_RECONCILE_MAX_RATIO = 1.20
 
 # Broker headroom. Above this the run still produces a number, but that number
 # is partly the broker's limit, so it must not enter a client ranking. The
-# higher container_cpu_high threshold stays as the hard saturation signal.
+# higher saturation threshold stays as the hard signal, for both a managed
+# container and an isolated native process sampled by PID.
 BROKER_CPU_HEADROOM_PCT = 70.0
 
 # Share of the host's measured one-subscriber fan-out ceiling above which a
@@ -316,6 +340,112 @@ def _samples_in_window(
         if s.get("ts") is not None and start <= float(s["ts"]) <= end
     ]
     return inside or telemetry_samples
+
+
+def rtt_ratio_exceeds(
+    count: int,
+    denom: int,
+    *,
+    non_comparable: bool = False,
+    limit: float = RTT_FAILURE_MAX,
+) -> bool:
+    """True when a failure count is too large for an official RTT ranking.
+
+    Smoke tags every run ``non_comparable``. A single event on a window
+    shorter than ``1 / limit`` samples makes the ratio jump above the ceiling
+    by construction; that is noise, not a ranking, so smoke may keep it.
+    Standard still fail-closes on any material ratio, including a lone miss
+    on a tiny window — official campaigns are not that short.
+    """
+    count_i = int(count)
+    denom_i = int(denom)
+    if count_i <= 0:
+        return False
+    if denom_i <= 0:
+        return True
+    if non_comparable and count_i == 1 and denom_i < (1.0 / limit):
+        return False
+    return (count_i / denom_i) > limit
+
+
+def responder_validity_reasons(worker: dict, *, non_comparable: bool = False) -> List[str]:
+    """Fail closed when the echo path did not produce a clean RTT sample."""
+    if worker.get("role") != "responder":
+        return []
+    reasons: List[str] = []
+    echo_errors = int(worker.get("echo_errors") or 0)
+    pending_at_end = int(worker.get("pending_at_end") or 0)
+    echo_refused = int(worker.get("echo_refused") or 0)
+    received = int(worker.get("requests_received") or 0)
+    if echo_errors > 0:
+        reasons.append(f"rtt_responder_errors:{echo_errors}")
+    if pending_at_end > 0:
+        reasons.append(f"rtt_responder_pending:{pending_at_end}")
+    if rtt_ratio_exceeds(echo_refused, received, non_comparable=non_comparable):
+        reasons.append(f"rtt_echo_refused:{echo_refused}/{received}")
+    unaccounted = worker.get("echo_unaccounted")
+    if unaccounted is None and received:
+        accounted = (
+            int(worker.get("responses") or 0)
+            + echo_refused
+            + echo_errors
+            + pending_at_end
+        )
+        unaccounted = received - accounted
+    if unaccounted:
+        reasons.append(f"rtt_responder_unaccounted:{int(unaccounted)}")
+    return reasons
+
+
+def _broker_cpu_from_samples(
+    telemetry_samples: List[dict],
+    measure_window: Optional[tuple],
+) -> dict:
+    """Peak broker CPU from a managed container and/or an external process PID."""
+    broker_cpu_max: Optional[float] = None
+    saturated_containers: set = set()
+    saturated_processes: set = set()
+    watched_any = False
+    watched_ok = False
+    source = None
+    for sample in telemetry_samples:
+        for stats in (sample.get("containers") or {}).values():
+            watched_any = True
+            if stats is not None:
+                watched_ok = True
+        processes = sample.get("processes") or {}
+        if BROKER_PROCESS_SAMPLE_KEY in processes:
+            watched_any = True
+            if processes.get(BROKER_PROCESS_SAMPLE_KEY) is not None:
+                watched_ok = True
+    for sample in _samples_in_window(telemetry_samples, measure_window):
+        for name, stats in (sample.get("containers") or {}).items():
+            if not stats or stats.get("cpu_pct") is None:
+                continue
+            cpu = float(stats["cpu_pct"])
+            if broker_cpu_max is None or cpu > broker_cpu_max:
+                broker_cpu_max = cpu
+                source = "container"
+            if cpu >= BROKER_CPU_SATURATION_PCT:
+                saturated_containers.add(name)
+        broker_proc = (sample.get("processes") or {}).get(BROKER_PROCESS_SAMPLE_KEY)
+        if not broker_proc or broker_proc.get("cpu_pct") is None:
+            continue
+        cpu = float(broker_proc["cpu_pct"])
+        if broker_cpu_max is None or cpu > broker_cpu_max:
+            broker_cpu_max = cpu
+            source = "process"
+        if cpu >= BROKER_CPU_SATURATION_PCT:
+            saturated_processes.add(BROKER_PROCESS_SAMPLE_KEY)
+    return {
+        "broker_cpu_max": broker_cpu_max,
+        "saturated_containers": saturated_containers,
+        "saturated_processes": saturated_processes,
+        "watched_any": watched_any,
+        "watched_ok": watched_ok,
+        "source": source,
+        "telemetry_available": broker_cpu_max is not None,
+    }
 
 
 def reconcile_broker_publishes(
@@ -629,6 +759,8 @@ def validate_run(
     loadgen_ref_sub: Optional[dict] = None,
     measure_window: Optional[tuple] = None,
     fanout_ceiling_msgs_per_s: Optional[float] = None,
+    managed_broker: bool = True,
+    external_broker_pid: Optional[int] = None,
 ) -> dict:
     reasons = []
     for result in worker_results:
@@ -655,8 +787,17 @@ def validate_run(
         if result.get("role") == "rtt_initiator":
             sent = int(result.get("sent_in_window") or 0)
             timeouts = int(result.get("timeouts") or 0)
-            if timeouts > 0 and (sent == 0 or timeouts / max(sent, 1) > 0.01):
+            if rtt_ratio_exceeds(
+                timeouts,
+                sent,
+                non_comparable=bool(point.get("non_comparable")),
+            ):
                 reasons.append("rtt_timeouts")
+        reasons.extend(
+            responder_validity_reasons(
+                result, non_comparable=bool(point.get("non_comparable"))
+            )
+        )
 
     # Sequence integrity is the substance of publisher_with_oracle / integrity
     # points. Enrichment must have run first; a mismatch must not stay valid.
@@ -688,13 +829,21 @@ def validate_run(
             if offered is None:
                 continue
             actual_offer = float(offered) / duration
-            if abs(actual_offer - target) / target > 0.02:
+            if abs(actual_offer - target) / target > OPEN_LOOP_OFFER_TOLERANCE:
                 reasons.append("open_loop_rate_out_of_tolerance")
             missed = int(result.get("missed_due_to_backpressure") or 0)
             # Material missed slots mean the latency sample is from a different
-            # offered shape than the point claimed; fail closed.
-            if float(offered) > 0 and missed / float(offered) > 0.02:
+            # offered shape than the point claimed; fail closed. Never lower
+            # target_rate to hide an offer-limited client.
+            miss_limit = (
+                MATCHED_LOAD_BACKPRESSURE_MAX
+                if point.get("shared_load_fraction") is not None
+                else OPEN_LOOP_BACKPRESSURE_MAX
+            )
+            if float(offered) > 0 and missed / float(offered) > miss_limit:
                 reasons.append("open_loop_backpressure_misses")
+
+    reasons.extend(pacer_stimulus_reasons(point, worker_results))
 
     topology = point.get("topology")
     duration_s = float(point.get("duration_s") or 1.0)
@@ -735,47 +884,47 @@ def validate_run(
         elif (recv_parsed.get("last_total") in (None, 0)) and (pub_parsed.get("last_total") or 0) > 0:
             reasons.append("no_delivery_despite_load")
 
-    # Telemetry saturation heuristics. Peak broker CPU is computed over the whole
-    # run (not just the tail) and reported as a first-class field so a reader can
-    # see how much headroom the broker had for any published number.
+    # Telemetry saturation heuristics. Peak broker CPU is computed over the
+    # measure window and reported as a first-class field so a reader can see
+    # how much headroom the broker had for any published number. A managed
+    # Mosquitto container and an isolated native process (BENCH_BROKER_PID)
+    # share BROKER_CPU_HEADROOM_PCT / BROKER_CPU_SATURATION_PCT.
     diagnostic = "diagnostic" in (point.get("tags") or ()) or topology == "broker_ceiling"
     # A 200k ingress offer pegs single-threaded Mosquitto even when clients
     # still differentiate (preview: 14k–60k at 100 % CPU). Ranking subscribe
     # scores callback deliveries; CPU here is the cost of shedding, not a
     # shared ceiling. Diagnostic / ceiling probes still fail closed.
     ingress_ranking = topology == "subscriber_ingress" and not diagnostic
-    broker_cpu_max: Optional[float] = None
-    saturated_containers = set()
-    for sample in _samples_in_window(telemetry_samples, measure_window):
-        for name, stats in (sample.get("containers") or {}).items():
-            if not stats or stats.get("cpu_pct") is None:
-                continue
-            cpu = float(stats["cpu_pct"])
-            if broker_cpu_max is None or cpu > broker_cpu_max:
-                broker_cpu_max = cpu
-            if cpu >= 85.0:
-                saturated_containers.add(name)
+    cpu_obs = _broker_cpu_from_samples(telemetry_samples, measure_window)
+    broker_cpu_max = cpu_obs["broker_cpu_max"]
+    saturated_containers = cpu_obs["saturated_containers"]
+    saturated_processes = cpu_obs["saturated_processes"]
     if not ingress_ranking:
         for name in sorted(saturated_containers):
             reasons.append(f"container_cpu_high:{name}")
+        for name in sorted(saturated_processes):
+            reasons.append(f"process_cpu_high:{name}")
         # Headroom gate: below hard saturation the number is still partly the
         # broker's, so it must not enter a client ranking.
         if (
             broker_cpu_max is not None
             and not saturated_containers
+            and not saturated_processes
             and broker_cpu_max >= BROKER_CPU_HEADROOM_PCT
         ):
             reasons.append(f"broker_headroom_low:{broker_cpu_max:.0f}")
-    # Managed-broker runs must observe the broker; a silently dead stats probe
-    # would mislabel broker-limited runs as sut_limited.
-    watched_any = False
-    watched_ok = False
-    for sample in telemetry_samples:
-        for stats in (sample.get("containers") or {}).values():
-            watched_any = True
-            if stats is not None:
-                watched_ok = True
-    if watched_any and not watched_ok:
+    official = not bool(point.get("non_comparable"))
+    if managed_broker:
+        if cpu_obs["watched_any"] and not cpu_obs["watched_ok"]:
+            reasons.append("broker_telemetry_missing")
+    elif external_broker_pid is not None:
+        if not cpu_obs["telemetry_available"]:
+            reasons.append("broker_pid_unobserved")
+    elif official:
+        reasons.append("broker_pid_required")
+    else:
+        # Smoke / already-tagged non_comparable may continue as path proof,
+        # but absence of broker CPU is recorded rather than assumed OK.
         reasons.append("broker_telemetry_missing")
 
     # Loadgen health vs effective offer (never raw QoS0 pub rates — they are ~2×).
@@ -866,7 +1015,11 @@ def validate_run(
     bottleneck = "bottleneck_unattributed"
     if reconciliation["reason"]:
         bottleneck = "broker_unconfirmed"
-    elif any(r.startswith("container_cpu_high:") and "mosquitto" in r for r in reasons) or (
+    elif any(
+        (r.startswith("container_cpu_high:") and "mosquitto" in r)
+        or r.startswith("process_cpu_high:")
+        for r in reasons
+    ) or (
         sys_drops and not ingress_consumer_drops
     ):
         bottleneck = "broker_limited"
@@ -923,9 +1076,180 @@ def validate_run(
         "delivered_rate": delivered_rate,
         "delivery_offer_ratio": delivery_ratio,
         "broker_cpu_max_pct": sanitize_number(broker_cpu_max),
+        "broker_telemetry_available": bool(cpu_obs["telemetry_available"]),
+        "broker_telemetry_source": cpu_obs["source"],
         "broker_reconciliation": reconciliation,
         "ingress_reconciliation": ingress_reconciliation,
     }
+
+
+# Cross-client latency may only offer the same absolute workload to every
+# client. A per-client load_fraction is intra-client characterization: useful,
+# never a ranking. shared_load_fraction is resolved once from
+# C_common = min(client capacities) so A and B see the same target_rate.
+PER_CLIENT_LOAD_FRACTION_REASON = "per_client_load_fraction_not_cross_client"
+SHARED_LOAD_UNRESOLVED_REASON = "shared_load_fraction_unresolved"
+BROKER_HEADROOM_REASON_PREFIX = "broker_headroom_low"
+OBSERVED_LOWER_BOUND_SOURCE = "observed_lower_bound:broker_headroom_low"
+
+
+def uses_per_client_load_fraction(point: dict) -> bool:
+    """True when the point would resolve a different rate per client's capacity."""
+    return (
+        point.get("load_fraction") is not None
+        and point.get("shared_load_fraction") is None
+        and point.get("target_rate") is None
+    )
+
+
+def uses_shared_load_fraction(point: dict) -> bool:
+    return point.get("shared_load_fraction") is not None
+
+
+def assert_cross_client_load_legal(points: List[dict], *, scenario: str) -> None:
+    """Refuse a compare/matrix that would silently pair unequal offered rates."""
+    if any(uses_per_client_load_fraction(p) for p in points):
+        raise ValueError(
+            f"{scenario} uses per-client load_fraction; that is intra-client "
+            "characterization (NOT CROSS-CLIENT COMPARABLE). Cross-client "
+            "latency must use target_rate or shared_load_fraction so every "
+            "client is offered the same absolute workload."
+        )
+
+
+def round_shared_target_rate(rate: float) -> float:
+    """Deterministic integer msgs/s so A and B cannot drift by rounding."""
+    return float(round(float(rate)))
+
+
+def _is_broker_headroom_only(reasons: object) -> bool:
+    """True only when every recorded reason is a broker-headroom gate."""
+    if not isinstance(reasons, (list, tuple)) or not reasons:
+        return False
+    texts = [str(item) for item in reasons if item]
+    return bool(texts) and all(text.startswith(BROKER_HEADROOM_REASON_PREFIX) for text in texts)
+
+
+def _run_is_headroom_only_lower_bound(run: dict) -> bool:
+    """Admit a calibrate run as a C_common lower bound, fail closed otherwise.
+
+    Official ``valid`` rates belong on the capacity field. A timeout, worker
+    error, host-state failure or mixed reason list must never feed C_common,
+    even if the run also hit broker headroom and still produced a rate.
+    """
+    if run.get("status") == "valid":
+        return False
+    if run.get("error") or run.get("ok") is False:
+        return False
+    rate = run.get("primary_msgs_per_s")
+    if rate is None or float(rate) <= 0:
+        return False
+    return _is_broker_headroom_only(run.get("reasons"))
+
+
+def _calibration_result_blocks(load_profile: dict, *, protocol: str, kind: str) -> List[dict]:
+    raw = load_profile.get("raw") or {}
+    block = ((raw.get(protocol) or {}).get("rtt" if kind == "rtt" else "publish")) or {}
+    results = block.get("results")
+    if not isinstance(results, list):
+        return []
+    return [item for item in results if isinstance(item, dict)]
+
+
+def admitted_observed_rates(
+    load_profile: dict,
+    *,
+    protocol: str,
+    kind: str,
+) -> List[float]:
+    """Delivered rates from headroom-only inconclusive calibrate runs."""
+    rates: List[float] = []
+    for block in _calibration_result_blocks(load_profile, protocol=protocol, kind=kind):
+        for run in block.get("runs") or []:
+            if isinstance(run, dict) and _run_is_headroom_only_lower_bound(run):
+                rates.append(float(run["primary_msgs_per_s"]))
+    return rates
+
+
+def observed_capacity_from_calibration(
+    load_profile: dict,
+    *,
+    protocol: str,
+    kind: str,
+) -> Optional[float]:
+    """Median of headroom-only delivered rates when official capacity is null.
+
+    Summary ``inconclusive_rates`` are ignored: they mix timeouts and worker
+    errors with broker-headroom voids. Per-client ``load_fraction`` keeps
+    using the official field, which stays null.
+    """
+    return median(admitted_observed_rates(load_profile, protocol=protocol, kind=kind))
+
+
+def resolve_shared_load_point(
+    point: dict,
+    calibrations: Dict[str, dict],
+    clients: List[str],
+) -> dict:
+    """Stamp one shared ``target_rate`` from ``C_common = min(capacities)``.
+
+    Missing or non-positive capacities are recorded on the point; ``run_point``
+    then fails closed instead of inventing a rate. The caller's point is not
+    mutated. When the official capacity is null, only calibrate runs voided
+    exclusively by ``broker_headroom_low`` may contribute an observed lower
+    bound. Client order does not change ``C_common`` or ``target_rate``.
+    """
+    resolved = dict(point)
+    frac = resolved.get("shared_load_fraction")
+    if frac is None:
+        return resolved
+    kind = "rtt" if resolved.get("topology") == "application_rtt" else "publish"
+    protocol = str(resolved.get("protocol", "MQTTv311"))
+    unique_clients = list(dict.fromkeys(clients))
+    per_client: Dict[str, float] = {}
+    sources: Dict[str, str] = {}
+    provenance: Dict[str, dict] = {}
+    errors: List[str] = []
+    for name in unique_clients:
+        profile = calibrations.get(name)
+        if not profile:
+            errors.append(f"shared_load_missing_calibration:{name}")
+            continue
+        try:
+            cap = capacity_from_load_profile(profile, protocol=protocol, kind=kind)
+        except ValueError as exc:
+            errors.append(f"{exc}:{name}")
+            continue
+        source = "valid"
+        if cap is None or float(cap) <= 0:
+            admitted = admitted_observed_rates(profile, protocol=protocol, kind=kind)
+            cap = median(admitted)
+            source = OBSERVED_LOWER_BOUND_SOURCE
+            provenance[name] = {
+                "source": "observed_lower_bound",
+                "exclusive_reason": BROKER_HEADROOM_REASON_PREFIX,
+                "n_admitted": len(admitted),
+                "admitted_rates": admitted,
+            }
+        else:
+            provenance[name] = {"source": "valid"}
+        if cap is None or float(cap) <= 0:
+            errors.append(f"shared_load_missing_capacity:{name}:{protocol}:{kind}")
+            continue
+        per_client[name] = float(cap)
+        sources[name] = source
+    if errors or len(per_client) != len(unique_clients):
+        resolved["shared_load_error"] = errors or [SHARED_LOAD_UNRESOLVED_REASON]
+        return resolved
+    c_common = min(per_client.values())
+    resolved["target_rate"] = round_shared_target_rate(c_common * float(frac))
+    resolved["shared_capacity_msgs_per_s"] = c_common
+    resolved["shared_capacities"] = per_client
+    resolved["shared_capacity_sources"] = sources
+    resolved["shared_capacity_provenance"] = provenance
+    resolved["calibration_kind"] = kind
+    resolved["calibration_protocol"] = protocol
+    return resolved
 
 
 def run_point(
@@ -942,12 +1266,21 @@ def run_point(
     load_profile: Optional[dict] = None,
     host_profile: Optional[dict] = None,
     managed_broker: bool = True,
+    external_broker_pid: Optional[int] = None,
+    cross_client: bool = False,
 ) -> dict:
     run_id = make_run_id()
     point = dict(point)
     point["run_id"] = run_id
     started_at = _utc_now()
     host_state = host_state_snapshot()
+    if managed_broker:
+        external_broker_pid = None
+    else:
+        external_broker_pid = resolve_external_broker_pid(external_broker_pid)
+    sample_broker_pid = None
+    if external_broker_pid is not None and inspect_external_broker_pid(external_broker_pid).get("ok"):
+        sample_broker_pid = external_broker_pid
 
     missing = unsupported_features(point, client=client)
     if missing:
@@ -966,7 +1299,43 @@ def run_point(
             "workers": [],
         }
 
-    if load_profile and point.get("load_fraction") is not None:
+    if cross_client:
+        # Cross-client latency must not resolve load_fraction against this
+        # client's own capacity: that silently offers A and B different rates.
+        if uses_per_client_load_fraction(point):
+            return {
+                "schema_version": 1,
+                "harness_fingerprint": HARNESS_FINGERPRINT,
+                "run_id": run_id,
+                "started_at": started_at,
+                "finished_at": _utc_now(),
+                "host_state": host_state,
+                "point": point,
+                "client": client,
+                "client_path": client_path,
+                "status": "inconclusive",
+                "reasons": [PER_CLIENT_LOAD_FRACTION_REASON],
+                "non_comparable": True,
+                "workers": [],
+            }
+        if point.get("shared_load_fraction") is not None and not point.get("target_rate"):
+            reasons = list(point.get("shared_load_error") or [SHARED_LOAD_UNRESOLVED_REASON])
+            return {
+                "schema_version": 1,
+                "harness_fingerprint": HARNESS_FINGERPRINT,
+                "run_id": run_id,
+                "started_at": started_at,
+                "finished_at": _utc_now(),
+                "host_state": host_state,
+                "point": point,
+                "client": client,
+                "client_path": client_path,
+                "status": "inconclusive",
+                "reasons": reasons,
+                "non_comparable": True,
+                "workers": [],
+            }
+    elif load_profile and point.get("load_fraction") is not None:
         capacity_kind = "rtt" if point.get("topology") == "application_rtt" else "publish"
         protocol = str(point.get("protocol", "MQTTv311"))
         try:
@@ -1065,6 +1434,7 @@ def run_point(
                 "max_harness_payload_bytes",
                 "submit_count", "expected_accepts", "expected_rejects",
                 "receive_maximum", "retained_count", "defer_subscribe",
+                "pacer_mode", "pacer_spin_ns", "temporal_trace_max_points",
             ) if k in point or point.get(k) is not None},
         }
         # Fill defaults from point always.
@@ -1089,6 +1459,9 @@ def run_point(
             ("native_async", True),
         ):
             cfg.setdefault(key, point.get(key, default))
+        cfg.setdefault("pacer_mode", point.get("pacer_mode", "in_loop"))
+        cfg.setdefault("pacer_spin_ns", point.get("pacer_spin_ns", DEFAULT_PACER_SPIN_NS))
+        cfg.setdefault("pacer_cpuset", cpusets.get("loadgen"))
         if "force_header" in point:
             cfg["force_header"] = point["force_header"]
         # The accounting protocol needs an admission verdict at the call site,
@@ -1262,6 +1635,9 @@ def run_point(
 
             init_cfg = base_cfg("rtt", "rtt_initiator")
             init_cfg.update({"request_topic": req, "response_topic": resp})
+            init_cfg["pacer_socket_path"] = str(work_dir / f"pacer-{run_id}.sock")
+            init_cfg["pacer_stats_path"] = str(work_dir / f"pacer-{run_id}.stats.json")
+            init_cfg["temporal_trace_path"] = str(work_dir / f"rtt-{run_id}.temporal_trace.jsonl")
             init_path = work_dir / f"rtt-{run_id}.cfg.json"
             write_json(str(init_path), init_cfg)
             workers.append(_spawn_role("rtt_initiator.py", str(init_path), cpusets.get("sut")))
@@ -1517,14 +1893,17 @@ def run_point(
         sampler = TelemetrySampler(
             pids={f"w{i}": w.pid for i, w in enumerate(workers) if w.pid},
             containers=[broker_container_name()] if managed_broker else [],
+            broker_pid=None if managed_broker else sample_broker_pid,
         )
         sampler.start()
 
-        # $SYS is sampled for every managed-broker run, not just ingress: publisher
-        # capacity is the core of the ranking and was never confronted with what
-        # the broker actually received. Burst ingress is excluded because its
-        # offer is deliberately bounded and bursty, so counters are not meaningful.
-        need_sys = managed_broker and not burst_ingress
+        # $SYS is sampled whenever we can talk to the broker at host:port,
+        # including an isolated native Mosquitto. Burst ingress is excluded
+        # because its offer is deliberately bounded and bursty. Publisher
+        # reconciliation still applies only to SUT-only publish topologies;
+        # application_rtt does not use it (initiator and responder both
+        # publish). Broker CPU/headroom is the ranking control on native ARM.
+        need_sys = not burst_ingress
         if need_sys:
             try:
                 sys_probe = SysCountersProbe(host, endpoint_port, client_id=f"sys-{run_id}")
@@ -1670,6 +2049,8 @@ def run_point(
             fanout_ceiling_msgs_per_s=(
                 ((host_profile or {}).get("ceilings") or {}).get("broker_fanout_msgs_per_s")
             ),
+            managed_broker=managed_broker,
+            external_broker_pid=external_broker_pid,
         )
         declared_policy = ((host_profile or {}).get("host") or {}).get("frequency_policy")
         for reason in host_state_reasons(host_state, declared_policy=declared_policy):
@@ -1713,13 +2094,19 @@ def run_point(
         # ranked against each other; for a client that *has* a native path, a
         # facade run is diagnostic by definition and is marked non_comparable.
         publish_path = None
+        native_async = None
         for wr in worker_results:
             if wr.get("publish_path"):
                 publish_path = wr["publish_path"]
+            if wr.get("native_async") is not None:
+                native_async = wr["native_async"]
+            if publish_path is not None and native_async is not None:
                 break
+        if native_async is None and publish_path is not None:
+            native_async = publish_path == "native_async"
         forced_facade = publish_path == "sync_facade" and has_async_adapter(client)
 
-        return {
+        payload = {
             "schema_version": 1,
             "harness_fingerprint": HARNESS_FINGERPRINT,
             "run_id": run_id,
@@ -1737,6 +2124,8 @@ def run_point(
             "delivery_offer_ratio": validity.get("delivery_offer_ratio"),
             "effective_offer_msgs_per_s": validity.get("effective_offer_msgs_per_s"),
             "broker_cpu_max_pct": validity.get("broker_cpu_max_pct"),
+            "broker_telemetry_available": validity.get("broker_telemetry_available"),
+            "broker_telemetry_source": validity.get("broker_telemetry_source"),
             "broker_reconciliation": validity.get("broker_reconciliation"),
             "ingress_reconciliation": validity.get("ingress_reconciliation"),
             "cost_per_message": cost_per_message(worker_results, telemetry_samples),
@@ -1753,6 +2142,7 @@ def run_point(
             "network": net_result,
             "qdisc": qdisc_stats() if network != "localhost" else None,
             "managed_broker": managed_broker,
+            "external_broker_pid": external_broker_pid,
             "environment": environment_metadata(),
             # Which machine's ceilings this number was taken against. Absent on
             # a host nobody calibrated, which is the honest answer rather than
@@ -1768,7 +2158,18 @@ def run_point(
             "non_comparable": bool(point.get("non_comparable")) or forced_facade,
             "protocol_effective": point.get("protocol", "MQTTv311"),
             "publish_path": publish_path,
+            "native_async": native_async,
         }
+        initiator = next((w for w in worker_results if w.get("role") == "rtt_initiator"), None)
+        if initiator is not None:
+            if initiator.get("pacing"):
+                payload["pacing"] = initiator["pacing"]
+            if initiator.get("temporal_trace"):
+                payload["temporal_trace"] = initiator["temporal_trace"]
+                payload["temporal_trace_metric"] = initiator.get(
+                    "temporal_trace_metric", "application_e2e_latency"
+                )
+        return payload
     finally:
         barrier.close()
         for w in workers:
@@ -1929,6 +2330,7 @@ def run_matrix(
     host_profile_path: Optional[str] = None,
     seed: int = 42,
     variant_index: Optional[int] = None,
+    broker_pid: Optional[int] = None,
 ) -> dict:
     """Run several clients interleaved **within each point**, not one after another.
 
@@ -1952,6 +2354,7 @@ def run_matrix(
         # Used by the pre-launch validation, which needs to prove every role
         # still runs without paying for a full sweep of variants.
         points = [points[variant_index]]
+    assert_cross_client_load_legal(points, scenario=name)
     if network:
         for p in points:
             p["network"] = network
@@ -1965,6 +2368,7 @@ def run_matrix(
     pin_current_process(cpusets.get("orch"))
 
     managed = broker is None
+    external_pid = None
     if managed:
         meta = broker_up(wait=True, cpuset=cpusets.get("broker"))
         host, port, tls_port = meta["host"], meta["port"], meta["tls_port"]
@@ -1973,6 +2377,7 @@ def run_matrix(
         tls_port = DEFAULT_TLS_PORT
         wait_for_broker(host, port, timeout_s=10)
         meta = {"managed_broker": False, "host": host, "port": port, "tls_port": tls_port}
+        external_pid = resolve_external_broker_pid(broker_pid)
 
     host_profile = resolve_host_profile(host_profile_path)
     if host_profile is not None:
@@ -1993,7 +2398,20 @@ def run_matrix(
     per_client: Dict[str, List[dict]] = {c: [] for c in clients}
     with tempfile.TemporaryDirectory(prefix="mqtt-bench-matrix-") as tmp:
         work_dir = Path(tmp)
+        if any(uses_shared_load_fraction(p) for p in ordered_points):
+            for client in clients:
+                if profiles.get(client) is None:
+                    cal_path = str(work_dir / f"cal-{client}.json")
+                    profiles[client] = calibrate(
+                        cal_path,
+                        client=client,
+                        client_path=client_paths.get(client),
+                        profile="standard" if profile == "standard" else profile,
+                    )
         for point in ordered_points:
+            point = resolve_shared_load_point(
+                point, {c: p for c, p in profiles.items() if p}, clients
+            )
             runs_by_client: Dict[str, List[dict]] = {c: [] for c in clients}
             for run_idx in range(runs):
                 # Rotate so position within the point is counterbalanced.
@@ -2014,6 +2432,8 @@ def run_matrix(
                         load_profile=profiles.get(client),
                         host_profile=host_profile,
                         managed_broker=managed,
+                        external_broker_pid=external_pid,
+                        cross_client=True,
                     )
                     result["run_index"] = run_idx
                     result["matrix_slot"] = slot
@@ -2115,6 +2535,7 @@ def run_scenario(
     seed: int = 42,
     point_filter: Optional[Callable[[dict], bool]] = None,
     publish_path: str = "native",
+    broker_pid: Optional[int] = None,
 ) -> dict:
     scenario = SCENARIO_BY_NAME[name]
     if runs is None:
@@ -2140,6 +2561,7 @@ def run_scenario(
     pin_current_process(cpusets.get("orch"))
 
     managed = broker is None
+    external_pid = None
     if managed:
         meta = broker_up(wait=True, cpuset=cpusets.get("broker"))
         host, port, tls_port = meta["host"], meta["port"], meta["tls_port"]
@@ -2148,6 +2570,7 @@ def run_scenario(
         tls_port = DEFAULT_TLS_PORT
         wait_for_broker(host, port, timeout_s=10)
         meta = {"managed_broker": False, "host": host, "port": port, "tls_port": tls_port}
+        external_pid = resolve_external_broker_pid(broker_pid)
 
     # Resolved once per campaign, not per point: the machine does not change
     # under a run, and validating it here fails before any measuring starts.
@@ -2181,6 +2604,7 @@ def run_scenario(
                     load_profile=load_profile,
                     host_profile=host_profile,
                     managed_broker=managed,
+                    external_broker_pid=external_pid,
                 )
                 result["run_index"] = run_idx
                 point_runs.append(result)
@@ -2486,6 +2910,53 @@ def calibrate(
 ABBA_COOLDOWN_S = 5.0
 
 
+def _publish_path_from_compare_runs(point_results: Sequence[dict], client: str) -> Optional[str]:
+    """First recorded RTT drive path for ``client`` in a compare document."""
+    for block in point_results:
+        for run in block.get("runs") or []:
+            if run.get("client") != client:
+                continue
+            identity = run.get("client_identity") or {}
+            path = identity.get("publish_path") or run.get("publish_path")
+            if path:
+                return str(path)
+    return None
+
+
+def _compare_identity_with_path(
+    client: str,
+    client_path: Optional[str],
+    point_results: Sequence[dict],
+) -> dict:
+    """Adapter identity plus the RTT path actually measured in this compare.
+
+    ``io_model`` stays the adapter architecture. ``publish_path`` is the
+    drive used for application RTT and must not be read as a second
+    ``io_model``.
+    """
+    identity = dict(adapter_identity(client, client_path) or {})
+    adapter_io = identity.get("io_model")
+    path = _publish_path_from_compare_runs(point_results, client)
+    if path:
+        identity["publish_path"] = path
+        identity["rtt_publish_path"] = path
+    if adapter_io:
+        identity["adapter_io_model"] = adapter_io
+        identity.setdefault("io_model", adapter_io)
+    return identity
+
+
+def _load_profiles_from_dir(directory: str, clients: List[str]) -> Dict[str, dict]:
+    """Read ``<client>-load.json`` files already produced by ``calibrate``."""
+    root = Path(directory)
+    loaded: Dict[str, dict] = {}
+    for name in dict.fromkeys(clients):
+        path = root / f"{name}-load.json"
+        if path.is_file():
+            loaded[name] = read_json(str(path))
+    return loaded
+
+
 def compare_clients(
     clients: List[str],
     scenario: str,
@@ -2494,9 +2965,13 @@ def compare_clients(
     profile: str = "standard",
     output: Optional[str] = None,
     load_profile_path: Optional[str] = None,
+    load_profile_dir: Optional[str] = None,
     host_profile_path: Optional[str] = None,
     client_paths: Optional[Dict[str, str]] = None,
     variant_index: Optional[int] = None,
+    broker: Optional[str] = None,
+    broker_pid: Optional[int] = None,
+    pacer_mode: Optional[str] = None,
 ) -> dict:
     """ABBA compare two MQTT client adapters across scenario variants."""
     if len(clients) < 2:
@@ -2511,13 +2986,23 @@ def compare_clients(
         cpusets = allocate_cpuset(["sut", "broker", "loadgen", "orch"], profile="smoke")
     pin_current_process(cpusets.get("orch"))
 
-    meta = broker_up(wait=True, cpuset=cpusets.get("broker"))
-    host, port, tls_port = meta["host"], meta["port"], meta["tls_port"]
+    managed = broker is None
+    external_pid = None
+    if managed:
+        meta = broker_up(wait=True, cpuset=cpusets.get("broker"))
+        host, port, tls_port = meta["host"], meta["port"], meta["tls_port"]
+    else:
+        host, port = parse_broker_endpoint(broker)
+        tls_port = DEFAULT_TLS_PORT
+        wait_for_broker(host, port, timeout_s=10)
+        meta = {"managed_broker": False, "host": host, "port": port, "tls_port": tls_port}
+        external_pid = resolve_external_broker_pid(broker_pid)
 
     scenario_obj = SCENARIO_BY_NAME[scenario]
     points = expand_scenario(scenario_obj, profile)
     if variant_index is not None:
         points = [points[variant_index]]
+    assert_cross_client_load_legal(points, scenario=scenario)
 
     host_profile = resolve_host_profile(host_profile_path)
     if host_profile is not None:
@@ -2531,9 +3016,38 @@ def compare_clients(
         # it for the whole matrix prevents each fraction from silently getting
         # a different gmqtt baseline and guarantees protocol×client alignment.
         calibrations = {}
-        if any(point.get("load_fraction") is not None for point in points):
+        pair = [baseline_client, candidate_client]
+        unique_pair = list(dict.fromkeys(pair))
+        if any(uses_shared_load_fraction(point) for point in points):
+            # C_common is min of each client's own capacity. A single shared
+            # --load-profile would silently pin both sides to one library.
+            if shared_load_profile is not None:
+                raise ValueError(
+                    "shared_load_fraction cannot use a single --load-profile; "
+                    "C_common is min of each client's own calibration"
+                )
+            if load_profile_dir:
+                calibrations.update(_load_profiles_from_dir(load_profile_dir, unique_pair))
+                for name, loaded in list(calibrations.items()):
+                    _validate_load_profile(
+                        loaded,
+                        client=name,
+                        client_path=client_paths.get(name),
+                        broker=meta,
+                    )
+            for name in unique_pair:
+                if name in calibrations:
+                    continue
+                cal_path = str(work_dir / f"cal-{name}.json")
+                calibrations[name] = calibrate(
+                    cal_path,
+                    client=name,
+                    client_path=client_paths.get(name),
+                    profile="standard" if profile == "standard" else profile,
+                )
+        elif any(point.get("load_fraction") is not None for point in points):
             if shared_load_profile is None:
-                for name in (baseline_client, candidate_client):
+                for name in unique_pair:
                     cal_path = str(work_dir / f"cal-{name}.json")
                     calibrations[name] = calibrate(
                         cal_path,
@@ -2544,13 +3058,21 @@ def compare_clients(
             else:
                 calibrations[baseline_client] = shared_load_profile
                 calibrations[candidate_client] = shared_load_profile
+        spec = comparison_spec(scenario)
         for point_idx, point in enumerate(points):
-            baseline_rates = []
-            candidate_rates = []
-            slot_rates: List[Optional[float]] = []
+            point = resolve_shared_load_point(point, calibrations, pair)
+            if pacer_mode:
+                point = dict(point)
+                point["pacer_mode"] = pacer_mode
+            baseline_values = []
+            candidate_values = []
+            slot_values: List[Optional[float]] = []
+            slot_p95: List[Optional[float]] = []
+            slot_p99: List[Optional[float]] = []
             raw = []
+            fail_closed_load = bool(point.get("shared_load_error"))
             for slot, label in enumerate(order):
-                if slot > 0:
+                if slot > 0 and not fail_closed_load:
                     time.sleep(ABBA_COOLDOWN_S)
                 name = baseline_client if label == "A" else candidate_client
                 result = run_point(
@@ -2565,32 +3087,53 @@ def compare_clients(
                     cpusets=cpusets,
                     load_profile=calibrations.get(name),
                     host_profile=host_profile,
-                    managed_broker=True,
+                    managed_broker=managed,
+                    external_broker_pid=external_pid,
+                    cross_client=True,
                 )
                 result["ab_label"] = label
                 result["slot"] = slot
                 result["cooldown_s"] = ABBA_COOLDOWN_S
+                observed = comparison_value(result, scenario)
+                result["comparison_metric"] = observed["comparison_metric"]
+                result["comparison_direction"] = observed["comparison_direction"]
+                result["comparison_value"] = observed["value"]
                 raw.append(result)
-                rate = result.get("primary_msgs_per_s")
-                usable = rate is not None and result.get("status") == "valid" and not result.get("non_comparable")
-                slot_rates.append(float(rate) if usable else None)
+                value = observed["value"]
+                usable = abba_observation_usable(result, value, profile=profile)
+                slot_values.append(float(value) if usable else None)
+                slot_p95.append(observed.get("p95_ms") if usable else None)
+                slot_p99.append(observed.get("p99_ms") if usable else None)
                 if usable:
                     if label == "A":
-                        baseline_rates.append(float(rate))
+                        baseline_values.append(float(value))
                     else:
-                        candidate_rates.append(float(rate))
+                        candidate_values.append(float(value))
 
-            block_ratios = abba_block_ratios(order, slot_rates)
-            verdict = compare_verdict_from_block_ratios(block_ratios)
+            block_records = abba_block_records(order, slot_values)
+            block_ratios = [float(rec["ratio"]) for rec in block_records]
+            block_designs = [rec["design"] for rec in block_records]
+            verdict = compare_verdict_from_block_ratios(
+                block_ratios,
+                direction=spec["comparison_direction"],
+                designs=block_designs,
+            )
+            verdict["comparison_metric"] = spec["comparison_metric"]
+            verdict["comparison_direction"] = spec["comparison_direction"]
             point_results.append(
                 {
                     "point": point,
                     "point_index": point_idx,
                     "order": order,
-                    "baseline_rates": baseline_rates,
-                    "candidate_rates": candidate_rates,
-                    "slot_rates": slot_rates,
+                    "comparison_metric": spec["comparison_metric"],
+                    "comparison_direction": spec["comparison_direction"],
+                    "baseline_rates": baseline_values,
+                    "candidate_rates": candidate_values,
+                    "slot_rates": slot_values,
+                    "slot_p95_ms": slot_p95,
+                    "slot_p99_ms": slot_p99,
                     "block_ratios": block_ratios,
+                    "block_designs": block_designs,
                     "verdict": verdict,
                     "runs": raw,
                     "calibrations": {
@@ -2618,14 +3161,21 @@ def compare_clients(
         "schema_version": 1,
         "harness_fingerprint": HARNESS_FINGERPRINT,
         "scenario": scenario,
+        "comparison_metric": spec["comparison_metric"],
+        "comparison_direction": spec["comparison_direction"],
         "profile": profile,
         "point": points[0] if len(points) == 1 else None,
         "points": point_results,
         "order": order,
+        "blocks_requested": blocks,
         "baseline_client": baseline_client,
         "candidate_client": candidate_client,
-        "baseline_identity": adapter_identity(baseline_client, client_paths.get(baseline_client)),
-        "candidate_identity": adapter_identity(candidate_client, client_paths.get(candidate_client)),
+        "baseline_identity": _compare_identity_with_path(
+            baseline_client, client_paths.get(baseline_client), point_results
+        ),
+        "candidate_identity": _compare_identity_with_path(
+            candidate_client, client_paths.get(candidate_client), point_results
+        ),
         "cooldown_s": ABBA_COOLDOWN_S,
         "broker": meta,
         "loadgen": {
@@ -2635,12 +3185,14 @@ def compare_clients(
         "verdict": overall,
         "environment": environment_metadata(),
         "cpusets": cpusets,
+        "pacer_mode": pacer_mode or "in_loop",
     }
     # Backward-compatible top-level rates from first point.
     if point_results:
         payload["baseline_rates"] = point_results[0]["baseline_rates"]
         payload["candidate_rates"] = point_results[0]["candidate_rates"]
         payload["runs"] = point_results[0]["runs"]
+    attach_aa_control(payload)
     if output:
         write_json(output, payload)
     return payload

@@ -21,4 +21,6 @@ jobs:
         run: pip install -e ".[dev,all,zmqtt,mqttium]"
 
       - name: Run unit tests
-        run: PYTHONPATH=src python -m unittest tests.test_unit tests.test_rtt_initiator -v
+        # Discover instead of maintaining a hand-written module list. The fixed
+        # list silently skipped new quality/version_compare test modules.
+        run: PYTHONPATH=src python -m unittest discover -s tests -p 'test_*.py' -v
