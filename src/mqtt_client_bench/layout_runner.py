@@ -1,9 +1,13 @@
 """Run benchmark entry points with an explicit worker-process ASLR policy.
 
-This launcher is the publication-facing surface for layout-sensitive campaigns.
-It does not change the orchestrator, broker, or benchmark logic.  It only scopes
-``harness._python`` so role workers are exec'd with the requested ASLR policy,
-then records that policy in every result JSON written by the command.
+This is a diagnostic launcher, not the official publication path.  ``system``
+preserves the host's representative ASLR policy.  ``disabled`` is a causal
+control that wraps only Python role workers with ``setarch -R``; results from
+that mode are automatically marked non-publishable/non-comparable.
+
+The orchestrator, broker and benchmark logic are otherwise unchanged.  Every
+result written by the command is annotated with the selected policy so evidence
+from normal ASLR and the diagnostic control cannot be mixed silently.
 """
 
 from __future__ import annotations
@@ -72,7 +76,15 @@ def _annotate_outputs(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--worker-aslr", required=True, choices=WORKER_ASLR_MODES)
+    parser.add_argument(
+        "--worker-aslr",
+        required=True,
+        choices=WORKER_ASLR_MODES,
+        help=(
+            "system = representative host ASLR; disabled = diagnostic setarch -R "
+            "control whose results are automatically non-publishable"
+        ),
+    )
     parser.add_argument(
         "--entrypoint",
         choices=("run", "version_compare"),
