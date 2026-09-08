@@ -250,8 +250,10 @@ class OpenLoopShapeTests(unittest.TestCase):
         return state["offered"] / elapsed, state["missed_due_to_backpressure"], state["offered"]
 
     def test_awaited_shape_holds_offer_within_two_percent(self):
-        target = 2000.0
-        # delay well under the interval so there is no backpressure.
+        # This is a harness-shape invariant, not a CPython/host timer benchmark.
+        # Keep the interval comfortably above common asyncio wake granularity so
+        # scheduler jitter cannot manufacture fake backpressure in hosted CI.
+        target = 500.0
         rate, missed, offered = self._offered_rate(
             _FakeAwaitedAdapter(delay_s=0.00005), target, outstanding=32
         )
