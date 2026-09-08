@@ -14,7 +14,9 @@ client is diagnostic only and must be recorded as ``sync_facade``.
 from __future__ import annotations
 
 import gc
+import hashlib
 import resource
+from pathlib import Path
 
 from mqtt_client_bench.adapters.registry import (
     adapter_identity,
@@ -90,13 +92,60 @@ def require_native_for_async_peer(client: str, plan: dict) -> None:
         )
 
 
+def _memory_layout_snapshot() -> dict | None:
+    """Return a small passive fingerprint of this worker's current ASLR layout.
+
+    The benchmark keeps ASLR enabled.  Sampling ``/proc/self/maps`` outside the
+    hot path lets analysis explain layout-sensitive regimes instead of hiding
+    them.  The full map is not stored; only a short hash plus a few allocator-
+    relevant mapping bases are retained.
+    """
+    try:
+        text = Path("/proc/self/maps").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+    selected: dict[str, str | None] = {
+        "heap_start": None,
+        "heap_end": None,
+        "stack_start": None,
+        "libc_base": None,
+        "libpython_base": None,
+    }
+    lines = [line for line in text.splitlines() if line]
+    for line in lines:
+        fields = line.split(maxsplit=5)
+        if not fields or "-" not in fields[0]:
+            continue
+        start, end = fields[0].split("-", 1)
+        path = fields[5] if len(fields) > 5 else ""
+        lower = path.lower()
+        if path == "[heap]" and selected["heap_start"] is None:
+            selected["heap_start"] = start
+            selected["heap_end"] = end
+        elif path == "[stack]" and selected["stack_start"] is None:
+            selected["stack_start"] = start
+        elif "libpython" in lower and selected["libpython_base"] is None:
+            selected["libpython_base"] = start
+        elif selected["libc_base"] is None and (
+            lower.endswith("/libc.so.6") or "/libc-" in lower
+        ):
+            selected["libc_base"] = start
+
+    return {
+        "maps_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+        "mapping_count": len(lines),
+        **selected,
+    }
+
+
 def process_runtime_snapshot() -> dict:
-    """GC and rusage counters. Call off the publish hot path.
+    """GC, rusage and process-layout counters. Call off the publish hot path.
 
     Minor/major faults are first-class here because a layout-sensitive allocator
     can change latency without changing MQTT work.  Recording them costs no
-    per-message instrumentation: the counters are sampled only around the
-    measure window, alongside the existing context-switch and CPU counters.
+    per-message instrumentation: the counters and memory layout are sampled only
+    around the measure window, alongside the existing context-switch/CPU data.
     """
     usage = resource.getrusage(resource.RUSAGE_SELF)
     stats = gc.get_stats()
@@ -110,6 +159,7 @@ def process_runtime_snapshot() -> dict:
         "ru_utime_s": float(usage.ru_utime),
         "ru_stime_s": float(usage.ru_stime),
         "ru_maxrss_kb": int(usage.ru_maxrss),
+        "memory_layout": _memory_layout_snapshot(),
     }
 
 
