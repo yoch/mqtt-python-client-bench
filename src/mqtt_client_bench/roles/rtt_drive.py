@@ -91,12 +91,20 @@ def require_native_for_async_peer(client: str, plan: dict) -> None:
 
 
 def process_runtime_snapshot() -> dict:
-    """GC and rusage counters. Call off the publish hot path."""
+    """GC and rusage counters. Call off the publish hot path.
+
+    Minor/major faults are first-class here because a layout-sensitive allocator
+    can change latency without changing MQTT work.  Recording them costs no
+    per-message instrumentation: the counters are sampled only around the
+    measure window, alongside the existing context-switch and CPU counters.
+    """
     usage = resource.getrusage(resource.RUSAGE_SELF)
     stats = gc.get_stats()
     return {
         "gc_count": [int(value) for value in gc.get_count()],
         "gc_collections": [int(item.get("collections", 0)) for item in stats],
+        "ru_minflt": int(usage.ru_minflt),
+        "ru_majflt": int(usage.ru_majflt),
         "ru_nvcsw": int(usage.ru_nvcsw),
         "ru_nivcsw": int(usage.ru_nivcsw),
         "ru_utime_s": float(usage.ru_utime),
@@ -108,7 +116,14 @@ def process_runtime_snapshot() -> dict:
 def process_runtime_delta(start: dict, end: dict) -> dict:
     """Subtract two ``process_runtime_snapshot`` payloads."""
     delta = {}
-    for key in ("ru_nvcsw", "ru_nivcsw", "ru_utime_s", "ru_stime_s"):
+    for key in (
+        "ru_minflt",
+        "ru_majflt",
+        "ru_nvcsw",
+        "ru_nivcsw",
+        "ru_utime_s",
+        "ru_stime_s",
+    ):
         if key in start and key in end:
             delta[key] = end[key] - start[key]
     start_gc = list(start.get("gc_collections") or [])
