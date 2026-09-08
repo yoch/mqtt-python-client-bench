@@ -1,0 +1,101 @@
+name: recv allocator probe ARM64
+
+on:
+  push:
+    branches: [fix/deterministic-worker-layout]
+    paths: [.github/workflows/recv-allocator-probe-arm64.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recv-allocator-probe-rpi5
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: [self-hosted, linux, ARM64]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact probe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Verify host and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          test "$(cat /proc/sys/kernel/randomize_va_space)" != 0
+          echo "sha=$(git rev-parse HEAD)"
+          echo "aslr=$(cat /proc/sys/kernel/randomize_va_space)"
+          echo "personality=$(cat /proc/$$/personality)"
+          python3 --version
+          ldd --version | head -n1
+          command -v setarch || true
+          command -v strace || true
+          mkdir -p recv-probe
+
+      - name: Sample normal-ASLR process distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/recv_allocator_probe.py \
+            --samples 24 \
+            --iterations 5000 \
+            --warmup 100 \
+            --payload-size 256 \
+            --recv-sizes 262144,65536 \
+            --include-recv-into \
+            --aslr system \
+            --output recv-probe/system.json \
+            | tee recv-probe/system.txt
+
+      - name: Small ASLR-off causal control
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v setarch >/dev/null; then
+            python3 scripts/recv_allocator_probe.py \
+              --samples 8 \
+              --iterations 5000 \
+              --warmup 100 \
+              --payload-size 256 \
+              --recv-sizes 262144,65536 \
+              --include-recv-into \
+              --aslr disabled \
+              --output recv-probe/no-aslr-diagnostic.json \
+              | tee recv-probe/no-aslr-diagnostic.txt
+          fi
+
+      - name: Count allocator syscalls in isolated diagnostic children
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v strace >/dev/null; then
+            strace -qq -c -e trace=mmap,mremap,munmap,brk \
+              -o recv-probe/recv256.strace \
+              python3 scripts/recv_allocator_probe.py --child \
+                --recv-size 262144 --payload-size 256 --iterations 1000 --warmup 10 \
+              > recv-probe/recv256-child.json
+            strace -qq -c -e trace=mmap,mremap,munmap,brk \
+              -o recv-probe/recv64.strace \
+              python3 scripts/recv_allocator_probe.py --child \
+                --recv-size 65536 --payload-size 256 --iterations 1000 --warmup 10 \
+              > recv-probe/recv64-child.json
+            strace -qq -c -e trace=mmap,mremap,munmap,brk \
+              -o recv-probe/recvinto256.strace \
+              python3 scripts/recv_allocator_probe.py --child --recv-into \
+                --recv-size 262144 --payload-size 256 --iterations 1000 --warmup 10 \
+              > recv-probe/recvinto256-child.json
+          fi
+
+      - name: Upload raw allocator evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: recv-allocator-probe-arm64-${{ github.run_id }}
+          path: recv-probe
+          if-no-files-found: error
+          retention-days: 14
