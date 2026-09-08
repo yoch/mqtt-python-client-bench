@@ -5,12 +5,16 @@ from __future__ import annotations
 import asyncio
 import collections
 import json
+import math
 import os
 import re
+import subprocess
+import tempfile
 import threading
 import time
 import sys
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from unittest.mock import patch
 
@@ -60,16 +64,46 @@ from mqtt_client_bench.loadgen import (  # noqa: E402
     topic_is_templated,
 )
 from mqtt_client_bench.metrics import (  # noqa: E402
+    HIGHER_IS_BETTER,
+    LOWER_IS_BETTER,
+    LATENCY_P50_METRIC,
+    THROUGHPUT_METRIC,
     abba_block_ratios,
+    abba_block_records,
+    abba_observation_usable,
     abba_order,
+    abba_position_counts,
+    balanced_geometric_ratio,
+    complementary_pair_units,
     compare_verdict,
     compare_verdict_from_block_ratios,
+    comparison_spec,
+    comparison_value,
+    geometric_mean,
     integrity_counts,
     latency_summary,
     median,
     percentile,
     sanitize_number,
     summarize_valid_runs,
+)
+from mqtt_client_bench.pairwise import (  # noqa: E402
+    AA_CONTROL_MAX_PAIR_UNIT_ABS_PCT,
+    OFFICIAL_AA_BLOCKS,
+    OFFICIAL_AA_VARIANT_INDEXES,
+    aa_stability_pct,
+    ab_compare_outputs,
+    continue_to_ab_ranking,
+    evaluate_aa_control,
+    enforce_aa_controls,
+    maybe_run_ab_ranking_after_aa,
+    pair_unit_effect_pcts,
+    validate_official_pairwise_policy,
+)
+from mqtt_client_bench.roles.rtt_drive import (  # noqa: E402
+    adapter_library_snapshot,
+    process_runtime_delta,
+    process_runtime_snapshot,
 )
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, estimate_suite, expand_scenario, list_scenarios  # noqa: E402
 from mqtt_client_bench.sampling import (  # noqa: E402
@@ -121,20 +155,114 @@ class MetricsTests(unittest.TestCase):
 
     def test_abba_order(self):
         self.assertEqual(abba_order(1), ["A", "B", "B", "A"])
+        self.assertEqual(abba_order(2), ["A", "B", "B", "A", "B", "A", "A", "B"])
+        self.assertEqual(abba_order(3), ["A", "B", "B", "A", "B", "A", "A", "B", "A", "B", "B", "A"])
         self.assertEqual(len(abba_order(4)), 16)
         self.assertEqual(abba_order(4).count("A"), 8)
         self.assertEqual(abba_order(4).count("B"), 8)
+        counts = abba_position_counts(abba_order(4))
+        self.assertEqual(counts["A"]["inner"], counts["B"]["inner"])
+        self.assertEqual(counts["A"]["outer"], counts["B"]["outer"])
+        self.assertEqual(counts["A"]["inner"], counts["A"]["outer"])
 
     def test_abba_block_ratios_deterministic(self):
-        order = abba_order(2)
-        # A=100, B=110, B=110, A=100  => ratio 1.1 twice
-        rates = [100.0, 110.0, 110.0, 100.0, 100.0, 110.0, 110.0, 100.0]
+        order = abba_order(4)
+        # A=100, B=110 regardless of slot, so both designs yield 1.1
+        rates = [110.0 if label == "B" else 100.0 for label in order]
         ratios = abba_block_ratios(order, rates)
-        self.assertEqual(ratios, [1.1, 1.1])
-        verdict = compare_verdict_from_block_ratios(ratios, min_effect_pct=3.0, seed=1)
+        self.assertEqual(ratios, [1.1, 1.1, 1.1, 1.1])
+        records = abba_block_records(order, rates)
+        self.assertEqual([rec["design"] for rec in records], ["ABBA", "BAAB", "ABBA", "BAAB"])
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, designs=[rec["design"] for rec in records]
+        )
         self.assertEqual(verdict["verdict"], "improvement")
+        self.assertEqual(verdict["comparison_direction"], HIGHER_IS_BETTER)
+        self.assertEqual(verdict["estimator"], "complementary_pair_geometric_mean")
+        self.assertEqual(verdict["n_pair_units"], 2)
+        self.assertTrue(verdict["ci_available"])
         # Incomplete block with None is dropped.
-        self.assertEqual(abba_block_ratios(order, [100.0, None, 110.0, 100.0] + rates[4:]), [1.1])
+        incomplete = list(rates)
+        incomplete[1] = None
+        self.assertEqual(abba_block_ratios(order, incomplete), [1.1, 1.1, 1.1])
+
+    def test_application_rtt_compare_uses_latency_p50_lower_is_better(self):
+        spec = comparison_spec("application_rtt_fixed_rate")
+        self.assertEqual(spec["comparison_metric"], LATENCY_P50_METRIC)
+        self.assertEqual(spec["comparison_direction"], LOWER_IS_BETTER)
+        throughput = comparison_spec("pub_qos_sweep_telemetry")
+        self.assertEqual(throughput["comparison_metric"], THROUGHPUT_METRIC)
+        self.assertEqual(throughput["comparison_direction"], HIGHER_IS_BETTER)
+
+        run = {
+            "status": "valid",
+            "primary_msgs_per_s": 5000.0,
+            "point": {"scenario": "application_rtt_fixed_rate", "topology": "application_rtt"},
+            "workers": [
+                {
+                    "role": "rtt_initiator",
+                    "latency_summary": {"p50_ms": 0.80, "p95_ms": 1.1, "p99_ms": 1.4},
+                }
+            ],
+        }
+        observed = comparison_value(run)
+        self.assertEqual(observed["value"], 0.80)
+        self.assertEqual(observed["p95_ms"], 1.1)
+        self.assertEqual(observed["p99_ms"], 1.4)
+        self.assertNotEqual(observed["value"], run["primary_msgs_per_s"])
+
+        aa = comparison_value(
+            {
+                "status": "valid",
+                "primary_msgs_per_s": 5000.0,
+                "point": {"scenario": "application_rtt_fixed_rate", "topology": "application_rtt"},
+                "workers": [{"role": "rtt_initiator", "latency_summary": {"p50_ms": 0.81}}],
+            }
+        )
+        self.assertEqual(aa["comparison_metric"], LATENCY_P50_METRIC)
+
+        # candidate 1.00 / baseline 0.80 = 1.25 → candidate slower → regression
+        ratios = [1.00 / 0.80, 1.00 / 0.80]
+        latency_verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER
+        )
+        self.assertEqual(latency_verdict["verdict"], "regression")
+        self.assertGreater(latency_verdict["absolute_effect_pct"], 20.0)
+        faster = compare_verdict_from_block_ratios(
+            [0.80 / 1.00, 0.80 / 1.00], min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER
+        )
+        self.assertEqual(faster["verdict"], "improvement")
+        self.assertLess(faster["median_ratio"], 1.0)
+
+    def test_throughput_compare_still_uses_msgs_per_s(self):
+        run = {
+            "status": "valid",
+            "primary_msgs_per_s": 201500.0,
+            "point": {"scenario": "pub_qos_sweep_telemetry", "topology": "publisher_only"},
+            "workers": [{"role": "publisher", "latency_summary": {"p50_ms": 0.01}}],
+        }
+        observed = comparison_value(run, "pub_qos_sweep_telemetry")
+        self.assertEqual(observed["comparison_metric"], THROUGHPUT_METRIC)
+        self.assertEqual(observed["value"], 201500.0)
+
+    def test_abba_smoke_admits_valid_non_comparable_p50(self):
+        result = {
+            "status": "valid",
+            "non_comparable": True,
+            "primary_msgs_per_s": 5000.0,
+        }
+        self.assertTrue(
+            abba_observation_usable(result, 0.80, profile="smoke")
+        )
+        self.assertFalse(
+            abba_observation_usable(result, 0.80, profile="standard")
+        )
+        self.assertFalse(
+            abba_observation_usable(
+                {**result, "status": "inconclusive"}, 0.80, profile="smoke"
+            )
+        )
+        self.assertFalse(abba_observation_usable(result, None, profile="smoke"))
 
     def test_compare_inconclusive_on_noise(self):
         baseline = [100.0] * 8
@@ -472,6 +600,9 @@ class AdapterRegistryTests(unittest.TestCase):
         client = Client("shape-probe")
         for attr in ("_connection", "_persistent_storage", "_remove_message_from_query"):
             self.assertTrue(hasattr(client, attr), f"gmqtt no longer exposes {attr}")
+        from importlib.metadata import version as pkg_version
+
+        self.assertEqual(pkg_version("gmqtt"), "0.7.0")
 
     def test_every_adapter_declares_how_completions_reach_the_worker(self):
         """An adapter that suspends a coroutine per publish pays a resume the
@@ -1165,6 +1296,61 @@ class CliDefaultsTests(unittest.TestCase):
                                      + (["--clients", "paho,gmqtt", "--scenario", "pub_qos_sweep_telemetry"] if cmd == "compare" else [])
                                      + (["--scenario", "pub_qos_sweep_telemetry"] if cmd == "run" else []))
             self.assertEqual(args.profile, "standard", cmd)
+
+    def test_compare_cli_accepts_external_broker(self):
+        from mqtt_client_bench.run import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "compare",
+                "--clients", "mqttium,gmqtt",
+                "--scenario", "application_rtt_fixed_rate",
+                "--broker", "127.0.0.1:11883",
+                "--load-profile-dir", "calibrations",
+                "--variant-index", "0",
+                "--blocks", "1",
+            ]
+        )
+        self.assertEqual(args.broker, "127.0.0.1:11883")
+        self.assertEqual(args.variant_index, 0)
+        self.assertEqual(args.load_profile_dir, "calibrations")
+        args_pid = parser.parse_args(
+            [
+                "compare",
+                "--clients", "mqttium,gmqtt",
+                "--scenario", "application_rtt_fixed_rate",
+                "--broker", "127.0.0.1:11883",
+                "--broker-pid", "4321",
+            ]
+        )
+        self.assertEqual(args_pid.broker_pid, 4321)
+        official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
+        self.assertIn('"${BROKER_ARGS[@]}"', official)
+        self.assertIn("--broker-pid", official)
+        self.assertIn("BENCH_BROKER_PID", official)
+
+    def test_compare_cli_pacer_mode_defaults_in_loop(self):
+        from mqtt_client_bench.run import build_parser
+
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "compare",
+                "--clients", "mqttium,mqttium",
+                "--scenario", "application_rtt_fixed_rate",
+            ]
+        )
+        self.assertEqual(args.pacer_mode, "in_loop")
+        args_ext = parser.parse_args(
+            [
+                "compare",
+                "--clients", "mqttium,mqttium",
+                "--scenario", "application_rtt_fixed_rate",
+                "--pacer-mode", "external",
+            ]
+        )
+        self.assertEqual(args_ext.pacer_mode, "external")
 
 
 class BarrierTests(unittest.TestCase):
@@ -2202,6 +2388,9 @@ class FairnessGateTests(unittest.TestCase):
         # Fraction-of-own-capacity latency is an intra-client question.
         self.assertIn("puback_latency_qos1", _CHART_EXCLUDED_SCENARIOS)
         self.assertIn("application_rtt_qos1", _CHART_EXCLUDED_SCENARIOS)
+        # Equal-offer latency is the public cross-client ranking.
+        self.assertNotIn("puback_latency_fixed_rate", _CHART_EXCLUDED_SCENARIOS)
+        self.assertNotIn("application_rtt_fixed_rate", _CHART_EXCLUDED_SCENARIOS)
 
     def test_cost_per_message_uses_worker_window_cpu(self):
         # CPU must come from the workers' own measure window. Telemetry samples
@@ -3618,6 +3807,38 @@ class DualProtocolTests(unittest.TestCase):
                 name,
             )
 
+    def test_fixed_rate_latency_is_absolute_and_dual(self):
+        from mqtt_client_bench.report.catalog import FACTS
+
+        puback = expand_scenario(SCENARIO_BY_NAME["puback_latency_fixed_rate"], "standard")
+        rtt = expand_scenario(SCENARIO_BY_NAME["application_rtt_fixed_rate"], "standard")
+        self.assertEqual(len(puback), 8)
+        self.assertEqual(len(rtt), 8)
+        self.assertEqual(
+            sorted({float(p["target_rate"]) for p in puback}),
+            [1000.0, 2500.0, 5000.0, 10000.0],
+        )
+        self.assertEqual(
+            sorted({float(p["shared_load_fraction"]) for p in rtt}),
+            [0.25, 0.50, 0.75, 0.90],
+        )
+        self.assertTrue(all("load_fraction" not in p for p in puback))
+        self.assertTrue(all("load_fraction" not in p for p in rtt))
+        self.assertTrue(all(p.get("target_rate") is None for p in rtt))
+        self.assertEqual({p["protocol"] for p in puback}, {"MQTTv311", "MQTTv5"})
+        self.assertEqual({p["protocol"] for p in rtt}, {"MQTTv311", "MQTTv5"})
+        for name in ("puback_latency_fixed_rate", "application_rtt_fixed_rate"):
+            facts = FACTS[name]
+            self.assertFalse(facts.intra_client_only, name)
+            self.assertTrue(facts.ranked, name)
+            self.assertEqual(facts.direction, "lower", name)
+        # Existing fraction contracts must stay load_fraction-only.
+        frac = expand_scenario(SCENARIO_BY_NAME["application_rtt_qos1"], "standard")
+        self.assertEqual(len(frac), 8)
+        self.assertTrue(all("load_fraction" in p for p in frac))
+        self.assertTrue(all(p.get("target_rate") is None for p in frac))
+        self.assertTrue(all(p.get("shared_load_fraction") is None for p in frac))
+
     def test_payload_sweep_stays_v311_only(self):
         points = expand_scenario(SCENARIO_BY_NAME["pub_payload_sweep_qos0"], "standard")
         self.assertTrue(all(p.get("protocol", "MQTTv311") == "MQTTv311" for p in points))
@@ -3837,6 +4058,7 @@ class DualProtocolTests(unittest.TestCase):
         # Every module the fingerprint covers must exist, or it silently
         # degrades to hashing the word "missing".
         self.assertIn("scripts/mqtt_hammer.c", MEASUREMENT_PATH)
+        self.assertIn("roles/rtt_drive.py", MEASUREMENT_PATH)
         for rel in MEASUREMENT_PATH:
             self.assertTrue(_measurement_file(rel).exists(), f"{rel} is not in the tree")
 
@@ -4074,6 +4296,1851 @@ class DualProtocolTests(unittest.TestCase):
             self.assertIn("pub_qos_sweep_telemetry · MQTTv5", index)
             self.assertIn("comparable only within the same protocol", index)
 
+
+class CrossClientLoadTests(unittest.TestCase):
+    """A cross-client latency point must offer the same absolute workload."""
+
+    def _rtt_profile(self, capacity: float) -> dict:
+        return {
+            "protocol_capacities": {
+                "MQTTv311": {"rtt_capacity_msgs_per_s": capacity, "capacity_msgs_per_s": 50000},
+                "MQTTv5": {"rtt_capacity_msgs_per_s": capacity * 0.9, "capacity_msgs_per_s": 48000},
+            }
+        }
+
+    def test_per_client_load_fraction_is_refused_in_compare_and_matrix(self):
+        from mqtt_client_bench.harness import assert_cross_client_load_legal, run_matrix
+
+        points = expand_scenario(SCENARIO_BY_NAME["application_rtt_qos1"], "standard")
+        with self.assertRaises(ValueError) as ctx:
+            assert_cross_client_load_legal(points, scenario="application_rtt_qos1")
+        self.assertIn("NOT CROSS-CLIENT COMPARABLE", str(ctx.exception))
+        self.assertIn("load_fraction", str(ctx.exception))
+        with self.assertRaises(ValueError):
+            run_matrix("application_rtt_qos1", ["mqttium", "gmqtt"])
+        with self.assertRaises(ValueError):
+            run_matrix("puback_latency_qos1", ["mqttium", "gmqtt"])
+
+    def test_shared_load_uses_min_capacity_for_both_clients(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point, round_shared_target_rate
+
+        point = {
+            "shared_load_fraction": 0.50,
+            "topology": "application_rtt",
+            "protocol": "MQTTv311",
+        }
+        resolved = resolve_shared_load_point(
+            point,
+            {
+                "mqttium": self._rtt_profile(26002.232),
+                "gmqtt": self._rtt_profile(28994.903),
+            },
+            ["mqttium", "gmqtt"],
+        )
+        self.assertEqual(resolved["shared_capacity_msgs_per_s"], 26002.232)
+        self.assertEqual(resolved["target_rate"], round_shared_target_rate(26002.232 * 0.50))
+        self.assertEqual(resolved["target_rate"], 13001.0)
+        self.assertEqual(resolved["shared_capacities"]["mqttium"], 26002.232)
+        self.assertEqual(resolved["shared_capacities"]["gmqtt"], 28994.903)
+        # A 25/75/90 grid is the same C_common for both sides.
+        for frac, expected in ((0.25, 6501.0), (0.75, 19502.0), (0.90, 23402.0)):
+            got = resolve_shared_load_point(
+                {**point, "shared_load_fraction": frac},
+                {
+                    "mqttium": self._rtt_profile(26002.232),
+                    "gmqtt": self._rtt_profile(28994.903),
+                },
+                ["mqttium", "gmqtt"],
+            )
+            self.assertEqual(got["target_rate"], expected, frac)
+            self.assertEqual(got["target_rate"], resolve_shared_load_point(
+                {**point, "shared_load_fraction": frac},
+                {
+                    "gmqtt": self._rtt_profile(28994.903),
+                    "mqttium": self._rtt_profile(26002.232),
+                },
+                ["gmqtt", "mqttium"],
+            )["target_rate"])
+
+    def test_run_point_does_not_resolve_own_capacity_when_cross_client(self):
+        import tempfile
+
+        from mqtt_client_bench.harness import PER_CLIENT_LOAD_FRACTION_REASON, run_point
+
+        point = {
+            "load_fraction": 0.50,
+            "topology": "application_rtt",
+            "protocol": "MQTTv311",
+            "qos_publish": 1,
+            "qos_subscribe": 1,
+        }
+        profile = self._rtt_profile(26000.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_point(
+                point,
+                client="mqttium",
+                host="127.0.0.1",
+                port=1,
+                tls_port=2,
+                profile="smoke",
+                work_dir=Path(tmp),
+                cpusets={},
+                load_profile=profile,
+                cross_client=True,
+            )
+        self.assertEqual(result["status"], "inconclusive")
+        self.assertIn(PER_CLIENT_LOAD_FRACTION_REASON, result["reasons"])
+        self.assertTrue(result.get("non_comparable"))
+        self.assertIsNone((result.get("point") or {}).get("target_rate"))
+
+    def test_explicit_target_rate_is_legal_cross_client(self):
+        from mqtt_client_bench.harness import assert_cross_client_load_legal
+
+        points = expand_scenario(SCENARIO_BY_NAME["puback_latency_fixed_rate"], "standard")
+        assert_cross_client_load_legal(points, scenario="puback_latency_fixed_rate")
+        rtt = expand_scenario(SCENARIO_BY_NAME["application_rtt_fixed_rate"], "standard")
+        assert_cross_client_load_legal(rtt, scenario="application_rtt_fixed_rate")
+
+    def test_missing_calibration_fails_closed(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point
+
+        resolved = resolve_shared_load_point(
+            {"shared_load_fraction": 0.50, "topology": "application_rtt", "protocol": "MQTTv311"},
+            {"mqttium": self._rtt_profile(26000.0)},
+            ["mqttium", "gmqtt"],
+        )
+        self.assertIsNone(resolved.get("target_rate"))
+        self.assertTrue(any("gmqtt" in e for e in resolved["shared_load_error"]))
+
+    def _observed_rtt_profile(self, runs: list[dict], *, rates: list[float] | None = None) -> dict:
+        return {
+            "protocol_capacities": {
+                "MQTTv311": {"rtt_capacity_msgs_per_s": None, "capacity_msgs_per_s": 50000},
+                "MQTTv5": {"rtt_capacity_msgs_per_s": None, "capacity_msgs_per_s": 48000},
+            },
+            "raw": {
+                "MQTTv311": {
+                    "rtt": {
+                        "results": [
+                            {
+                                "runs": runs,
+                                "summary": {
+                                    "values": [],
+                                    "inconclusive_rates": rates if rates is not None else [
+                                        run.get("primary_msgs_per_s") for run in runs
+                                    ],
+                                    "median": None,
+                                },
+                            }
+                        ]
+                    }
+                }
+            },
+        }
+
+    def _headroom_run(self, rate: float, *extra_reasons: str) -> dict:
+        return {
+            "status": "inconclusive",
+            "primary_msgs_per_s": rate,
+            "reasons": ["broker_headroom_low:77", *extra_reasons],
+        }
+
+    def _resolve_observed(self, observed: dict, clients: list[str] | None = None):
+        from mqtt_client_bench.harness import resolve_shared_load_point
+
+        return resolve_shared_load_point(
+            {"shared_load_fraction": 0.50, "topology": "application_rtt", "protocol": "MQTTv311"},
+            {"mqttium": self._rtt_profile(20419.317), "gmqtt": observed},
+            clients or ["mqttium", "gmqtt"],
+        )
+
+    def test_headroom_only_observed_rate_unblocks_c_common(self):
+        from mqtt_client_bench.harness import (
+            OBSERVED_LOWER_BOUND_SOURCE,
+            observed_capacity_from_calibration,
+            round_shared_target_rate,
+        )
+
+        observed = self._observed_rtt_profile(
+            [self._headroom_run(21537.0), self._headroom_run(25863.0), self._headroom_run(25774.0)]
+        )
+        self.assertEqual(
+            observed_capacity_from_calibration(observed, protocol="MQTTv311", kind="rtt"),
+            25774.0,
+        )
+        resolved = self._resolve_observed(observed)
+        self.assertEqual(resolved["shared_capacity_msgs_per_s"], 20419.317)
+        self.assertEqual(resolved["target_rate"], round_shared_target_rate(20419.317 * 0.50))
+        self.assertEqual(resolved["shared_capacity_sources"]["mqttium"], "valid")
+        self.assertEqual(resolved["shared_capacity_sources"]["gmqtt"], OBSERVED_LOWER_BOUND_SOURCE)
+        self.assertEqual(
+            resolved["shared_capacity_provenance"]["gmqtt"]["exclusive_reason"],
+            "broker_headroom_low",
+        )
+        self.assertEqual(resolved["shared_capacity_provenance"]["gmqtt"]["n_admitted"], 3)
+
+    def test_headroom_plus_other_reason_is_refused(self):
+        from mqtt_client_bench.harness import observed_capacity_from_calibration
+
+        observed = self._observed_rtt_profile(
+            [self._headroom_run(25774.0, "rtt_timeouts")]
+        )
+        self.assertIsNone(
+            observed_capacity_from_calibration(observed, protocol="MQTTv311", kind="rtt")
+        )
+        resolved = self._resolve_observed(observed)
+        self.assertIsNone(resolved.get("target_rate"))
+        self.assertTrue(any("gmqtt" in e for e in resolved["shared_load_error"]))
+
+    def test_timeout_or_error_never_feeds_c_common(self):
+        from mqtt_client_bench.harness import observed_capacity_from_calibration
+
+        cases = [
+            [{"status": "inconclusive", "primary_msgs_per_s": 25000.0, "reasons": ["rtt_timeouts"]}],
+            [{"status": "inconclusive", "primary_msgs_per_s": 25000.0, "reasons": ["worker_error:boom"]}],
+            [{"status": "inconclusive", "primary_msgs_per_s": 25000.0, "reasons": ["host_busy"]}],
+            [{"status": "error", "primary_msgs_per_s": 25000.0, "reasons": ["broker_headroom_low:80"], "error": "boom"}],
+            [{"status": "inconclusive", "primary_msgs_per_s": 25000.0, "reasons": ["broker_headroom_low:80"], "ok": False}],
+        ]
+        for runs in cases:
+            observed = self._observed_rtt_profile(runs)
+            self.assertIsNone(
+                observed_capacity_from_calibration(observed, protocol="MQTTv311", kind="rtt"),
+                runs,
+            )
+            resolved = self._resolve_observed(observed)
+            self.assertIsNone(resolved.get("target_rate"), runs)
+            self.assertTrue(any("gmqtt" in e for e in resolved["shared_load_error"]), runs)
+
+    def test_summary_inconclusive_rates_alone_are_refused(self):
+        from mqtt_client_bench.harness import observed_capacity_from_calibration
+
+        observed = self._observed_rtt_profile([], rates=[21537.0, 25863.0, 25774.0])
+        self.assertIsNone(
+            observed_capacity_from_calibration(observed, protocol="MQTTv311", kind="rtt")
+        )
+        resolved = self._resolve_observed(observed)
+        self.assertIsNone(resolved.get("target_rate"))
+        self.assertTrue(any("gmqtt" in e for e in resolved["shared_load_error"]))
+
+    def test_no_admissible_run_leaves_shared_load_unresolved(self):
+        resolved = self._resolve_observed(self._observed_rtt_profile([]))
+        self.assertIsNone(resolved.get("target_rate"))
+        self.assertIsNone(resolved.get("shared_capacity_msgs_per_s"))
+        self.assertTrue(resolved.get("shared_load_error"))
+
+    def test_client_order_does_not_change_c_common(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point, round_shared_target_rate
+
+        profiles = {
+            "mqttium": self._rtt_profile(20419.317),
+            "gmqtt": self._rtt_profile(25774.0),
+            "paho": self._rtt_profile(8123.5),
+        }
+        point = {"shared_load_fraction": 0.75, "topology": "application_rtt", "protocol": "MQTTv311"}
+        expected = round_shared_target_rate(8123.5 * 0.75)
+        orders = (
+            ["mqttium", "gmqtt", "paho"],
+            ["paho", "mqttium", "gmqtt"],
+            ["gmqtt", "paho", "mqttium"],
+        )
+        rates = []
+        commons = []
+        for order in orders:
+            resolved = resolve_shared_load_point(point, profiles, order)
+            rates.append(resolved["target_rate"])
+            commons.append(resolved["shared_capacity_msgs_per_s"])
+            self.assertEqual(resolved["shared_capacities"]["paho"], 8123.5)
+        self.assertEqual(set(rates), {expected})
+        self.assertEqual(set(commons), {8123.5})
+
+    def test_load_profile_dir_reads_per_client_files(self):
+        import tempfile
+
+        from mqtt_client_bench.control import write_json
+        from mqtt_client_bench.harness import _load_profiles_from_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_json(str(root / "mqttium-load.json"), self._rtt_profile(20000.0))
+            write_json(str(root / "gmqtt-load.json"), self._rtt_profile(25000.0))
+            loaded = _load_profiles_from_dir(tmp, ["mqttium", "gmqtt", "mqttium"])
+        self.assertEqual(set(loaded), {"mqttium", "gmqtt"})
+        self.assertEqual(
+            loaded["mqttium"]["protocol_capacities"]["MQTTv311"]["rtt_capacity_msgs_per_s"],
+            20000.0,
+        )
+
+    def test_c_common_async_is_independent_of_paho(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point, round_shared_target_rate
+
+        point = {
+            "shared_load_fraction": 0.75,
+            "topology": "application_rtt",
+            "protocol": "MQTTv311",
+        }
+        profiles = {
+            "mqttium": self._rtt_profile(14077.0),
+            "gmqtt": self._rtt_profile(14423.0),
+            "paho": self._rtt_profile(11854.0),
+        }
+        async_grid = resolve_shared_load_point(point, profiles, ["mqttium", "gmqtt"])
+        with_paho = resolve_shared_load_point(point, profiles, ["mqttium", "gmqtt", "paho"])
+        self.assertEqual(async_grid["shared_capacity_msgs_per_s"], 14077.0)
+        self.assertEqual(async_grid["target_rate"], round_shared_target_rate(14077.0 * 0.75))
+        self.assertNotEqual(async_grid["target_rate"], with_paho["target_rate"])
+        self.assertNotIn("paho", async_grid["shared_capacities"])
+
+    def test_c_common_paho_is_independent_of_gmqtt(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point, round_shared_target_rate
+
+        point = {
+            "shared_load_fraction": 0.50,
+            "topology": "application_rtt",
+            "protocol": "MQTTv5",
+        }
+        profiles = {
+            "mqttium": self._rtt_profile(13598.0),
+            "gmqtt": self._rtt_profile(8000.0),
+            "paho": self._rtt_profile(9141.0),
+        }
+        # _rtt_profile scales v5 as 0.9 * capacity argument.
+        paho_grid = resolve_shared_load_point(point, profiles, ["mqttium", "paho"])
+        self.assertEqual(paho_grid["shared_capacity_msgs_per_s"], 9141.0 * 0.9)
+        self.assertEqual(
+            paho_grid["target_rate"],
+            round_shared_target_rate(9141.0 * 0.9 * 0.50),
+        )
+        self.assertNotIn("gmqtt", paho_grid["shared_capacities"])
+
+    def test_pairwise_order_does_not_change_either_grid(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point
+
+        point = {
+            "shared_load_fraction": 0.90,
+            "topology": "application_rtt",
+            "protocol": "MQTTv311",
+        }
+        profiles = {
+            "mqttium": self._rtt_profile(14077.0),
+            "gmqtt": self._rtt_profile(14423.0),
+            "paho": self._rtt_profile(11854.0),
+        }
+        a = resolve_shared_load_point(point, profiles, ["mqttium", "gmqtt"])
+        b = resolve_shared_load_point(point, profiles, ["gmqtt", "mqttium"])
+        self.assertEqual(a["target_rate"], b["target_rate"])
+        self.assertEqual(a["shared_capacity_msgs_per_s"], b["shared_capacity_msgs_per_s"])
+        c = resolve_shared_load_point(point, profiles, ["mqttium", "paho"])
+        d = resolve_shared_load_point(point, profiles, ["paho", "mqttium"])
+        self.assertEqual(c["target_rate"], d["target_rate"])
+        self.assertEqual(c["shared_capacity_msgs_per_s"], d["shared_capacity_msgs_per_s"])
+
+    def test_same_absolute_target_rate_on_both_pairwise_clients(self):
+        from mqtt_client_bench.harness import resolve_shared_load_point
+
+        point = {
+            "shared_load_fraction": 0.25,
+            "topology": "application_rtt",
+            "protocol": "MQTTv311",
+        }
+        profiles = {
+            "mqttium": self._rtt_profile(14077.0),
+            "gmqtt": self._rtt_profile(14423.0),
+        }
+        resolved = resolve_shared_load_point(point, profiles, ["mqttium", "gmqtt"])
+        self.assertEqual(resolved["shared_capacities"]["mqttium"], 14077.0)
+        self.assertEqual(resolved["shared_capacities"]["gmqtt"], 14423.0)
+        self.assertEqual(resolved["target_rate"], resolved["target_rate"])
+        self.assertLess(resolved["target_rate"], 14077.0)
+
+    def test_matched_load_misses_are_stricter_than_relative_load(self):
+        from mqtt_client_bench.harness import (
+            MATCHED_LOAD_BACKPRESSURE_MAX,
+            OPEN_LOOP_BACKPRESSURE_MAX,
+            validate_run,
+        )
+
+        self.assertLess(MATCHED_LOAD_BACKPRESSURE_MAX, OPEN_LOOP_BACKPRESSURE_MAX)
+        from mqtt_client_bench.harness import RTT_FAILURE_MAX
+
+        self.assertEqual(RTT_FAILURE_MAX, MATCHED_LOAD_BACKPRESSURE_MAX)
+        worker = {
+            "role": "rtt_initiator",
+            "ok": True,
+            "duration_s": 10.0,
+            "offered": 10000,
+            "sent_in_window": 9950,
+            "completed_in_window": 9950,
+            "missed_due_to_backpressure": 50,
+        }
+        relative = {
+            "cadence": "loaded75",
+            "target_rate": 1000.0,
+            "topology": "application_rtt",
+            "duration_s": 10.0,
+        }
+        matched = {**relative, "shared_load_fraction": 0.75}
+        rel = validate_run(relative, [worker], None, [])
+        mat = validate_run(matched, [worker], None, [])
+        self.assertNotIn("open_loop_backpressure_misses", rel["reasons"])
+        self.assertIn("open_loop_backpressure_misses", mat["reasons"])
+        self.assertIsNone(mat.get("target_rate_override"))
+        at_limit = dict(worker)
+        at_limit["missed_due_to_backpressure"] = 20  # 0.2 % exactly: not greater than the gate
+        at_limit["sent_in_window"] = 9980
+        at_limit["completed_in_window"] = 9980
+        under = validate_run(matched, [at_limit], None, [])
+        self.assertNotIn("open_loop_backpressure_misses", under["reasons"])
+        self.assertIsNone(under.get("target_rate_override"))
+
+
+class AbbaCounterbalanceTests(unittest.TestCase):
+    """ABBA/BAAB must not turn a slot effect into a client improvement."""
+
+    def _values(self, order, *, outer=0.40, inner=0.24, b_scale=1.0):
+        values = []
+        for i, label in enumerate(order):
+            base = outer if (i % 4) in (0, 3) else inner
+            values.append(base * b_scale if label == "B" else base)
+        return values
+
+    def test_even_blocks_give_equal_inner_outer_slots(self):
+        for blocks in (2, 4, 6):
+            order = abba_order(blocks)
+            counts = abba_position_counts(order)
+            self.assertEqual(order.count("A"), order.count("B"), blocks)
+            self.assertEqual(counts["A"]["inner"], counts["B"]["inner"], blocks)
+            self.assertEqual(counts["A"]["outer"], counts["B"]["outer"], blocks)
+            self.assertEqual(counts["A"]["inner"], counts["A"]["outer"], blocks)
+
+    def test_ratio_is_always_candidate_over_baseline(self):
+        order = abba_order(2)
+        rates = [2.0 if label == "B" else 1.0 for label in order]
+        records = abba_block_records(order, rates)
+        self.assertEqual([rec["design"] for rec in records], ["ABBA", "BAAB"])
+        self.assertEqual([rec["ratio"] for rec in records], [2.0, 2.0])
+
+    def test_pure_slot_effect_has_no_client_effect(self):
+        order = abba_order(4)
+        values = self._values(order, outer=0.40, inner=0.24, b_scale=1.0)
+        records = abba_block_records(order, values)
+        ratios = [rec["ratio"] for rec in records]
+        designs = [rec["design"] for rec in records]
+        self.assertAlmostEqual(ratios[0], 0.24 / 0.40)
+        self.assertAlmostEqual(ratios[1], 0.40 / 0.24)
+        units = complementary_pair_units(ratios, designs)
+        self.assertEqual(len(units), 2)
+        self.assertAlmostEqual(geometric_mean(units), 1.0)
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertEqual(verdict["verdict"], "inconclusive")
+        self.assertAlmostEqual(verdict["median_ratio"], 1.0)
+        self.assertAlmostEqual(verdict["geometric_ratio"], 1.0)
+        self.assertLess(abs(verdict["absolute_effect_pct"]), 0.01)
+        self.assertTrue(verdict["ci_available"])
+        self.assertFalse(verdict["excludes_zero_effect"])
+        self.assertLessEqual(verdict["ci_low"], 0.0)
+        self.assertGreaterEqual(verdict["ci_high"], 0.0)
+
+    def test_two_block_nearly_neutral_bootstrap_is_degenerate(self):
+        ratios = [0.99, 1.02]
+        designs = ["ABBA", "BAAB"]
+        units = complementary_pair_units(ratios, designs)
+        self.assertEqual(len(units), 1)
+        centre = geometric_mean(units)
+        self.assertAlmostEqual(centre, (0.99 * 1.02) ** 0.5, places=12)
+        naive_effect = (centre - 1.0) * 100.0
+        self.assertAlmostEqual(naive_effect, 0.489, places=3)
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertEqual(verdict["n_pair_units"], 1)
+        self.assertFalse(verdict["ci_available"])
+        self.assertIsNone(verdict["ci_low"])
+        self.assertIsNone(verdict["ci_high"])
+        self.assertFalse(verdict["excludes_zero_effect"])
+        self.assertEqual(verdict["verdict"], "inconclusive")
+        self.assertAlmostEqual(verdict["absolute_effect_pct"], naive_effect, places=5)
+
+    def test_odd_blocks_pair_unit_recentres_without_a_ci(self):
+        order = abba_order(3)
+        values = self._values(order, outer=0.40, inner=0.24)
+        records = abba_block_records(order, values)
+        ratios = [rec["ratio"] for rec in records]
+        designs = [rec["design"] for rec in records]
+        self.assertEqual(designs, ["ABBA", "BAAB", "ABBA"])
+        arithmetic = median(ratios)
+        self.assertLess(arithmetic, 0.7)
+        units = complementary_pair_units(ratios, designs)
+        self.assertEqual(len(units), 1)
+        self.assertAlmostEqual(units[0], 1.0)
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertEqual(verdict["verdict"], "inconclusive")
+        self.assertAlmostEqual(verdict["median_ratio"], 1.0)
+        self.assertFalse(verdict["ci_available"])
+
+    def test_true_plus_10_percent_client_latency_is_regression(self):
+        order = abba_order(4)
+        values = self._values(order, outer=0.40, inner=0.24, b_scale=1.10)
+        records = abba_block_records(order, values)
+        ratios = [rec["ratio"] for rec in records]
+        designs = [rec["design"] for rec in records]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertAlmostEqual(verdict["median_ratio"], 1.10, places=5)
+        self.assertEqual(verdict["verdict"], "regression")
+        self.assertGreater(verdict["absolute_effect_pct"], 9.0)
+        self.assertTrue(verdict["ci_available"])
+        self.assertEqual(verdict["comparison_direction"], LOWER_IS_BETTER)
+
+    def test_two_noisy_pair_units_ci_contains_zero(self):
+        ratios = [0.97, 1.03, 1.00, 1.01]
+        designs = ["ABBA", "BAAB", "ABBA", "BAAB"]
+        units = complementary_pair_units(ratios, designs)
+        self.assertEqual(len(units), 2)
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertTrue(verdict["ci_available"])
+        self.assertLessEqual(verdict["ci_low"], 0.0)
+        self.assertGreaterEqual(verdict["ci_high"], 0.0)
+        self.assertFalse(verdict["excludes_zero_effect"])
+        self.assertEqual(verdict["verdict"], "inconclusive")
+
+    def test_true_minus_10_percent_client_latency_is_improvement(self):
+        order = abba_order(4)
+        values = self._values(order, outer=0.40, inner=0.24, b_scale=0.90)
+        records = abba_block_records(order, values)
+        ratios = [rec["ratio"] for rec in records]
+        designs = [rec["design"] for rec in records]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertAlmostEqual(verdict["median_ratio"], 0.90, places=5)
+        self.assertEqual(verdict["verdict"], "improvement")
+        self.assertLess(verdict["absolute_effect_pct"], -9.0)
+        self.assertTrue(verdict["ci_available"])
+
+    def test_log_domain_is_symmetric_under_inversion(self):
+        ratios = [0.6, 1.0 / 0.6]
+        centre = geometric_mean(ratios)
+        inverted = geometric_mean([1.0 / r for r in ratios])
+        self.assertAlmostEqual(centre, 1.0)
+        self.assertAlmostEqual(centre * inverted, 1.0)
+        self.assertAlmostEqual(geometric_mean(ratios) * geometric_mean([1.0 / r for r in ratios]), 1.0)
+
+    def test_unbalanced_abba_only_still_exposes_slot_bias(self):
+        order = ["A", "B", "B", "A"]
+        values = self._values(order, outer=0.40, inner=0.24)
+        records = abba_block_records(order, values)
+        ratios = [rec["ratio"] for rec in records]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER,
+            designs=[rec["design"] for rec in records],
+        )
+        self.assertAlmostEqual(verdict["median_ratio"], 0.6)
+        self.assertFalse(verdict["ci_available"])
+        self.assertEqual(verdict["verdict"], "inconclusive")
+
+    def test_official_aa_indexes_are_25_and_75_v311(self):
+        points = expand_scenario(SCENARIO_BY_NAME["application_rtt_fixed_rate"], "standard")
+        self.assertEqual(OFFICIAL_AA_VARIANT_INDEXES, (0, 4))
+        self.assertEqual(points[0]["shared_load_fraction"], 0.25)
+        self.assertEqual(points[0]["protocol"], "MQTTv311")
+        self.assertEqual(points[4]["shared_load_fraction"], 0.75)
+        self.assertEqual(points[4]["protocol"], "MQTTv311")
+        targeted = (ROOT / "scripts/run_targeted_aa_validation.sh").read_text()
+        self.assertIn('AA_VARIANT_INDEXES="${AA_VARIANT_INDEXES:-0,4}"', targeted)
+        self.assertIn('AA_BLOCKS="${AA_BLOCKS:-4}"', targeted)
+        self.assertIn('AA_CONTROL_ENFORCE="${AA_CONTROL_ENFORCE:-1}"', targeted)
+        self.assertIn("RUN_SYNC_REFERENCE_PAIR", targeted)
+
+
+class NativeRttDriveTests(unittest.TestCase):
+    """application_rtt must take the native path when the library has one."""
+
+    def test_mqttium_and_gmqtt_are_native_async(self):
+        from mqtt_client_bench.roles.rtt_drive import select_rtt_drive
+
+        for client in ("mqttium", "gmqtt"):
+            plan = select_rtt_drive(client)
+            self.assertTrue(plan["native_async"], client)
+            self.assertEqual(plan["publish_path"], "native_async", client)
+            self.assertTrue(plan["publish_sync_on_loop"], client)
+            self.assertEqual(plan["builder"].__name__, "create_async_adapter")
+
+    def test_paho_stays_sync(self):
+        from mqtt_client_bench.roles.rtt_drive import select_rtt_drive
+
+        plan = select_rtt_drive("paho")
+        self.assertFalse(plan["native_async"])
+        self.assertEqual(plan["publish_path"], "sync_facade")
+        self.assertEqual(plan["builder"].__name__, "create_adapter")
+
+    def test_forced_facade_is_recorded_not_silent(self):
+        from mqtt_client_bench.roles.rtt_drive import select_rtt_drive
+
+        plan = select_rtt_drive("mqttium", native_async=False)
+        self.assertFalse(plan["native_async"])
+        self.assertEqual(plan["publish_path"], "sync_facade")
+
+    def test_roles_cannot_silently_drop_create_async_adapter(self):
+        drive = (ROOT / "src/mqtt_client_bench/roles/rtt_drive.py").read_text()
+        initiator = (ROOT / "src/mqtt_client_bench/roles/rtt_initiator.py").read_text()
+        responder = (ROOT / "src/mqtt_client_bench/roles/responder.py").read_text()
+        self.assertIn("create_async_adapter", drive)
+        self.assertIn("has_async_adapter", drive)
+        self.assertIn("publish_path", drive)
+        for src, name in ((initiator, "rtt_initiator"), (responder, "responder")):
+            self.assertIn("select_rtt_drive", src, name)
+            self.assertIn("require_native_for_async_peer", src, name)
+            self.assertIn("native_async", src, name)
+            self.assertIn("_run_native", src, name)
+        self.assertIn("echo_refused", responder)
+        self.assertIn("requests_received", responder)
+        self.assertIn("publish_nowait", responder)
+        self.assertIn("pending_at_end", responder)
+        self.assertIn("responder_result_fields", responder)
+
+    def test_identity_persists_path_and_runtime(self):
+        from mqtt_client_bench.adapters.registry import adapter_identity
+        from mqtt_client_bench.roles.rtt_drive import drive_identity, select_rtt_drive
+
+        plan = select_rtt_drive("mqttium")
+        row = drive_identity(plan, adapter_identity("mqttium"))
+        self.assertEqual(row["publish_path"], "native_async")
+        self.assertTrue(row["native_async"])
+        self.assertTrue(row["io_model"])
+        self.assertTrue(row["completion_mechanism"])
+        self.assertEqual(row["client"], "mqttium")
+        self.assertEqual(row["io_model"], "asyncio_bridged")
+        self.assertEqual(row["adapter_io_model"], row["io_model"])
+        self.assertEqual(row["publish_path"], "native_async")
+        self.assertEqual(row["rtt_publish_path"], "native_async")
+        self.assertNotEqual(row["io_model"], row["publish_path"])
+
+    def test_extract_run_row_keeps_offer_and_path(self):
+        from mqtt_client_bench.archive import extract_run_row
+
+        row = extract_run_row(
+            {
+                "client": "mqttium",
+                "harness_fingerprint": "abc",
+                "harness_git_sha": "00b7a2ae",
+                "publish_path": "native_async",
+                "native_async": True,
+                "status": "valid",
+                "reasons": [],
+                "primary_msgs_per_s": 1000.0,
+                "run_id": "deadbeef",
+                "ab_label": "A",
+                "slot": 0,
+                "broker": {"version": "2.1.2"},
+                "point": {
+                    "scenario": "application_rtt_fixed_rate",
+                    "protocol": "MQTTv311",
+                    "shared_load_fraction": 0.75,
+                    "target_rate": 10558.0,
+                    "shared_capacity_msgs_per_s": 14077.0,
+                },
+                "environment": {"python": "3.14.6", "machine": "aarch64", "scaling_governor": "performance"},
+                "host_profile": {"fingerprint": "4dd74b07ca00455b", "role": "runner"},
+                "workers": [
+                    {
+                        "role": "rtt_initiator",
+                        "client_version": "1.0.0rc13",
+                        "io_model": "asyncio_bridged",
+                        "completion_mechanism": "callback",
+                        "offered": 10000,
+                        "submitted": 9998,
+                        "sent_in_window": 9998,
+                        "completed_in_window": 9997,
+                        "missed_due_to_backpressure": 2,
+                        "backlog_at_end": 1,
+                        "latency_summary": {"p50_ms": 0.5, "p95_ms": 0.8, "p99_ms": 1.1},
+                    }
+                ],
+            }
+        )
+        self.assertEqual(row["target_rate"], 10558.0)
+        self.assertEqual(row["offered"], 10000)
+        self.assertEqual(row["submitted"], 9998)
+        self.assertEqual(row["completed"], 9997)
+        self.assertEqual(row["missed_due_to_backpressure"], 2)
+        self.assertEqual(row["publish_path"], "native_async")
+        self.assertTrue(row["native_async"])
+        self.assertEqual(row["p50_ms"], 0.5)
+        self.assertEqual(row["ab_label"], "A")
+        self.assertEqual(row["slot"], 0)
+        self.assertEqual(row["broker_version"], "2.1.2")
+        self.assertEqual(row["architecture"], "aarch64")
+        self.assertEqual(row["harness_git_sha"], "00b7a2ae")
+        self.assertNotIn("latencies_ns", row)
+        row_resp = extract_run_row(
+            {
+                "client": "mqttium",
+                "status": "valid",
+                "managed_broker": False,
+                "external_broker_pid": 11883,
+                "broker_cpu_max_pct": 22.5,
+                "broker_telemetry_available": True,
+                "broker_telemetry_source": "process",
+                "workers": [
+                    {
+                        "role": "rtt_initiator",
+                        "offered": 100,
+                        "submitted": 100,
+                        "completed_in_window": 100,
+                    },
+                    {
+                        "role": "responder",
+                        "requests_received": 100,
+                        "responses": 99,
+                        "echo_refused": 1,
+                        "echo_errors": 0,
+                        "pending_at_end": 0,
+                        "echo_unaccounted": 0,
+                    },
+                ],
+            }
+        )
+        self.assertEqual(row_resp["requests_received"], 100)
+        self.assertEqual(row_resp["echo_refused"], 1)
+        self.assertEqual(row_resp["external_broker_pid"], 11883)
+        self.assertTrue(row_resp["broker_telemetry_available"])
+
+    def test_compare_document_rows_and_verdicts_are_persisted(self):
+        from mqtt_client_bench.archive import extract_compare_summaries, extract_run_rows
+
+        doc = {
+            "scenario": "application_rtt_fixed_rate",
+            "baseline_client": "mqttium",
+            "candidate_client": "gmqtt",
+            "comparison_metric": "latency_p50_ms",
+            "comparison_direction": "lower_is_better",
+            "order": ["A", "B", "B", "A"],
+            "baseline_identity": {"publish_path": "native_async"},
+            "candidate_identity": {"publish_path": "native_async"},
+            "points": [
+                {
+                    "point": {
+                        "protocol": "MQTTv311",
+                        "shared_load_fraction": 0.75,
+                        "target_rate": 10558.0,
+                        "shared_capacity_msgs_per_s": 14077.0,
+                    },
+                    "order": ["A", "B", "B", "A"],
+                    "comparison_metric": "latency_p50_ms",
+                    "comparison_direction": "lower_is_better",
+                    "baseline_rates": [0.80, 0.81],
+                    "candidate_rates": [1.00, 0.99],
+                    "block_ratios": [1.08, 1.07],
+                    "verdict": {
+                        "verdict": "inconclusive",
+                        "median_ratio": 1.075,
+                        "ci_low": -0.01,
+                        "ci_high": 0.09,
+                        "absolute_effect_pct": 7.5,
+                        "excludes_zero_effect": False,
+                        "n_blocks": 2,
+                        "block_ratios": [1.08, 1.07],
+                    },
+                    "runs": [
+                        {
+                            "client": "mqttium",
+                            "status": "valid",
+                            "ab_label": "A",
+                            "slot": 0,
+                            "publish_path": "native_async",
+                            "native_async": True,
+                            "point": {
+                                "scenario": "application_rtt_fixed_rate",
+                                "protocol": "MQTTv311",
+                                "target_rate": 10558.0,
+                            },
+                            "workers": [
+                                {
+                                    "role": "rtt_initiator",
+                                    "offered": 1000,
+                                    "submitted": 1000,
+                                    "completed_in_window": 1000,
+                                    "missed_due_to_backpressure": 0,
+                                    "latency_summary": {"p50_ms": 0.5, "p95_ms": 0.6, "p99_ms": 0.7},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        rows = extract_run_rows(doc)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["ab_label"], "A")
+        self.assertEqual(rows[0]["target_rate"], 10558.0)
+        summaries = extract_compare_summaries(doc)
+        self.assertEqual(len(summaries), 1)
+        self.assertEqual(summaries[0]["verdict"], "inconclusive")
+        self.assertEqual(summaries[0]["n_blocks"], 2)
+        self.assertEqual(summaries[0]["block_ratios"], [1.08, 1.07])
+        self.assertEqual(summaries[0]["comparison_metric"], "latency_p50_ms")
+        self.assertEqual(summaries[0]["comparison_direction"], "lower_is_better")
+        self.assertEqual(summaries[0]["publish_path_baseline"], "native_async")
+        self.assertEqual(summaries[0]["publish_path_candidate"], "native_async")
+
+    def test_compare_summary_falls_back_to_run_publish_path(self):
+        from mqtt_client_bench.archive import extract_compare_summaries
+
+        doc = {
+            "scenario": "application_rtt_fixed_rate",
+            "baseline_client": "mqttium",
+            "candidate_client": "paho",
+            "baseline_identity": {"io_model": "asyncio_bridged"},
+            "candidate_identity": {"io_model": "sync"},
+            "points": [
+                {
+                    "point": {"protocol": "MQTTv311", "shared_load_fraction": 0.25},
+                    "verdict": {
+                        "verdict": "inconclusive",
+                        "n_blocks": 2,
+                        "block_ratios": [1.0, 1.0],
+                        "median_ratio": 1.0,
+                    },
+                    "runs": [
+                        {
+                            "client": "mqttium",
+                            "publish_path": "native_async",
+                            "client_identity": {"publish_path": "native_async"},
+                        },
+                        {
+                            "client": "paho",
+                            "publish_path": "sync_facade",
+                            "client_identity": {"publish_path": "sync_facade"},
+                        },
+                    ],
+                }
+            ],
+        }
+        summaries = extract_compare_summaries(doc)
+        self.assertEqual(summaries[0]["publish_path_baseline"], "native_async")
+        self.assertEqual(summaries[0]["publish_path_candidate"], "sync_facade")
+        self.assertEqual(summaries[0]["adapter_io_model_baseline"], "asyncio_bridged")
+        self.assertEqual(summaries[0]["adapter_io_model_candidate"], "sync")
+
+    def test_require_native_raises_on_silent_facade(self):
+        from mqtt_client_bench.roles.rtt_drive import (
+            require_native_for_async_peer,
+            select_rtt_drive,
+        )
+
+        require_native_for_async_peer("mqttium", select_rtt_drive("mqttium"))
+        require_native_for_async_peer("paho", select_rtt_drive("paho"))
+        with self.assertRaises(RuntimeError):
+            require_native_for_async_peer("mqttium", select_rtt_drive("mqttium", native_async=False))
+        with self.assertRaises(RuntimeError):
+            require_native_for_async_peer("gmqtt", select_rtt_drive("gmqtt", native_async=False))
+
+    def test_official_pairwise_script_never_builds_a_three_way_grid(self):
+        official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
+        legacy = (ROOT / "scripts/run_mqttium_gmqtt_paho_arm64.sh").read_text()
+        self.assertIn('assert version("mqttium") == "1.0.0rc13"', official)
+        self.assertIn('assert version("gmqtt") == "0.7.0"', official)
+        self.assertIn('assert version("paho-mqtt") == "2.1.0"', official)
+        self.assertIn('mqttium==${MQTTIUM_VER}', official)
+        self.assertIn('run_capacity "mqttium,gmqtt"', official)
+        self.assertIn('run_capacity "mqttium,paho"', official)
+        self.assertIn('run_aa "mqttium,gmqtt"', official)
+        self.assertIn("AA_GATE_PASSED", official)
+        self.assertIn("validate_official_pairwise_policy", official)
+        self.assertIn("continue_to_ab_ranking", official)
+        self.assertLess(
+            official.find("validate_official_pairwise_policy"),
+            official.find('run_capacity "mqttium,gmqtt"'),
+        )
+        self.assertLess(
+            official.find('run_aa "mqttium,gmqtt"'),
+            official.find('run_ranking "mqttium,gmqtt"'),
+        )
+        self.assertLess(
+            official.find("AA_GATE_PASSED"),
+            official.find('run_ranking "mqttium,gmqtt"'),
+        )
+        self.assertLess(
+            official.find("continue_to_ab_ranking"),
+            official.find('run_ranking "mqttium,gmqtt"'),
+        )
+        self.assertNotIn("--clients mqttium,gmqtt,paho", official)
+        self.assertIn('--clients "$pair"', official)
+        self.assertIn("write_official_rtt_calibrations", official)
+        self.assertIn('AA_VARIANT_INDEXES="${AA_VARIANT_INDEXES:-${AA_VARIANT_INDEX:-0,4}}"', official)
+        self.assertIn("ABBA_VARIANT_INDEXES", official)
+        self.assertIn("AA_CONTROL_ENFORCE", official)
+        self.assertIn("enforce_aa_controls", official)
+        self.assertIn("RUN_LOAD_MATRIX", official)
+        self.assertIn("run_targeted_aa_validation.sh", official)
+        self.assertIn('--load-profile-dir "$cal_dir/aa"', official)
+        self.assertIn("SUPERSEDED", legacy)
+        self.assertIn("run_pairwise_rtt_campaign.sh", legacy)
+        self.assertIn("exit 2", legacy)
+        workflow = (ROOT / "scripts/github/benchmark-matched-load-arm64.yml").read_text()
+        self.assertIn("run_pairwise_rtt_campaign.sh", workflow)
+        self.assertNotIn("scripts/run_mqttium_gmqtt_paho_arm64.sh", workflow)
+        self.assertIn("BENCH_SHA", workflow)
+        self.assertIn("pairwise-native-rtt", workflow)
+        self.assertIn('MQTTIUM_VER: "1.0.0rc13"', workflow)
+        self.assertIn('GMQTT_VER: "0.7.0"', workflow)
+        self.assertIn('PAHO_VER: "2.1.0"', workflow)
+        self.assertIn("ABBA_VARIANT_INDEXES=0,1", workflow)
+        self.assertIn("AA_VARIANT_INDEXES=0", workflow)
+        self.assertIn("AA_VARIANT_INDEXES=0,4", workflow)
+        self.assertIn("aa-validation", workflow)
+        self.assertIn("run_targeted_aa_validation.sh", workflow)
+        self.assertIn("AA_CONTROL_ENFORCE=1", workflow)
+        self.assertIn("AA_BLOCKS=4", workflow)
+        self.assertIn("BENCH_BROKER_PID", workflow)
+        self.assertIn("echo \"BENCH_BROKER_PID=$pid\"", workflow)
+        official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
+        self.assertIn('AA_BLOCKS="${AA_BLOCKS:-6}"', official)
+        self.assertIn("--broker-pid", official)
+        env_sha = re.search(r"BENCH_SHA:\s*([0-9a-f]{40})", workflow)
+        ref_sha = re.search(r"ref:\s*([0-9a-f]{40})", workflow)
+        self.assertIsNotNone(env_sha)
+        self.assertIsNotNone(ref_sha)
+        self.assertEqual(env_sha.group(1), ref_sha.group(1))
+        self.assertNotEqual(env_sha.group(1), "0b7f0e57457461f9de60d5658e8ff9566de269dc")
+        self.assertNotIn("run_mqttium_gmqtt_paho_arm64.sh", workflow)
+
+    def test_legacy_three_way_script_exits_explicitly(self):
+        proc = subprocess.run(
+            ["bash", str(ROOT / "scripts/run_mqttium_gmqtt_paho_arm64.sh")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("SUPERSEDED", proc.stderr)
+        self.assertIn("run_pairwise_rtt_campaign.sh", proc.stderr)
+
+
+class PairwiseCapacityGateTests(unittest.TestCase):
+    """Official C_common may only be built from 5/5 valid native capacities."""
+
+    def _block(self, proto, runs):
+        return {"point": {"protocol": proto}, "runs": runs}
+
+    def _valid(self, rate, path="native_async"):
+        return {
+            "status": "valid",
+            "primary_msgs_per_s": rate,
+            "publish_path": path,
+            "native_async": path == "native_async",
+        }
+
+    def test_five_of_five_valid_is_admitted(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        rates = [14000.0, 14100.0, 14050.0, 13980.0, 14077.0]
+        doc = {
+            "results": [
+                self._block("MQTTv311", [self._valid(r) for r in rates]),
+                self._block("MQTTv5", [self._valid(r * 0.96) for r in rates]),
+            ]
+        }
+        inspected = official_rtt_capacities(doc, "mqttium", required_valid=5)
+        self.assertTrue(inspected["ok"])
+        block = inspected["protocols"]["MQTTv311"]
+        self.assertEqual(block["n_valid"], 5)
+        self.assertEqual(block["n"], 5)
+        self.assertEqual(block["min"], 13980.0)
+        self.assertEqual(block["max"], 14100.0)
+        self.assertIsNotNone(block["spread_pct"])
+        self.assertEqual(block["capacity_msgs_per_s"], block["median"])
+
+    def test_four_of_five_valid_fails_closed(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        runs = [self._valid(14000.0 + i) for i in range(4)]
+        runs.append(
+            {
+                "status": "inconclusive",
+                "primary_msgs_per_s": 9000.0,
+                "publish_path": "native_async",
+                "reasons": ["rtt_timeouts"],
+            }
+        )
+        doc = {
+            "results": [
+                self._block("MQTTv311", runs),
+                self._block("MQTTv5", [self._valid(13000.0) for _ in range(5)]),
+            ]
+        }
+        inspected = official_rtt_capacities(doc, "mqttium", required_valid=5)
+        self.assertFalse(inspected["ok"])
+        self.assertTrue(any("insufficient_valid_rtt_capacity:4/5" in e for e in inspected["errors"]))
+        self.assertIsNone(inspected["protocols"]["MQTTv311"]["capacity_msgs_per_s"])
+
+    def test_smoke_non_comparable_is_not_an_official_capacity(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        runs = [
+            {
+                "status": "valid",
+                "primary_msgs_per_s": 14000.0 + i,
+                "publish_path": "native_async",
+                "non_comparable": True,
+            }
+            for i in range(5)
+        ]
+        doc = {
+            "results": [
+                self._block("MQTTv311", runs),
+                self._block("MQTTv5", runs),
+            ]
+        }
+        official = official_rtt_capacities(doc, "mqttium", required_valid=5)
+        self.assertFalse(official["ok"])
+        smoke = official_rtt_capacities(
+            doc, "mqttium", required_valid=5, allow_non_comparable=True
+        )
+        self.assertTrue(smoke["ok"])
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["n_valid"], 5)
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["n_admitted"], 5)
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["admission"], "smoke_path_proof")
+
+    def test_timeout_or_mixed_reasons_fail_closed(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        def doc_for(run):
+            return {
+                "results": [
+                    self._block("MQTTv311", [run]),
+                    self._block("MQTTv5", [self._valid(13000.0)]),
+                ]
+            }
+
+        cases = [
+            {
+                "status": "inconclusive",
+                "primary_msgs_per_s": 25000.0,
+                "publish_path": "native_async",
+                "reasons": ["rtt_timeouts"],
+            },
+            {
+                "status": "error",
+                "primary_msgs_per_s": 25000.0,
+                "publish_path": "native_async",
+                "error": "boom",
+                "reasons": ["worker_error:boom"],
+            },
+            {
+                "status": "inconclusive",
+                "primary_msgs_per_s": 25000.0,
+                "publish_path": "native_async",
+                "reasons": ["broker_headroom_low:84", "rtt_timeouts"],
+            },
+        ]
+        for run in cases:
+            official = official_rtt_capacities(doc_for(run), "gmqtt", required_valid=1)
+            self.assertFalse(official["ok"], run)
+            smoke = official_rtt_capacities(
+                doc_for(run), "gmqtt", required_valid=1, allow_non_comparable=True
+            )
+            self.assertFalse(smoke["ok"], run)
+            self.assertIsNone(smoke["protocols"]["MQTTv311"]["capacity_msgs_per_s"], run)
+
+    def test_missing_protocol_fails_closed(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        doc = {"results": [self._block("MQTTv311", [self._valid(14000.0) for _ in range(5)])]}
+        inspected = official_rtt_capacities(doc, "mqttium", required_valid=5)
+        self.assertFalse(inspected["ok"])
+        self.assertTrue(any("missing_valid_rtt_capacity:MQTTv5" in e for e in inspected["errors"]))
+
+    def test_smoke_admits_exclusive_broker_cpu_void_as_path_proof(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        runs = [
+            {
+                "status": "inconclusive",
+                "primary_msgs_per_s": 27389.66,
+                "publish_path": "native_async",
+                "native_async": True,
+                "non_comparable": True,
+                "reasons": ["broker_headroom_low:84"],
+            }
+        ]
+        doc = {
+            "results": [
+                self._block("MQTTv311", runs),
+                self._block(
+                    "MQTTv5",
+                    [
+                        {
+                            "status": "inconclusive",
+                            "primary_msgs_per_s": 29991.85,
+                            "publish_path": "native_async",
+                            "native_async": True,
+                            "non_comparable": True,
+                            "reasons": ["container_cpu_high:workspace-mosquitto-1"],
+                        }
+                    ],
+                ),
+            ]
+        }
+        official = official_rtt_capacities(doc, "gmqtt", required_valid=1)
+        self.assertFalse(official["ok"])
+        self.assertIsNone(official["protocols"]["MQTTv311"]["capacity_msgs_per_s"])
+        smoke = official_rtt_capacities(
+            doc, "gmqtt", required_valid=1, allow_non_comparable=True
+        )
+        self.assertTrue(smoke["ok"])
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["n_valid"], 0)
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["n_admitted"], 1)
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["capacity_msgs_per_s"], 27389.66)
+        self.assertEqual(smoke["protocols"]["MQTTv311"]["admission"], "smoke_path_proof")
+
+    def test_aa_calibrations_use_pair_c_common_not_the_faster_client(self):
+        import tempfile
+
+        from mqtt_client_bench.pairwise import write_official_rtt_calibrations
+
+        mqttium_runs = [self._valid(14000.0 + i) for i in range(5)]
+        gmqtt_runs = [self._valid(20000.0 + i) for i in range(5)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            matrix = root / "matrix"
+            cal = root / "cal"
+            matrix.mkdir()
+            (matrix / "mqttium-rtt_capacity_qos1.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            self._block("MQTTv311", mqttium_runs),
+                            self._block("MQTTv5", [self._valid(13000.0) for _ in range(5)]),
+                        ]
+                    }
+                )
+            )
+            (matrix / "gmqtt-rtt_capacity_qos1.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            self._block("MQTTv311", gmqtt_runs),
+                            self._block("MQTTv5", [self._valid(19000.0) for _ in range(5)]),
+                        ]
+                    }
+                )
+            )
+            payload = write_official_rtt_calibrations(
+                matrix, cal, ("mqttium", "gmqtt"), required_valid=5
+            )
+            self.assertEqual(payload["c_common"]["MQTTv311"], 14002.0)
+            aa_gmqtt = json.loads((cal / "aa" / "gmqtt-load.json").read_text())
+            own_gmqtt = json.loads((cal / "gmqtt-load.json").read_text())
+            self.assertEqual(
+                aa_gmqtt["protocol_capacities"]["MQTTv311"]["rtt_capacity_msgs_per_s"],
+                14002.0,
+            )
+            self.assertGreater(
+                own_gmqtt["protocol_capacities"]["MQTTv311"]["rtt_capacity_msgs_per_s"],
+                14002.0,
+            )
+            self.assertEqual(aa_gmqtt["c_common_of"], ["mqttium", "gmqtt"])
+
+    def test_six_runs_with_five_valid_is_not_five_of_five(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        runs = [self._valid(14000.0 + i) for i in range(6)]
+        doc = {
+            "results": [
+                self._block("MQTTv311", runs),
+                self._block("MQTTv5", [self._valid(13000.0) for _ in range(5)]),
+            ]
+        }
+        inspected = official_rtt_capacities(doc, "mqttium", required_valid=5)
+        self.assertFalse(inspected["ok"])
+        self.assertTrue(
+            any("executed_rtt_capacity:6/5" in e for e in inspected["errors"])
+        )
+        five_valid_plus_extra = [self._valid(14000.0 + i) for i in range(5)]
+        five_valid_plus_extra.append(
+            {
+                "status": "inconclusive",
+                "primary_msgs_per_s": 9000.0,
+                "publish_path": "native_async",
+                "reasons": ["rtt_timeouts"],
+            }
+        )
+        mixed = {
+            "results": [
+                self._block("MQTTv311", five_valid_plus_extra),
+                self._block("MQTTv5", [self._valid(13000.0) for _ in range(5)]),
+            ]
+        }
+        mixed_out = official_rtt_capacities(mixed, "mqttium", required_valid=5)
+        self.assertFalse(mixed_out["ok"])
+        self.assertTrue(
+            any("executed_rtt_capacity:6/5" in e for e in mixed_out["errors"])
+        )
+
+    def test_bridged_path_is_refused_for_async_peers(self):
+        from mqtt_client_bench.pairwise import official_rtt_capacity_block
+
+        block = self._block(
+            "MQTTv311",
+            [self._valid(14000.0, path="sync_facade") for _ in range(5)],
+        )
+        inspected = official_rtt_capacity_block(block, "gmqtt", required_valid=5)
+        self.assertTrue(any("non_native_rtt_path" in e for e in inspected["errors"]))
+        self.assertIsNone(inspected["capacity_msgs_per_s"])
+
+
+class AaControlGateTests(unittest.TestCase):
+    """Same-client A/A must fail closed before an official ranking is published."""
+
+    def _compare_doc(
+        self,
+        *,
+        same_client=True,
+        effect_pct=-39.52,
+        excludes_zero=True,
+        n_blocks=4,
+        fraction=0.25,
+        protocol="MQTTv311",
+        ratio=None,
+        designs=None,
+        ci_low=None,
+        ci_high=None,
+        ci_available=None,
+        blocks_requested=None,
+        order=None,
+        pair_units=None,
+    ):
+        if ratio is None:
+            ratio = 1.0 + (effect_pct / 100.0)
+        if designs is None:
+            designs = ["ABBA", "BAAB", "ABBA", "BAAB"][:n_blocks]
+        if ci_low is None and ci_high is None and ci_available is not False:
+            if excludes_zero:
+                ci_low, ci_high = -0.41, -0.38
+            else:
+                ci_low, ci_high = -0.02, 0.02
+        if ci_available is None:
+            ci_available = ci_low is not None and ci_high is not None
+        if ci_available is False:
+            ci_low, ci_high = None, None
+        if order is None:
+            order = abba_order(n_blocks) if n_blocks else []
+        if blocks_requested is None:
+            blocks_requested = n_blocks
+        if pair_units is None and ratio is not None and n_blocks >= 2:
+            pair_units = [ratio] * max(1, n_blocks // 2)
+        return {
+            "baseline_client": "mqttium",
+            "candidate_client": "mqttium" if same_client else "gmqtt",
+            "blocks_requested": blocks_requested,
+            "order": order,
+            "points": [
+                {
+                    "point": {
+                        "shared_load_fraction": fraction,
+                        "protocol": protocol,
+                        "target_rate": 3889,
+                    },
+                    "order": order,
+                    "verdict": {
+                        "verdict": "improvement" if excludes_zero else "inconclusive",
+                        "median_ratio": ratio,
+                        "ci_low": ci_low,
+                        "ci_high": ci_high,
+                        "ci_available": ci_available,
+                        "excludes_zero_effect": bool(excludes_zero and ci_available),
+                        "absolute_effect_pct": effect_pct,
+                        "n_blocks": n_blocks,
+                        "block_designs": designs,
+                        "pair_units": pair_units or [],
+                        "n_pair_units": len(pair_units or []),
+                    },
+                }
+            ],
+        }
+
+    def test_non_neutral_aa_fails_closed(self):
+        control = evaluate_aa_control(self._compare_doc())
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("abs_effect", control["aa_control_reason"])
+        self.assertAlmostEqual(control["aa_absolute_effect_pct"], -39.52)
+        self.assertEqual(control["aa_variant"]["shared_load_fraction"], 0.25)
+        self.assertEqual(control["aa_variant"]["protocol"], "MQTTv311")
+
+    def test_huge_effect_with_wide_ci_still_fails(self):
+        control = evaluate_aa_control(
+            self._compare_doc(
+                effect_pct=-39.52,
+                excludes_zero=False,
+                ratio=0.60,
+                ci_low=-0.50,
+                ci_high=0.02,
+            )
+        )
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("abs_effect", control["aa_control_reason"])
+
+    def test_two_blocks_one_obs_per_design_is_insufficient_replication(self):
+        ratios = [0.99, 1.02]
+        designs = ["ABBA", "BAAB"]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        doc = self._compare_doc(
+            n_blocks=2,
+            designs=designs,
+            ratio=verdict["median_ratio"],
+            effect_pct=verdict["absolute_effect_pct"],
+            ci_available=False,
+            excludes_zero=False,
+            order=abba_order(2),
+        )
+        doc["points"][0]["verdict"] = verdict
+        control = evaluate_aa_control(doc)
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("insufficient_replication", control["aa_control_reason"])
+        self.assertFalse(control["aa_ci_available"])
+        self.assertEqual(control["aa_design_counts"]["ABBA"], 1)
+        self.assertEqual(control["aa_design_counts"]["BAAB"], 1)
+        self.assertEqual(control["aa_blocks_requested"], 2)
+        self.assertEqual(control["aa_blocks_complete"], 2)
+
+    def test_abba_only_design_fails(self):
+        control = evaluate_aa_control(
+            self._compare_doc(
+                n_blocks=4,
+                designs=["ABBA", "ABBA", "ABBA", "ABBA"],
+                excludes_zero=False,
+                effect_pct=0.4,
+            )
+        )
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("missing_design", control["aa_control_reason"])
+
+    def test_missing_ci_is_not_a_fail_when_bias_and_stability_ok(self):
+        control = evaluate_aa_control(
+            self._compare_doc(
+                n_blocks=4,
+                excludes_zero=False,
+                effect_pct=0.4,
+                ci_available=False,
+            )
+        )
+        self.assertIs(control["aa_control_pass"], True)
+        self.assertEqual(control["aa_control_reason"], "neutral")
+        self.assertFalse(control["aa_ci_available"])
+
+    def test_incomplete_block_fails(self):
+        control = evaluate_aa_control(
+            self._compare_doc(
+                n_blocks=3,
+                blocks_requested=4,
+                designs=["ABBA", "BAAB", "ABBA"],
+                excludes_zero=False,
+                effect_pct=0.2,
+                ci_available=False,
+            )
+        )
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("incomplete_blocks:3/4", control["aa_control_reason"])
+
+    def test_four_noisy_neutral_blocks_pass(self):
+        ratios = [0.97, 1.03, 1.00, 1.01]
+        designs = ["ABBA", "BAAB", "ABBA", "BAAB"]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertTrue(verdict["ci_available"])
+        self.assertLessEqual(verdict["ci_low"], 0.0)
+        self.assertGreaterEqual(verdict["ci_high"], 0.0)
+        self.assertLess(abs(verdict["absolute_effect_pct"]), 3.0)
+        doc = self._compare_doc(
+            n_blocks=4,
+            designs=designs,
+            ratio=verdict["median_ratio"],
+            effect_pct=verdict["absolute_effect_pct"],
+            ci_low=verdict["ci_low"],
+            ci_high=verdict["ci_high"],
+            ci_available=True,
+            excludes_zero=False,
+        )
+        doc["points"][0]["verdict"] = {**verdict, "block_designs": designs}
+        control = evaluate_aa_control(doc)
+        self.assertIs(control["aa_control_pass"], True)
+        self.assertEqual(control["aa_control_reason"], "neutral")
+        self.assertEqual(control["aa_blocks_requested"], 4)
+        self.assertEqual(control["aa_blocks_complete"], 4)
+        self.assertTrue(control["aa_ci_available"])
+
+    def test_four_blocks_with_real_effect_fail(self):
+        ratios = [1.10, 1.09, 1.12, 1.11]
+        designs = ["ABBA", "BAAB", "ABBA", "BAAB"]
+        verdict = compare_verdict_from_block_ratios(
+            ratios, min_effect_pct=3.0, seed=1, direction=LOWER_IS_BETTER, designs=designs
+        )
+        self.assertTrue(verdict["ci_available"])
+        self.assertGreater(abs(verdict["absolute_effect_pct"]), 3.0)
+        doc = self._compare_doc(
+            n_blocks=4,
+            designs=designs,
+            ratio=verdict["median_ratio"],
+            effect_pct=verdict["absolute_effect_pct"],
+            ci_low=verdict["ci_low"],
+            ci_high=verdict["ci_high"],
+            ci_available=True,
+            excludes_zero=verdict["excludes_zero_effect"],
+        )
+        doc["points"][0]["verdict"] = {**verdict, "block_designs": designs}
+        control = evaluate_aa_control(doc)
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("abs_effect", control["aa_control_reason"])
+
+    def test_neutral_aa_allows_continuation(self):
+        control = evaluate_aa_control(
+            self._compare_doc(
+                effect_pct=-0.16,
+                excludes_zero=False,
+                n_blocks=4,
+                ratio=0.9984,
+            )
+        )
+        self.assertIs(control["aa_control_pass"], True)
+        self.assertEqual(control["aa_control_reason"], "neutral")
+
+    def test_ci_excluding_zero_is_not_a_fail_for_small_stable_bias(self):
+        control = evaluate_aa_control(
+            self._compare_doc(
+                effect_pct=-1.17,
+                excludes_zero=True,
+                n_blocks=4,
+                ratio=0.9883,
+                pair_units=[0.9828, 0.9939],
+                ci_low=0.01,
+                ci_high=0.03,
+            )
+        )
+        self.assertIs(control["aa_control_pass"], True)
+        self.assertEqual(control["aa_control_reason"], "neutral")
+        self.assertTrue(control["aa_ci"]["excludes_zero_effect"])
+
+    def _from_pair_units(self, pair_units, **kwargs):
+        centre = geometric_mean(pair_units)
+        effect = (centre - 1.0) * 100.0
+        return self._compare_doc(
+            effect_pct=effect,
+            ratio=centre,
+            pair_units=list(pair_units),
+            n_blocks=4,
+            excludes_zero=False,
+            **kwargs,
+        )
+
+    def test_case_a_gmqtt_like_small_stable_bias_passes(self):
+        units = [0.9828, 0.9939]
+        control = evaluate_aa_control(self._from_pair_units(units))
+        self.assertAlmostEqual(control["aa_bias_pct"], -1.1667, places=2)
+        self.assertLess(abs(control["aa_bias_pct"]), 3.0)
+        self.assertLess(control["aa_stability_pct"], 3.0)
+        self.assertIs(control["aa_control_pass"], True)
+
+    def test_case_b_old_mqttium_zero_center_must_fail_stability(self):
+        units = [1.2877, 0.7773]
+        control = evaluate_aa_control(self._from_pair_units(units))
+        self.assertLess(abs(control["aa_bias_pct"]), 0.2)
+        self.assertGreater(control["aa_stability_pct"], 20.0)
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("unstable_pair_units", control["aa_control_reason"])
+
+    def test_case_c_final_mqttium_25_fails(self):
+        control = evaluate_aa_control(self._from_pair_units([1.2736, 1.0795]))
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertTrue(
+            "abs_effect" in control["aa_control_reason"]
+            or "unstable_pair_units" in control["aa_control_reason"]
+        )
+
+    def test_case_d_final_mqttium_75_fails(self):
+        control = evaluate_aa_control(self._from_pair_units([1.0681, 1.1842]))
+        self.assertIs(control["aa_control_pass"], False)
+
+    def test_case_e_stable_exact_neutral_passes(self):
+        control = evaluate_aa_control(self._from_pair_units([1.0, 1.0]))
+        self.assertIs(control["aa_control_pass"], True)
+        self.assertEqual(control["aa_control_reason"], "neutral")
+        self.assertEqual(control["aa_stability_pct"], 0.0)
+
+    def test_case_f_stable_4_to_5_pct_bias_fails(self):
+        control = evaluate_aa_control(self._from_pair_units([1.04, 1.05]))
+        self.assertGreater(abs(control["aa_bias_pct"]), 3.0)
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("abs_effect", control["aa_control_reason"])
+
+    def test_case_gmqtt_75_final_is_unstable_not_healthy(self):
+        control = evaluate_aa_control(self._from_pair_units([1.0978, 0.9672]))
+        self.assertIs(control["aa_control_pass"], False)
+        self.assertIn("unstable_pair_units", control["aa_control_reason"])
+        self.assertGreater(control["aa_stability_pct"], 3.0)
+
+    def test_log_domain_inversion_preserves_stability_and_abs_bias(self):
+        units = [0.9828, 0.9939]
+        forward = evaluate_aa_control(self._from_pair_units(units))
+        inverted = evaluate_aa_control(self._from_pair_units([1.0 / u for u in units]))
+        self.assertAlmostEqual(forward["aa_stability_pct"], inverted["aa_stability_pct"], places=10)
+        log_fwd = math.log(1.0 + forward["aa_bias_pct"] / 100.0)
+        log_inv = math.log(1.0 + inverted["aa_bias_pct"] / 100.0)
+        self.assertAlmostEqual(log_fwd, -log_inv, places=10)
+        self.assertEqual(forward["aa_control_pass"], inverted["aa_control_pass"])
+        self.assertEqual(AA_CONTROL_MAX_PAIR_UNIT_ABS_PCT, 3.0)
+
+    def test_arm_sensitivity_margins_do_not_choose_a_threshold_to_pass_mqttium(self):
+        """Document ±2/±3/±5 bias-only vs the combined gate. 3 % stays."""
+        cases = {
+            "final_gmqtt_25": (-1.1667, [0.9828, 0.9939]),
+            "old_mqttium_25": (0.0466, [1.2877, 0.7773]),
+            "final_mqttium_25": (17.2533, [1.2736, 1.0795]),
+            "final_mqttium_75": (12.4660, [1.0681, 1.1842]),
+            "old_mqttium_75": (9.0520, [1.0736, 1.1077]),
+            "final_gmqtt_75": (3.0448, [1.0978, 0.9672]),
+        }
+        for name, (bias, units) in cases.items():
+            stability = aa_stability_pct(units)
+            combined_3 = abs(bias) <= 3.0 and stability <= 3.0
+            if name == "final_gmqtt_25":
+                self.assertTrue(combined_3, name)
+            else:
+                self.assertFalse(combined_3, name)
+            self.assertEqual(pair_unit_effect_pcts(units)[0], (units[0] - 1.0) * 100.0)
+
+    def test_ab_compare_is_not_an_aa_gate(self):
+        control = evaluate_aa_control(self._compare_doc(same_client=False))
+        self.assertIsNone(control["aa_control_pass"])
+        self.assertEqual(control["aa_control_reason"], "not_same_client")
+
+    def test_official_enforce_raises_on_non_neutral_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "compare-aa-mqttium-application_rtt_fixed_rate-v0.json"
+            path.write_text(json.dumps(self._compare_doc()) + "\n", encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                enforce_aa_controls(root, enforce=True, require_files=True)
+            self.assertIn("A/A control failed", str(ctx.exception))
+            recorded = enforce_aa_controls(root, enforce=False, require_files=True)
+            self.assertFalse(recorded["ok"])
+            self.assertEqual(recorded["n_files"], 1)
+
+    def test_official_enforce_passes_neutral_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "compare-aa-mqttium-application_rtt_fixed_rate-v0.json"
+            path.write_text(
+                json.dumps(
+                    self._compare_doc(
+                        effect_pct=0.4,
+                        excludes_zero=False,
+                        n_blocks=4,
+                        ratio=1.004,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            payload = enforce_aa_controls(root, enforce=True, require_files=True)
+            self.assertTrue(payload["ok"])
+            self.assertTrue(payload["reports"][0]["aa_control_pass"])
+
+    def test_missing_aa_files_fail_when_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                enforce_aa_controls(tmp, enforce=True, require_files=True)
+
+    def test_failed_aa_gate_does_not_run_ranking_or_write_ab_compares(self):
+        called = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "compare-aa-mqttium-application_rtt_fixed_rate-v0.json"
+            path.write_text(json.dumps(self._compare_doc()) + "\n", encoding="utf-8")
+
+            def rank():
+                called.append("rank")
+                (root / "compare-asyncio-application_rtt_fixed_rate.json").write_text(
+                    "{}\n", encoding="utf-8"
+                )
+
+            with self.assertRaises(ValueError):
+                maybe_run_ab_ranking_after_aa(root, enforce=True, rank=rank)
+            self.assertEqual(called, [])
+            self.assertFalse(continue_to_ab_ranking(False))
+            self.assertEqual(ab_compare_outputs(root), [])
+
+    def test_unenforced_failed_aa_still_does_not_rank(self):
+        called = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "compare-aa-mqttium-application_rtt_fixed_rate-v0.json"
+            path.write_text(json.dumps(self._compare_doc()) + "\n", encoding="utf-8")
+            result = maybe_run_ab_ranking_after_aa(
+                root, enforce=False, rank=lambda: called.append("rank")
+            )
+            self.assertFalse(result["ranked"])
+            self.assertEqual(called, [])
+            self.assertEqual(result["ab_outputs"], [])
+            self.assertEqual(ab_compare_outputs(root), [])
+
+    def test_passing_aa_gate_may_run_ranking(self):
+        called = []
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "compare-aa-mqttium-application_rtt_fixed_rate-v0.json"
+            path.write_text(
+                json.dumps(
+                    self._compare_doc(
+                        effect_pct=0.4,
+                        excludes_zero=False,
+                        n_blocks=4,
+                        ratio=1.004,
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            def rank():
+                called.append("rank")
+                (root / "compare-asyncio-application_rtt_fixed_rate.json").write_text(
+                    "{}\n", encoding="utf-8"
+                )
+
+            result = maybe_run_ab_ranking_after_aa(root, enforce=True, rank=rank)
+            self.assertTrue(result["ranked"])
+            self.assertEqual(called, ["rank"])
+            self.assertEqual(
+                result["ab_outputs"],
+                ["compare-asyncio-application_rtt_fixed_rate.json"],
+            )
+
+    def test_campaign_script_defaults_cover_25_and_75(self):
+        official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
+        self.assertIn("0,4", official)
+        self.assertIn("AA_VARIANT_INDEXES", official)
+        self.assertIn("enforce_aa_controls", official)
+        self.assertIn("AA_GATE_PASSED", official)
+        workflow = (ROOT / "scripts/github/benchmark-matched-load-arm64.yml").read_text()
+        self.assertIn("AbbaCounterbalanceTests", workflow)
+        self.assertIn("AaControlGateTests", workflow)
+
+
+class RttRuntimeDiagTests(unittest.TestCase):
+    """Post-window GC/rusage and mqttium stats() must not sit on the hot path."""
+
+    def test_process_runtime_delta_subtracts_counters(self):
+        start = process_runtime_snapshot()
+        self.assertIn("ru_nvcsw", start)
+        self.assertIn("gc_collections", start)
+        end = dict(start)
+        end["ru_nvcsw"] = int(start["ru_nvcsw"]) + 7
+        end["ru_nivcsw"] = int(start["ru_nivcsw"]) + 2
+        end["gc_collections"] = [int(value) + 1 for value in start["gc_collections"]]
+        delta = process_runtime_delta(start, end)
+        self.assertEqual(delta["ru_nvcsw"], 7)
+        self.assertEqual(delta["ru_nivcsw"], 2)
+        self.assertEqual(delta["gc_collections"], [1] * len(start["gc_collections"]))
+
+    def test_adapter_without_snapshot_is_none(self):
+        self.assertIsNone(adapter_library_snapshot(object()))
+
+    def test_mqttium_library_snapshot_jsonifies_public_stats(self):
+        @dataclass
+        class _Effects:
+            inline_effects: int
+            enqueued: int
+
+        @dataclass
+        class _Stats:
+            effects: _Effects
+
+        class _Client:
+            def stats(self):
+                return _Stats(_Effects(12, 3))
+
+        adapter = MqttiumAsyncAdapter()
+        adapter._client = _Client()
+        snap = adapter.library_runtime_snapshot()
+        self.assertEqual(snap["effects"]["inline_effects"], 12)
+        self.assertEqual(snap["effects"]["enqueued"], 3)
+
+    def test_native_rtt_roles_snapshot_after_t1(self):
+        initiator = (ROOT / "src/mqtt_client_bench/roles/rtt_initiator.py").read_text()
+        responder = (ROOT / "src/mqtt_client_bench/roles/responder.py").read_text()
+        self.assertIn("measure_runtime_report", initiator)
+        self.assertIn("adapter_library_snapshot", responder)
+        send_loop = initiator.split("async def _send_loop_async")[1].split(
+            "if __name__"
+        )[0]
+        self.assertNotIn("process_runtime_snapshot", send_loop)
+        self.assertNotIn("library_runtime_snapshot", send_loop)
+
+
+class OfficialPairwisePolicyTests(unittest.TestCase):
+    """PROFILE=standard cannot disable or shrink the official A/A gate."""
+
+    def _policy(self, **kwargs):
+        values = {
+            "profile": "standard",
+            "run_aa": "1",
+            "aa_control_enforce": "1",
+            "aa_blocks": OFFICIAL_AA_BLOCKS,
+            "aa_variant_indexes": "0,4",
+        }
+        values.update(kwargs)
+        return validate_official_pairwise_policy(**values)
+
+    def test_standard_run_aa_zero_fails(self):
+        payload = self._policy(run_aa="0")
+        self.assertFalse(payload["ok"])
+        self.assertIn("official_policy_violation:RUN_AA=0", payload["violations"])
+
+    def test_standard_aa_control_enforce_zero_fails(self):
+        payload = self._policy(aa_control_enforce="0")
+        self.assertFalse(payload["ok"])
+        self.assertIn(
+            "official_policy_violation:AA_CONTROL_ENFORCE=0", payload["violations"]
+        )
+
+    def test_standard_aa_blocks_too_small_fails(self):
+        payload = self._policy(aa_blocks=4)
+        self.assertFalse(payload["ok"])
+        self.assertIn("official_policy_violation:AA_BLOCKS=4", payload["violations"])
+
+    def test_standard_aa_blocks_odd_fails(self):
+        payload = self._policy(aa_blocks=5)
+        self.assertFalse(payload["ok"])
+        self.assertIn(
+            "official_policy_violation:AA_BLOCKS_odd=5", payload["violations"]
+        )
+        self.assertIn("official_policy_violation:AA_BLOCKS=5", payload["violations"])
+
+    def test_standard_missing_variant_0_fails(self):
+        payload = self._policy(aa_variant_indexes="4")
+        self.assertFalse(payload["ok"])
+        self.assertIn(
+            "official_policy_violation:missing_AA_variant:0", payload["violations"]
+        )
+
+    def test_standard_missing_variant_4_fails(self):
+        payload = self._policy(aa_variant_indexes="0")
+        self.assertFalse(payload["ok"])
+        self.assertIn(
+            "official_policy_violation:missing_AA_variant:4", payload["violations"]
+        )
+
+    def test_standard_correct_policy_passes(self):
+        payload = self._policy()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["official"])
+        self.assertEqual(payload["violations"], [])
+
+    def test_standard_does_not_silently_raise_blocks(self):
+        payload = self._policy(aa_blocks=4)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(OFFICIAL_AA_BLOCKS, 6)
+        self.assertIn("official_policy_violation:AA_BLOCKS=4", payload["violations"])
+        self.assertNotIn("AA_BLOCKS=6", "".join(payload["violations"]))
+
+    def test_smoke_run_abba_zero_is_allowed(self):
+        payload = self._policy(profile="smoke", run_aa="1", aa_blocks=4)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["official"])
+
+    def test_smoke_aa_blocks_four_is_allowed(self):
+        payload = validate_official_pairwise_policy(
+            profile="smoke",
+            run_aa="1",
+            aa_control_enforce="1",
+            aa_blocks=4,
+            aa_variant_indexes="0,4",
+        )
+        self.assertTrue(payload["ok"])
+
+    def test_targeted_aa_path_is_allowed(self):
+        payload = validate_official_pairwise_policy(
+            profile="smoke",
+            run_aa="1",
+            aa_control_enforce="1",
+            aa_blocks=4,
+            aa_variant_indexes="0,4",
+        )
+        targeted = (ROOT / "scripts/run_targeted_aa_validation.sh").read_text()
+        self.assertTrue(payload["ok"])
+        self.assertIn('AA_BLOCKS="${AA_BLOCKS:-4}"', targeted)
+        self.assertIn('RUN_ABBA="${RUN_ABBA:-0}"', targeted)
+        self.assertIn('RUN_LOAD_MATRIX="${RUN_LOAD_MATRIX:-0}"', targeted)
+
+    def test_campaign_script_validates_policy_before_capacity(self):
+        official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
+        self.assertIn("validate_official_pairwise_policy", official)
+        self.assertLess(
+            official.find("validate_official_pairwise_policy"),
+            official.find("=== pin exact measured versions ==="),
+        )
+        self.assertLess(
+            official.find("=== pin exact measured versions ==="),
+            official.find("run_capacity"),
+        )
+
+    def test_campaign_policy_snippet_exits_on_standard_bypass(self):
+        snippet = (
+            "import json, sys\n"
+            "from mqtt_client_bench.pairwise import validate_official_pairwise_policy\n"
+            "payload = validate_official_pairwise_policy(\n"
+            "    profile=sys.argv[1], run_aa=sys.argv[2],\n"
+            "    aa_control_enforce=sys.argv[3], aa_blocks=sys.argv[4],\n"
+            "    aa_variant_indexes=sys.argv[5],\n"
+            ")\n"
+            "if not payload['ok']:\n"
+            "    raise SystemExit(';'.join(payload['violations']))\n"
+            "print(json.dumps(payload))\n"
+        )
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(SRC)
+        fail = subprocess.run(
+            [sys.executable, "-", "standard", "0", "1", "6", "0,4"],
+            input=snippet,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertNotEqual(fail.returncode, 0)
+        self.assertIn(
+            "official_policy_violation:RUN_AA=0", fail.stderr + fail.stdout
+        )
+        ok = subprocess.run(
+            [sys.executable, "-", "standard", "1", "1", "6", "0,4"],
+            input=snippet,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(ok.returncode, 0)
+        smoke = subprocess.run(
+            [sys.executable, "-", "smoke", "1", "0", "4", "0,4"],
+            input=snippet,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        self.assertEqual(smoke.returncode, 0)
 
 
 
@@ -4674,6 +6741,443 @@ class MqttiumNativeNowaitTests(unittest.TestCase):
         adapter._client = _Client()
         with self.assertRaises(RuntimeError):
             adapter.publish_nowait("t", b"x", qos=0)
+
+
+class ExternalBrokerTelemetryTests(unittest.TestCase):
+    """Native/external Mosquitto must be sampled by PID; absence is not OK."""
+
+    def _pub_point(self):
+        return {"topology": "publisher_only", "duration_s": 12.0}
+
+    def _pub_worker(self, n=1000):
+        return {
+            "ok": True,
+            "role": "publisher",
+            "completed_success": n,
+            "completed_in_window": n,
+        }
+
+    def test_managed_container_headroom_unchanged(self):
+        from mqtt_client_bench.harness import validate_run
+
+        samples = [{"containers": {"mosquitto": {"cpu_pct": 40.0}}}]
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            samples,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=True,
+        )
+        self.assertEqual(out["status"], "valid")
+        self.assertEqual(out["broker_cpu_max_pct"], 40.0)
+        self.assertTrue(out["broker_telemetry_available"])
+        self.assertEqual(out["broker_telemetry_source"], "container")
+        self.assertIsNone(out.get("external_broker_pid"))
+
+    def test_external_without_pid_standard_fails_closed(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            [],
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertIn("broker_pid_required", out["reasons"])
+        self.assertFalse(out["broker_telemetry_available"])
+
+    def test_external_without_pid_smoke_is_tagged_not_assumed_ok(self):
+        from mqtt_client_bench.harness import validate_run
+        from mqtt_client_bench.pairwise import official_rtt_capacities
+
+        out = validate_run(
+            {**self._pub_point(), "non_comparable": True},
+            [self._pub_worker()],
+            None,
+            [],
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertIn("broker_telemetry_missing", out["reasons"])
+        doc = {
+            "results": [
+                {
+                    "point": {"protocol": "MQTTv311"},
+                    "runs": [
+                        {
+                            "status": "inconclusive",
+                            "primary_msgs_per_s": 20000.0,
+                            "publish_path": "native_async",
+                            "non_comparable": True,
+                            "reasons": ["broker_telemetry_missing"],
+                        }
+                    ],
+                },
+                {
+                    "point": {"protocol": "MQTTv5"},
+                    "runs": [
+                        {
+                            "status": "inconclusive",
+                            "primary_msgs_per_s": 20000.0,
+                            "publish_path": "native_async",
+                            "non_comparable": True,
+                            "reasons": ["broker_telemetry_missing"],
+                        }
+                    ],
+                },
+            ]
+        }
+        official = official_rtt_capacities(doc, "mqttium", required_valid=1)
+        self.assertFalse(official["ok"])
+        smoke = official_rtt_capacities(
+            doc, "mqttium", required_valid=1, allow_non_comparable=True
+        )
+        self.assertTrue(smoke["ok"])
+
+    def test_external_pid_cpu_observed_and_persisted(self):
+        from mqtt_client_bench.harness import validate_run
+
+        samples = [{"processes": {"broker": {"cpu_pct": 32.0, "pid": 4242, "alive": True}}}]
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            samples,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+            external_broker_pid=4242,
+        )
+        self.assertEqual(out["status"], "valid")
+        self.assertEqual(out["broker_cpu_max_pct"], 32.0)
+        self.assertTrue(out["broker_telemetry_available"])
+        self.assertEqual(out["broker_telemetry_source"], "process")
+        self.assertNotIn("broker_headroom_low", " ".join(out["reasons"]))
+
+    def test_external_pid_above_headroom_is_broker_limited(self):
+        from mqtt_client_bench.harness import validate_run
+
+        samples = [{"processes": {"broker": {"cpu_pct": 77.0, "pid": 4242}}}]
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            samples,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+            external_broker_pid=4242,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertEqual(out["bottleneck"], "broker_limited")
+        self.assertTrue(any(r.startswith("broker_headroom_low:") for r in out["reasons"]))
+        self.assertEqual(out["broker_cpu_max_pct"], 77.0)
+
+    def test_external_pid_below_headroom_has_no_broker_reason(self):
+        from mqtt_client_bench.harness import validate_run
+
+        samples = [{"processes": {"broker": {"cpu_pct": 12.0, "pid": 4242}}}]
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            samples,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+            external_broker_pid=4242,
+        )
+        self.assertEqual(out["status"], "valid")
+        self.assertFalse(any(str(r).startswith("broker_") for r in out["reasons"]))
+
+    def test_dead_or_unobserved_pid_fails_closed(self):
+        from mqtt_client_bench.harness import validate_run
+
+        samples = [{"processes": {"broker": None}}]
+        out = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            samples,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+            external_broker_pid=4242,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertIn("broker_pid_unobserved", out["reasons"])
+        self.assertFalse(out["broker_telemetry_available"])
+
+        missing_cpu = [{"processes": {"broker": {"pid": 4242, "alive": True, "cpu_pct": None}}}]
+        out2 = validate_run(
+            self._pub_point(),
+            [self._pub_worker()],
+            None,
+            missing_cpu,
+            sys_counters={"publish_received_delta": 1000},
+            managed_broker=False,
+            external_broker_pid=4242,
+        )
+        self.assertIn("broker_pid_unobserved", out2["reasons"])
+
+    def test_process_sampler_observes_cpu_and_dead_pid(self):
+        from mqtt_client_bench.telemetry import ProcessCpuSampler, inspect_external_broker_pid
+
+        sampler = ProcessCpuSampler(os.getpid())
+        first = sampler.sample()
+        self.assertIsNotNone(first)
+        busy = 0
+        for _ in range(2_000_000):
+            busy += 1
+        second = sampler.sample()
+        self.assertIsNotNone(second)
+        self.assertIsNotNone(second["cpu_pct"])
+        self.assertGreaterEqual(second["cpu_pct"], 0.0)
+        dead = ProcessCpuSampler(999_999_999)
+        self.assertIsNone(dead.sample())
+        inspected = inspect_external_broker_pid(os.getpid())
+        self.assertFalse(inspected["ok"])
+        self.assertEqual(inspected["reason"], "broker_pid_unobserved")
+
+    def test_resolve_pid_prefers_cli_over_env(self):
+        from mqtt_client_bench.telemetry import resolve_external_broker_pid
+
+        self.assertEqual(
+            resolve_external_broker_pid(9, environ={"BENCH_BROKER_PID": "3"}),
+            9,
+        )
+        self.assertEqual(
+            resolve_external_broker_pid(None, environ={"BENCH_BROKER_PID": "77"}),
+            77,
+        )
+        self.assertIsNone(resolve_external_broker_pid(None, environ={}))
+
+    def test_workflow_exports_broker_pid(self):
+        workflow = (ROOT / "scripts/github/benchmark-matched-load-arm64.yml").read_text()
+        self.assertIn('echo "BENCH_BROKER_PID=$pid" >> "$GITHUB_ENV"', workflow)
+        self.assertIn("broker.pid", workflow)
+
+
+class RttResponderValidityTests(unittest.TestCase):
+    """Responder failures must gate ranking RTT as strictly as matched-load misses."""
+
+    def _point(self, **extra):
+        point = {
+            "topology": "application_rtt",
+            "cadence": "loaded75",
+            "target_rate": 1000.0,
+            "duration_s": 10.0,
+            "shared_load_fraction": 0.75,
+        }
+        point.update(extra)
+        return point
+
+    def _initiator(self, timeouts=0, sent=10000, missed=0):
+        return {
+            "role": "rtt_initiator",
+            "ok": True,
+            "duration_s": 10.0,
+            "offered": sent + missed,
+            "sent_in_window": sent,
+            "completed_in_window": sent - timeouts,
+            "timeouts": timeouts,
+            "missed_due_to_backpressure": missed,
+        }
+
+    def _responder(self, **extra):
+        row = {
+            "role": "responder",
+            "ok": True,
+            "requests_received": 10000,
+            "responses": 10000,
+            "echo_refused": 0,
+            "echo_errors": 0,
+            "pending_at_end": 0,
+            "echo_unaccounted": 0,
+        }
+        row.update(extra)
+        return row
+
+    def test_echo_errors_invalidate_standard(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._point(),
+            [self._initiator(), self._responder(echo_errors=1, responses=9999)],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertTrue(any(r.startswith("rtt_responder_errors:") for r in out["reasons"]))
+
+    def test_pending_at_end_invalidates(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._point(),
+            [self._initiator(), self._responder(pending_at_end=2, responses=9998)],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertTrue(any(r.startswith("rtt_responder_pending:") for r in out["reasons"]))
+
+    def test_echo_refused_under_threshold_stays_valid(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._point(),
+            [
+                self._initiator(),
+                self._responder(echo_refused=10, responses=9990, requests_received=10000),
+            ],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(out["status"], "valid")
+        self.assertFalse(any("rtt_echo_refused" in r for r in out["reasons"]))
+
+    def test_echo_refused_above_0_2_percent_invalidates(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._point(),
+            [
+                self._initiator(),
+                self._responder(echo_refused=21, responses=9979, requests_received=10000),
+            ],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(out["status"], "inconclusive")
+        self.assertTrue(any(r.startswith("rtt_echo_refused:") for r in out["reasons"]))
+
+    def test_initiator_timeouts_use_the_same_0_2_percent_policy(self):
+        from mqtt_client_bench.harness import validate_run
+
+        quiet = validate_run(
+            self._point(),
+            [self._initiator(timeouts=10, sent=10000), self._responder()],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(quiet["status"], "valid")
+        loud = validate_run(
+            self._point(),
+            [self._initiator(timeouts=30, sent=10000), self._responder()],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertEqual(loud["status"], "inconclusive")
+        self.assertIn("rtt_timeouts", loud["reasons"])
+        # Previously valid at 1%; 50/10000 = 0.5% must now fail.
+        formerly_ok = validate_run(
+            self._point(),
+            [self._initiator(timeouts=50, sent=10000), self._responder()],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertIn("rtt_timeouts", formerly_ok["reasons"])
+
+    def test_invalidated_p50_cannot_enter_abba(self):
+        from mqtt_client_bench.metrics import abba_observation_usable
+
+        result = {
+            "status": "inconclusive",
+            "reasons": ["rtt_echo_refused:30/10000"],
+            "non_comparable": False,
+        }
+        self.assertFalse(abba_observation_usable(result, 0.40, profile="standard"))
+        self.assertFalse(abba_observation_usable(result, 0.40, profile="smoke"))
+
+    def test_smoke_single_refusal_on_tiny_window_stays_non_comparable(self):
+        from mqtt_client_bench.harness import validate_run
+
+        out = validate_run(
+            self._point(non_comparable=True, target_rate=4.0),
+            [
+                self._initiator(sent=40, timeouts=0),
+                self._responder(
+                    requests_received=40, responses=39, echo_refused=1, echo_unaccounted=0
+                ),
+            ],
+            None,
+            [],
+            managed_broker=True,
+        )
+        self.assertFalse(any("rtt_echo_refused" in r for r in out["reasons"]))
+
+    def test_native_mqttium_and_gmqtt_accounting_identity(self):
+        import threading
+
+        from mqtt_client_bench.roles.responder import (
+            admit_echo,
+            note_echo_error,
+            note_request,
+            responder_result_fields,
+        )
+        from mqtt_client_bench.roles.rtt_drive import select_rtt_drive
+
+        for client in ("mqttium", "gmqtt"):
+            plan = select_rtt_drive(client)
+            self.assertTrue(plan["native_async"], client)
+            self.assertTrue(plan["publish_sync_on_loop"], client)
+
+        state = {
+            "lock": threading.Lock(),
+            "requests_received": 0,
+            "responses": 0,
+            "echo_refused": 0,
+            "echo_errors": 0,
+        }
+        for mid in (1, None, 2):
+            note_request(state)
+            admit_echo(state, mid)
+        note_request(state)
+        note_echo_error(state)
+        fields = responder_result_fields(state, pending_at_end=0)
+        self.assertEqual(fields["requests_received"], 4)
+        self.assertEqual(fields["responses"], 2)
+        self.assertEqual(fields["echo_refused"], 1)
+        self.assertEqual(fields["echo_errors"], 1)
+        self.assertEqual(fields["echo_unaccounted"], 0)
+        self.assertEqual(
+            fields["requests_received"],
+            fields["responses"]
+            + fields["echo_refused"]
+            + fields["echo_errors"]
+            + fields["pending_at_end"],
+        )
+
+    def test_paho_facade_pending_is_zero(self):
+        from mqtt_client_bench.roles.rtt_drive import select_rtt_drive
+
+        plan = select_rtt_drive("paho")
+        self.assertEqual(plan["publish_path"], "sync_facade")
+        src = (ROOT / "src/mqtt_client_bench/roles/responder.py").read_text()
+        self.assertIn("pending_at_end=0", src)
+        self.assertIn("note_request(state)", src)
+
+    def test_gmqtt_nowait_none_is_refusal(self):
+        from mqtt_client_bench.adapters.gmqtt_async import GmqttAsyncAdapter
+
+        adapter = GmqttAsyncAdapter()
+
+        class _Client:
+            def publish(self, message):
+                raise RuntimeError("queue full")
+
+        adapter._client = _Client()
+        adapter._alloc_mid = lambda: 7
+        self.assertIsNone(adapter.publish_nowait("t", b"x", qos=0))
 
 
 if __name__ == "__main__":

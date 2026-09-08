@@ -214,8 +214,9 @@ def _latency_panels(docs: Sequence[ResultDoc], groups, meta: Dict[str, ClientMet
             "load that still produced a valid run. <strong>Read this within one client, not across "
             "them:</strong> each library is offered a fraction of <em>its own</em> capacity, so "
             "they are not under the same load. A published 2.95× latency gap collapsed to 1.24× "
-            "once the offered rate was matched. The cross-client comparison is "
-            "<code>puback_latency_fixed_rate</code>, which has not been run yet. "
+            "once the offered rate was matched. The cross-client comparisons are "
+            "<code>puback_latency_fixed_rate</code> and "
+            "<code>application_rtt_fixed_rate</code> (equal absolute offered rates). "
             "All three charts share one millisecond scale, so a span twice as long really is "
             "twice the latency."
         ),

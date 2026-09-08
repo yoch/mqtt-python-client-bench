@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import ssl
 from collections import deque
+from dataclasses import fields, is_dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
@@ -217,3 +219,34 @@ class MqttiumAsyncAdapter:
 
     def build_publish_properties(self, profile: str) -> Any:
         return MqttiumAdapter.build_publish_properties(self, profile)
+
+    def library_runtime_snapshot(self) -> Optional[dict]:
+        """Public ``AsyncClient.stats()`` after the measure window.
+
+        mqttium can dispatch a callback inline or queue it for a later loop
+        turn. Those two paths are a candidate for the ARM RTT bimodality
+        (~0.24 ms vs ~0.40 ms). Reading stats after T1 does not change the
+        samples. This is the library's public snapshot, not a private API.
+        """
+        client = self._client
+        if client is None:
+            return None
+        reader = getattr(client, "stats", None)
+        if not callable(reader):
+            return None
+        return _jsonify_library_stats(reader())
+
+
+def _jsonify_library_stats(value: Any) -> Any:
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            item.name: _jsonify_library_stats(getattr(value, item.name))
+            for item in fields(value)
+        }
+    if isinstance(value, Enum):
+        return value.name
+    if isinstance(value, (int, float, str, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonify_library_stats(item) for key, item in value.items()}
+    return str(value)

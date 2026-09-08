@@ -146,7 +146,7 @@ def performance_matrix_html(
         <div class="panel-head">
           <h2>Performance matrix</h2>
           <p class="hint">Median msg/s per scenario × MQTT protocol × client, comparable runs only. Rows are never mixed across protocols, and the best value is highlighted <strong>within each peer group</strong> — the vertical rules mark those groups, formed by I/O model. So the highest number in a row is often <em>not</em> highlighted: it belongs to another group. Stable and pre-release libraries share a group and compete directly. A client alone in its group is shown in outline and never crowned, because there is nothing to rank it against. A dotted underline marks a number the harness did not attribute to the client itself; hover any cell for its bottleneck, run count and spread.</p>
-          <p class="hint"><strong>Latency rows paced at a fraction of each client's own capacity</strong> (<code>puback_latency_qos1</code>, <code>application_rtt_qos1</code>) answer an intra-client question and are not a cross-client ranking — a faster client is offered a higher absolute rate. For equal-offer latency compare <code>puback_latency_fixed_rate</code>.</p>
+          <p class="hint"><strong>Latency rows paced at a fraction of each client's own capacity</strong> (<code>puback_latency_qos1</code>, <code>application_rtt_qos1</code>) answer an intra-client question and are not a cross-client ranking — a faster client is offered a higher absolute rate. For equal-offer latency compare <code>puback_latency_fixed_rate</code> and <code>application_rtt_fixed_rate</code>.</p>
           <p class="legend">{legend}</p>
         </div>
         <div class="table-wrap table-wrap-sticky-col">

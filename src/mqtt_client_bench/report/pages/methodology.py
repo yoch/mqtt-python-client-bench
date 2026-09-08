@@ -17,13 +17,36 @@ from ..shell import hero, page_shell
 
 _PROTOCOLS = """
         <ul class="prose">
-          <li><strong>Capacity</strong> — closed loop with a bounded outstanding window. The primary
-          metric is <code>completed_success</code> inside the measure window.</li>
-          <li><strong>Latency</strong> — open loop. Fractions of <em>that client's own</em> capacity
-          (<code>puback_latency_qos1</code>, <code>application_rtt_qos1</code>) answer how the client
-          behaves near its ceiling; they are not a cross-client comparison. Equal absolute offered
-          rates (<code>puback_latency_fixed_rate</code>) are the public cross-client latency
-          ranking.</li>
+          <li><strong>Capacity</strong> — closed loop, same configuration for every client.
+          The primary metric is <code>completed_success</code> inside the measure window.
+          Different ceilings are the measurement.</li>
+          <li><strong>Matched-load latency</strong> — the same absolute <code>target_rate</code>
+          for every client, either written on the point or resolved once from
+          <code>shared_load_fraction</code> × <code>C_common = min(capacities)</code>
+          of <em>that matrix or compare only</em>. A third, slower client
+          (Paho) must never size an asyncio pairwise grid.
+          Official matched-load cells fail closed above
+          <code>MATCHED_LOAD_BACKPRESSURE_MAX</code> (0.2&nbsp;% missed slots);
+          initiator timeouts and responder echo refusals use the same
+          <code>RTT_FAILURE_MAX</code> ceiling. A native broker is sampled by
+          PID (<code>BENCH_BROKER_PID</code>); missing process CPU on a standard
+          run is fail-closed. <code>$SYS</code> publisher reconciliation does
+          not apply to <code>application_rtt</code> (both roles publish);
+          broker CPU headroom still does.
+          relative-load characterization still uses 2&nbsp;%.
+          If official capacity is null, only calibrate runs voided
+          <em>exclusively</em> by <code>broker_headroom_low</code> may
+          contribute an observed lower bound; timeouts and mixed failures
+          stay unresolved. A client that cannot hold the shared point is
+          <code>offer_limited</code>; the rate is never lowered.
+          <code>puback_latency_fixed_rate</code> and
+          <code>application_rtt_fixed_rate</code>.</li>
+          <li><strong>Relative-load characterization</strong> — fractions of <em>that client's
+          own</em> capacity (<code>puback_latency_qos1</code>,
+          <code>application_rtt_qos1</code>). Marked
+          <strong>NOT CROSS-CLIENT COMPARABLE</strong>. <code>run compare</code> /
+          <code>run matrix</code> refuse them so a per-client
+          <code>load_fraction</code> cannot silently become an A/B ranking.</li>
           <li><strong>Integrity</strong> — bounded rate with a sequence header; counts missing,
           duplicate and out-of-order messages. Not a throughput race.</li>
         </ul>"""
@@ -55,7 +78,9 @@ _PEERS = """
           directly.</li>
           <li><code>asyncio_bridged</code> — an asyncio library driven through a private event-loop
           thread. That bridge has a cost, it is assumed and documented, and it is paid equally by
-          every bridged client.</li>
+          every bridged client. <code>io_model</code> names this architecture; it is not the
+          application-RTT drive. mqttium and gmqtt stay <code>asyncio_bridged</code> even when
+          <code>publish_path=native_async</code>.</li>
           <li><code>crt_event_loop</code> — a native (non-Python) engine; not comparable with
           pure-Python clients.</li>
         </ul>
@@ -100,7 +125,26 @@ _LIMITS = """
           <li>Netem profiles (<code>lan</code>/<code>wan</code>/<code>edge</code>) and smoke runs are
           diagnostic and marked non-comparable.</li>
           <li>Application RTT drives both sides with the same library, which amplifies stack cost on
-          purpose; it is not a neutral peer RTT.</li>
+          purpose; it is not a neutral peer RTT. mqttium and gmqtt take the
+          worker's native asyncio loop; Paho stays on its sync facade.
+          Bridged historical RTT is not evidence of a native ranking.
+          Read <code>publish_path</code> for the measured RTT path;
+          <code>io_model</code> is the adapter class.</li>
+          <li>Official ABBA / A/A alternates ABBA and BAAB. Consecutive
+          complementary blocks are one experimental unit in the log domain;
+          the centre is their geometric mean so a slot effect that maps to
+          <code>r</code> and <code>1/r</code> does not become a client
+          improvement. Same-client A/A fail-closes on completeness, on a
+          centre bias of at most 3&nbsp;%, and on pair-unit stability of at
+          most 3&nbsp;% (the same precision used to publish an A/B effect).
+          A CI that contains zero is not the gate: a precise 1&nbsp;% bias
+          may exclude zero, and a huge symmetric swing may cover it.
+          A/A runs before any A/B ranking. 90&nbsp;% of closed-loop RTT capacity is
+          not assumed to be a sustainable open-loop offer;
+          <code>MATCHED_LOAD_BACKPRESSURE_MAX</code> stays 0.2&nbsp;%.</li>
+          <li>The ARM three-way grid that sized <code>C_common</code> with Paho
+          is <code>superseded</code> / contextual only. Official replacement:
+          two pairwise campaigns in <code>scripts/run_pairwise_rtt_campaign.sh</code>.</li>
           <li>The 64 KiB and 1 MiB payload points are broker bound: the ranking inverts there and
           should not be read as a comparison between libraries.</li>
         </ul>"""

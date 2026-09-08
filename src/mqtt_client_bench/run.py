@@ -76,6 +76,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             load_profile_path=args.load_profile,
             host_profile_path=getattr(args, "host_profile", None),
             seed=args.seed,
+            broker_pid=getattr(args, "broker_pid", None),
         )
         if args.output:
             write_json(args.output, result)
@@ -103,6 +104,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         host_profile_path=getattr(args, "host_profile", None),
         seed=args.seed,
         publish_path=getattr(args, "publish_path", "native"),
+        broker_pid=getattr(args, "broker_pid", None),
     )
     if not args.output:
         # Compact stdout summary.
@@ -172,6 +174,7 @@ def cmd_matrix(args: argparse.Namespace) -> int:
             host_profile_path=getattr(args, "host_profile", None),
             seed=args.seed,
             variant_index=args.variant_index,
+            broker_pid=getattr(args, "broker_pid", None),
         )
         for client, doc in result["documents"].items():
             medians = [
@@ -282,8 +285,12 @@ def cmd_compare(args: argparse.Namespace) -> int:
         profile=args.profile,
         output=args.output,
         load_profile_path=args.load_profile,
+        load_profile_dir=getattr(args, "load_profile_dir", None),
         host_profile_path=getattr(args, "host_profile", None),
         variant_index=args.variant_index,
+        broker=getattr(args, "broker", None),
+        broker_pid=getattr(args, "broker_pid", None),
+        pacer_mode=getattr(args, "pacer_mode", None),
     )
     print(json.dumps({"verdict": payload.get("verdict"), "order": payload.get("order"), "points": len(payload.get("points") or [])}, indent=2))
     return 0
@@ -347,6 +354,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument("--client", choices=list(CLIENT_NAMES), default="paho", help="SUT MQTT client library")
     run_p.add_argument("--client-path", help="Optional checkout root for the selected client (A/B worktrees)")
     run_p.add_argument("--broker", help="External broker host:port")
+    run_p.add_argument(
+        "--broker-pid",
+        type=int,
+        help="PID of an external broker process to sample (or BENCH_BROKER_PID)",
+    )
     run_p.add_argument("--network", choices=sorted(PROFILES.keys()))
     run_p.add_argument("--load-profile", help="JSON from calibrate")
     run_p.add_argument(
@@ -373,6 +385,11 @@ def build_parser() -> argparse.ArgumentParser:
     matrix_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
     matrix_p.add_argument("--runs", type=int)
     matrix_p.add_argument("--broker", help="External broker host:port")
+    matrix_p.add_argument(
+        "--broker-pid",
+        type=int,
+        help="PID of an external broker process to sample (or BENCH_BROKER_PID)",
+    )
     matrix_p.add_argument("--network", choices=sorted(PROFILES.keys()))
     matrix_p.add_argument(
         "--load-profile-dir",
@@ -448,9 +465,29 @@ def build_parser() -> argparse.ArgumentParser:
     cmp_p.add_argument("--blocks", type=int, default=4)
     cmp_p.add_argument("--profile", choices=["standard", "smoke"], default="standard")
     cmp_p.add_argument("--variant-index", type=int, default=None, help="Compare a single variant index (default: all)")
+    cmp_p.add_argument("--broker", help="External broker host:port")
+    cmp_p.add_argument(
+        "--broker-pid",
+        type=int,
+        help="PID of an external broker process to sample (or BENCH_BROKER_PID)",
+    )
     cmp_p.add_argument("--load-profile")
+    cmp_p.add_argument(
+        "--load-profile-dir",
+        help="Directory of <client>-load.json calibrations (required for shared_load_fraction; do not pass a single --load-profile)",
+    )
     cmp_p.add_argument("--host-profile")
     cmp_p.add_argument("--output")
+    cmp_p.add_argument(
+        "--pacer-mode",
+        choices=["in_loop", "external"],
+        default="in_loop",
+        help=(
+            "Open-loop RTT offer calendar. in_loop is the historical asyncio "
+            "sleep on the SUT loop (causal control). external is a dedicated "
+            "process on the loadgen cpuset. Closed-loop capacity ignores this."
+        ),
+    )
     cmp_p.set_defaults(func=cmd_compare)
 
     report_p = sub.add_parser("report", help="Build static HTML reports from results/*.json")
