@@ -4,6 +4,28 @@ A benchmark result is not simply **valid** or **invalid**. The same run can be
 trustworthy for a paired A/B comparison and untrustworthy as an absolute
 baseline. `mqtt_client_bench.quality` makes that distinction explicit.
 
+## Practical profiles
+
+Day-to-day regression work should be short enough to use routinely. Do not pay
+for publication-grade A/A replication on every code change.
+
+- `scripts/run_pairwise_rtt_daily.sh`: the default regression probe. Smoke
+  windows, external pacer, two balanced ABBA/BAAB blocks, MQTTv311 at 25% and
+  50% of pair-specific `C_common`, no A/A by default.
+- `scripts/run_pairwise_rtt_quick.sh`: broader practical sweep. Same mechanics,
+  25% and 50% under MQTTv311 and MQTTv5, no A/A by default.
+- `scripts/run_pairwise_rtt_campaign.sh` with `PROFILE=standard`: exceptional
+  deep/publication validation. It keeps the strict A/A gate and larger
+  replication budget.
+
+75% and 90% of closed-loop RTT capacity are useful saturation/backpressure
+probes but are not routine latency-ranking points. Run them explicitly when the
+question is behavior near saturation.
+
+Re-run A/A when the harness, pacer, runner or measurement methodology changes,
+or when a borderline A/B result needs deeper qualification. It is not a tax on
+every daily comparison.
+
 ## Inspect an A/A control
 
 ```bash
@@ -34,9 +56,10 @@ The one-line output reports four independent questions:
 
 `paired_version_ab_control`
 : Suitable as the A/A control before an interleaved before/after comparison of
-  two versions of the same client. This is the preferred method for an MQTTium
-  release candidate: compare old and new code in the same campaign instead of
-  comparing two absolute baselines measured hours or days apart.
+  two versions of the same client. This is the preferred method for a deep
+  MQTTium release-candidate qualification: compare old and new code in the same
+  campaign instead of comparing two absolute baselines measured hours or days
+  apart.
 
 `absolute_baseline`
 : Suitable for quoting an absolute latency baseline and comparing it with an
@@ -89,20 +112,44 @@ The absolute diagnostic therefore computes the geometric center of each
 complete four-slot block and compares those centers to their log-median with a
 log-symmetric distance.
 
+## Runtime anomaly telemetry
+
+The benchmark records runtime state to explain intermittent regimes without
+putting extra work in the timed hot path. In addition to CPU time, voluntary
+and involuntary context switches and client `stats()` snapshots, RTT workers
+record Linux process page-fault deltas (`ru_minflt`, `ru_majflt`) around the
+measurement window and a compact process-layout snapshot when available.
+
+Treat these as **correlates/diagnostics**, not validity gates. A future MQTTium
+release may expose additional CPython/runtime anomaly counters through its
+public `AsyncClient.stats()` surface; those should flow into the existing
+library snapshot rather than requiring benchmark-specific MQTTium internals.
+
+Normal system ASLR is the representative configuration. Disabling ASLR with
+`setarch -R` is permitted only as an explicit causal experiment and such runs
+must remain non-comparable/non-publishable.
+
 ## Release-candidate workflow
 
-For a new MQTTium RC, prefer this order:
+For a new MQTTium RC, prefer this practical order:
 
-1. Freeze one benchmark SHA, broker, host profile and absolute target rate.
-2. Qualify external-pacer A/A at the relevant load point.
-3. If the A/A evidence is usable for `paired_version_ab_control`, run old and
-   new MQTTium versions **interleaved in one ABBA campaign**.
-4. Report the relative A/B result together with stimulus quality, pair-unit
-   stability and absolute block-center drift.
-5. Use runtime telemetry (`effects`, writer batching, process CPU/context
-   switches, temporal trace) to estimate what remains to optimize.
-6. Do not promote a result to an independently comparable absolute baseline
+1. Freeze the benchmark SHA, broker, host profile and comparison design.
+2. Run a short exact-source old/new interleaved comparison first (`daily` or a
+   similarly targeted `version_compare`). Large effects and pathological
+   runtime regimes should be visible without a multi-hour campaign.
+3. Inspect stimulus quality plus runtime telemetry (`effects`, writer batching,
+   process CPU/context switches/page faults/layout and MQTTium `stats()`).
+4. If the result is small/borderline, the runner changed, or the harness itself
+   changed, qualify A/A and increase replication deliberately.
+5. Use `quick` for the broader 25/50% dual-protocol sweep when needed.
+6. Reserve `PROFILE=standard` for deep/publication evidence, not routine RC
+   iteration.
+7. Do not promote a result to an independently comparable absolute baseline
    unless `absolute_baseline` is also present.
+
+For exact-source MQTTium campaigns, `scripts/run_mqttium_campaign.sh` accepts an
+exact `MQTTIUM_GIT_SHA` or `MQTTIUM_CLIENT_PATH` and isolates labelled results;
+do not silently benchmark a moving branch tip when doing before/after work.
 
 ## Retry policy
 
