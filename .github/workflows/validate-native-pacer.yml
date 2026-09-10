@@ -1,0 +1,106 @@
+name: Validate native pacer candidate
+on:
+  push:
+    branches: [work/validate-native-pacer-20260910]
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      BASE_SHA: ef2382cf8ed20e5df4288102c1ae17e791a25d68
+      EXPECTED_TREE: 297c754b5b9ebea961526bee7001577c85dbed24
+      TARGET_BRANCH: fix/native-external-pacer-readiness
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ef2382cf8ed20e5df4288102c1ae17e791a25d68
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Reconstruct and verify exact locally tested candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          OUT=$(mktemp -d "$RUNNER_TEMP/native-pacer-validation-XXXXXX")
+          echo "OUT=$OUT" >> "$GITHUB_ENV"
+          test "$(git rev-parse HEAD)" = "$BASE_SHA"
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, subprocess, urllib.request, zlib
+          req=urllib.request.Request(
+              'https://api.github.com/repos/yoch/mqtt-python-client-bench/git/blobs/4086ec1884a561e5253b3b12185c5dc7d07baba1',
+              headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          obj=json.load(urllib.request.urlopen(req,timeout=30))
+          compressed=base64.b64decode(obj['content'])
+          assert hashlib.sha256(compressed).hexdigest()=='3b4b79913d55f33e2db0df1383b1dc05f9218f4f98bf0c124e5ae3dc73429f61'
+          patch=zlib.decompress(compressed)
+          assert hashlib.sha256(patch).hexdigest()=='3de754a196c1ec155b1afa35660ebb61c890b532747a44bda4c08b025feebe94'
+          path=pathlib.Path(os.environ['RUNNER_TEMP'])/'native-pacer-verified.patch'
+          path.write_bytes(patch)
+          subprocess.run(['git','apply','--check',str(path)],check=True)
+          subprocess.run(['git','apply',str(path)],check=True)
+          PY
+          git add -- docs/EXTERNAL_PACER_ADMISSION.md src/mqtt_client_bench/external_admission.py src/mqtt_client_bench/provenance.py src/mqtt_client_bench/roles/rtt_initiator.py tests/test_external_admission.py tests/test_rtt_cooperation.py
+          test "$(git write-tree)" = "$EXPECTED_TREE"
+          git diff --cached --stat
+          git diff --cached > "$OUT/candidate.diff"
+          git write-tree > "$OUT/tree.txt"
+      - name: Install full normal CI dependencies
+        run: python -m pip install -e '.[dev,all,zmqtt,mqttium]'
+      - name: Full repository suite
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -m unittest discover -s tests -p 'test_*.py' -v 2>&1 | tee "$OUT/tests.txt"
+      - name: Adverse selection with warnings as errors
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python -W error -m unittest tests.test_external_admission tests.test_rtt_cooperation tests.test_rtt_trace_reservations -v 2>&1 | tee "$OUT/adverse.txt"
+      - name: Publish only the exact validated tree to a new branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, subprocess, urllib.error, urllib.request
+          api='https://api.github.com/repos/yoch/mqtt-python-client-bench/'
+          def request(endpoint,body=None):
+              req=urllib.request.Request(api+endpoint,
+                  data=None if body is None else json.dumps(body).encode(),
+                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],
+                           'Accept':'application/vnd.github+json','Content-Type':'application/json'})
+              with urllib.request.urlopen(req,timeout=30) as response:
+                  return json.load(response)
+          base=os.environ['BASE_SHA']; branch=os.environ['TARGET_BRANCH']
+          assert request('git/ref/heads/main')['object']['sha']==base, 'base moved'
+          assert subprocess.check_output(['git','write-tree'],text=True).strip()==os.environ['EXPECTED_TREE']
+          assert subprocess.check_output(['git','diff','--name-only'],text=True).strip()=='', 'unstaged tracked changes'
+          try:
+              request('git/ref/heads/'+branch)
+          except urllib.error.HTTPError as e:
+              if e.code!=404: raise
+          else:
+              raise RuntimeError('target branch already exists; no overwrite')
+          paths=['docs/EXTERNAL_PACER_ADMISSION.md','src/mqtt_client_bench/external_admission.py',
+                 'src/mqtt_client_bench/provenance.py','src/mqtt_client_bench/roles/rtt_initiator.py',
+                 'tests/test_external_admission.py','tests/test_rtt_cooperation.py']
+          tree=request('git/trees',{'base_tree':'e746db63c093bbb26ca90bca1df76e8cf5300b06',
+              'tree':[{'path':p,'mode':'100644','type':'blob','content':pathlib.Path(p).read_text()} for p in paths]})
+          assert tree['sha']==os.environ['EXPECTED_TREE'], 'remote tree differs'
+          commit=request('git/commits',{'message':'fix: decouple native external pacing from coroutine catch-up\n\nAdmit one token per readiness callback. Preserve deadlines, bounded async admission, cancellation and complete accounting. Add deadline-to-response telemetry and deterministic socket tests. Full repository CI and adverse tests pass on exact tree '+tree['sha']+'. No MQTTium change or benchmark threshold change.',
+              'tree':tree['sha'],'parents':[base]})
+          assert request('git/ref/heads/main')['object']['sha']==base, 'base moved before ref creation'
+          request('git/refs',{'ref':'refs/heads/'+branch,'sha':commit['sha']})
+          assert request('git/ref/heads/'+branch)['object']['sha']==commit['sha']
+          pathlib.Path(os.environ['OUT'],'publication.json').write_text(json.dumps(
+              {'commit':commit['sha'],'tree':tree['sha'],'base':base,'branch':branch},indent=2))
+          print('Published exact tested candidate',commit['sha'],tree['sha'])
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: native-pacer-validation
+          path: ${{ env.OUT }}/
+          retention-days: 30
