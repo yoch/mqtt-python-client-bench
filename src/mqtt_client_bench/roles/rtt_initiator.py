@@ -14,6 +14,8 @@ import time
 
 from mqtt_client_bench.adapters.registry import adapter_identity
 from mqtt_client_bench.control import barrier_client_session, touch, write_json
+from mqtt_client_bench.external_admission import consume_external_tokens
+from mqtt_client_bench.metrics import latency_summary
 from mqtt_client_bench.pacing import (
     DEFAULT_PACER_RECEIVE_GRACE_NS,
     DEFAULT_PACER_SPIN_NS,
@@ -212,6 +214,8 @@ def _result_body(
         "msgs_per_s": completed / window,
         **identity,
     }
+    if state.get("external_admission"):
+        body["external_admission"] = state["external_admission"]
     if runtime:
         body["runtime"] = runtime
     if pacing:
@@ -219,6 +223,21 @@ def _result_body(
     if temporal_trace:
         body["temporal_trace"] = temporal_trace
         body["temporal_trace_metric"] = "application_e2e_latency"
+        # Off the measured path. This includes queuing BEFORE publish(), unlike
+        # the unchanged primary application RTT. Never pool with reservoir RTTs.
+        deadlines = temporal_trace.get("scheduled_deadline_ns") or []
+        receives = temporal_trace.get("receive_ns") or []
+        releases = temporal_trace.get("publish_call_ns") or []
+        body["scheduled_response_latency"] = {
+            **latency_summary([r - d for d, r in zip(deadlines, receives) if d > 0 and r >= d]),
+            "sampling": "every_Nth_completed_request",
+            "stride": temporal_trace.get("stride"),
+        }
+        body["scheduled_admission_delay"] = {
+            **latency_summary([p - d for d, p in zip(deadlines, releases) if d > 0 and p >= d]),
+            "sampling": "every_Nth_completed_request",
+            "stride": temporal_trace.get("stride"),
+        }
     return body
 
 
@@ -400,23 +419,6 @@ def _recv_token_sync(sock, until, until_ns=None, recv_until_ns=None) -> PaceToke
     try:
         data = sock.recv(64)
     except (TimeoutError, socket.timeout, BlockingIOError, OSError):
-        return None
-    return unpack_token(data)
-
-
-async def _recv_token_async(loop, sock, until, until_ns=None, recv_until_ns=None) -> PaceToken | None:
-    bound_ns = recv_until_ns if recv_until_ns is not None else until_ns
-    if bound_ns is not None:
-        remaining = (int(bound_ns) - time.monotonic_ns()) / 1_000_000_000.0
-    else:
-        remaining = until - time.perf_counter()
-    if remaining <= 0:
-        return None
-    try:
-        data = await asyncio.wait_for(
-            loop.sock_recv(sock, 64), timeout=min(0.05, max(remaining, 0.0))
-        )
-    except (asyncio.TimeoutError, OSError):
         return None
     return unpack_token(data)
 
@@ -927,6 +929,101 @@ async def _admit_native(adapter, topic, payload, qos, *, sync_on_loop: bool):
     return 0 if mid is not None else 1
 
 
+
+async def _send_external_async(
+    adapter, state, topic, qos, run_id, outstanding, until, sequence_start,
+    *, sync_on_loop, pacer_sock, until_ns, expected_tokens, receive_grace_ns,
+):
+    """Readiness-driven offers: independent calendar, no SUT-side pacing loop."""
+    if outstanding < 1:
+        raise ValueError("outstanding must be positive")
+    measure = state["phase"] == "measure"
+    recorder = state.get("pace_recorder") if measure else None
+    seq = sequence_start
+    offered = missed = 0
+    if until_ns is None:
+        bound = time.monotonic_ns() + max(0, int((until - time.perf_counter()) * 1e9))
+    else:
+        bound = int(until_ns) + max(0, int(receive_grace_ns or 0))
+
+    def prepare(token, receiver_ns):
+        nonlocal seq, offered, missed
+        if recorder is not None:
+            recorder.record_receiver(token, receiver_ns, None)
+        if measure:
+            offered += 1
+        if len(state["inflight"]) >= outstanding:
+            if measure:
+                missed += 1
+            return None  # This offer is retired, never retried after a response.
+        seq += 1
+        send_ns = time.perf_counter_ns()
+        payload = encode_header(run_id, 1, seq, seq, send_ns)
+        if recorder is not None:
+            recorder.note_receiver_to_publish(receiver_ns, send_ns)
+        _reserve_trace(state, seq, token, receiver_ns, send_ns)
+        with state["lock"]:
+            state["publishing_seq"] = seq
+            state["inflight"][seq] = send_ns
+        return seq, send_ns, payload
+
+    def settle(item, accepted):
+        sequence, send_ns, _payload = item
+        with state["lock"]:
+            state["publishing_seq"] = None
+            early = state["early_rtt"].pop(sequence, None)
+            if accepted:
+                if measure:
+                    state["sent_in_window"] += 1
+                    if early is not None:
+                        state["latencies_ns"].add(early)
+                        state["completed_in_window"] += 1
+                        _commit_trace(state, sequence, send_ns, send_ns + early)
+            else:
+                state["inflight"].pop(sequence, None)
+                _drop_trace(state, sequence)
+                if early is not None and measure:
+                    state["retracted_completions"] = int(state.get("retracted_completions") or 0) + 1
+
+    def submit(token, receiver_ns):
+        item = prepare(token, receiver_ns)
+        if item is None:
+            return
+        accepted = False
+        try:
+            mid = adapter.publish_nowait(topic, payload=item[2], qos=qos, retain=False)
+            accepted = mid is not None
+        finally:
+            settle(item, accepted)
+
+    async def submit_async(token, receiver_ns):
+        item = prepare(token, receiver_ns)
+        if item is None:
+            return
+        accepted = False
+        try:
+            mid = await adapter.publish(topic, payload=item[2], qos=qos, retain=False)
+            accepted = mid is not None
+        finally:
+            settle(item, accepted)
+
+    state["slot_free"] = None  # External offers never wait for a response slot.
+    try:
+        driver = await consume_external_tokens(
+            pacer_sock, submit if sync_on_loop else submit_async,
+            until_ns=bound, expected_tokens=expected_tokens,
+            asynchronous=not sync_on_loop,
+        )
+        if measure:
+            state["external_admission"] = driver
+    finally:
+        if measure:
+            state["offered"] = int(state.get("offered") or 0) + offered
+            state["missed_due_to_backpressure"] = (
+                int(state.get("missed_due_to_backpressure") or 0) + missed
+            )
+
+
 async def _send_loop_async(
     adapter,
     state,
@@ -951,6 +1048,14 @@ async def _send_loop_async(
     remains the causal control. ``external`` waits on datagram tokens whose
     schedule ran in another process.
     """
+    if target_rate and target_rate > 0 and pacer_mode == "external":
+        if pacer_sock is None:
+            raise ValueError("external pacing requires a receiver socket")
+        return await _send_external_async(
+            adapter, state, topic, qos, run_id, outstanding, until, sequence_start,
+            sync_on_loop=sync_on_loop, pacer_sock=pacer_sock, until_ns=until_ns,
+            expected_tokens=expected_tokens, receive_grace_ns=receive_grace_ns,
+        )
     interval = (1.0 / target_rate) if target_rate and target_rate > 0 else 0.0
     open_loop = interval > 0
     next_send = time.perf_counter()
@@ -962,45 +1067,15 @@ async def _send_loop_async(
     interval_ns = interval_ns_for_rate(target_rate) if open_loop else 0
     token_index = 0
     anchor_ns = time.perf_counter_ns()
-    external = open_loop and pacer_mode == "external" and pacer_sock is not None
     slot_free = asyncio.Event()
     state["slot_free"] = slot_free
     loop = asyncio.get_running_loop()
-    ext_received = 0
-    grace_ns = int(receive_grace_ns or 0)
-    recv_until_ns = (int(until_ns) + grace_ns) if (external and until_ns is not None) else until_ns
     while True:
-        if external and until_ns is not None:
-            received = recorder.tokens_received if recorder is not None else ext_received
-            if not receive_window_open(
-                now_ns=time.monotonic_ns(),
-                nominal_until_ns=int(until_ns),
-                grace_ns=grace_ns,
-                tokens_received=received,
-                expected_tokens=expected_tokens,
-            ):
-                break
-        elif _phase_expired(until, until_ns):
+        if _phase_expired(until, until_ns):
             break
         token = None
         receiver_ns = 0
-        if external:
-            token = await _recv_token_async(loop, pacer_sock, until, until_ns, recv_until_ns)
-            if token is None:
-                continue
-            receiver_ns = time.monotonic_ns()
-            ext_received += 1
-            if recorder is not None:
-                recorder.record_receiver(token, receiver_ns, None)
-            if len(state["inflight"]) >= outstanding:
-                if measure:
-                    n_offered += 1
-                    n_missed += 1
-                # Charge this due offer as missed before allowing replies and
-                # deferred writes to run. A ready socket/publish need not suspend.
-                await asyncio.sleep(0)
-                continue
-        elif open_loop:
+        if open_loop:
             now = time.perf_counter()
             if now < next_send:
                 await asyncio.sleep(min(0.001, next_send - now))
