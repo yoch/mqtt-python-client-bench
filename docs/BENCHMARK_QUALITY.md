@@ -160,15 +160,47 @@ A client-side overload/backpressure result by itself is not a retry reason; if a
 pacer temporal failure occurred at the same time, retry because the stimulus was
 invalid and retain the original attempt as evidence.
 
-## Known diagnostic limitation
+## Historical temporal-trace limitation
 
-The bounded temporal RTT trace is **diagnostic only** and is not used for the
-published p50/p95/p99, run validity, ABBA ratios or ranking verdict. A discovered
-sampling bug can cause the retained trace to over-represent the beginning of a
-run instead of covering the full measure window at the advertised stride. Until
-that sampler is corrected, use the trace for qualitative inspection only and do
-not infer the timing of a mid-run regime switch from its saved sequence range.
+The bounded temporal RTT trace is diagnostic only and is not itself used for
+p50/p95/p99, run validity, ABBA ratios or ranking verdicts. Before the correction
+below, unsampled completions could fill a prefix instead of covering the full
+window. Do not infer whole-window dynamics from those historical trace files.
+Although the latency reservoir and reducer are separate, the buggy trace's
+changing write cost could perturb the workload being observed.
 
-This limitation does not affect the main latency reservoir or the paired
-comparison reducer, so it is intentionally not a blocker for normal benchmark
-campaigns.
+## RTT scheduling and trace corrections (September 2026)
+
+The native RTT initiator now yields once with `asyncio.sleep(0)` after counting
+an open-loop offer as missed because its outstanding window is full. This is
+not a wait for a reply and does not retry that offer. The absolute calendar,
+external token consumption, timeout rules, and quality thresholds are unchanged.
+The same guard covers the overdue in-loop path. Warmup must cooperate as well,
+without adding its counters to the measured window. Unsaturated publication does
+not gain an unconditional scheduling hop.
+
+This prevents a buffered pacer socket and a non-suspending native publish path
+from consuming tokens until the end of the phase without servicing readable
+reply sockets or deferred writes. A syntactic `await` alone does not ensure
+progress of other tasks. Regression tests use real ready sockets without
+Mosquitto or syscall tracing and verify bounded admission, reply progress,
+cancellation, and exact offer/miss accounting.
+
+The initiator also commits a temporal-trace row only when the send path reserved
+that sequence. Previously, unsampled completions filled the first 4096 rows,
+usually with missing pacing metadata, instead of covering the full window.
+Dropped reservations leave holes; they are not replaced by unsampled messages.
+This changes trace completeness and removes a mid-window instrumentation cost
+change when that premature prefix filled up.
+
+Both fixes change the automatically computed harness fingerprint. Do not pool
+old and new measurements or reinterpret old trace files as full-window samples.
+No historical result, percentile estimator, or acceptance threshold is rewritten.
+These correctness fixes alone do not establish that the normal RTT latency modes
+have disappeared; performance qualification remains a separate experiment.
+
+**Unchanged workload limitation:** the application-RTT send loops currently emit
+the 40-byte correlation header, even when the scenario names `telemetry256`.
+This patch deliberately preserves that payload to isolate scheduling and sampling.
+A later workload-size correction must be qualified separately; historical RTT
+results must not be described as having a 256-byte application payload.
