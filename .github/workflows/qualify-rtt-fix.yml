@@ -1,0 +1,140 @@
+name: Qualify RTT harness fixes
+on:
+  push:
+    branches: [work/qualify-rtt-fix-20260910]
+permissions:
+  contents: read
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: '3.12'
+            runner: ubuntu-24.04
+            full: true
+          - python: '3.14'
+            runner: ubuntu-24.04-arm
+            full: false
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: src
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: tooling
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 7453df65fbdb2c3c684d7ce55d55502b9820b7e2
+          persist-credentials: false
+          path: source
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Reconstruct and verify the exact locally tested candidate
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 7453df65fbdb2c3c684d7ce55d55502b9820b7e2
+          python - <<'PY'
+          import base64, gzip, hashlib, pathlib, subprocess
+          encoded = pathlib.Path('../tooling/.work/rtt-fix.patch.gz.b64').read_text().strip()
+          encoded = encoded.replace('BOS3FKoH+VWI/q', 'BOS3FKoH+WI/q').replace('HXbHXNbnZGD', 'HXbHXNnZGD')
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'b450ac57e6accb57b255af0e0d2f8c5fb550e2fabdedd465e84bd66c5ccac858'
+          subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
+          PY
+          test "$(git write-tree)" = e746db63c093bbb26ca90bca1df76e8cf5300b06
+          git diff --cached --check
+      - name: Install normal full-suite dependencies
+        if: matrix.full
+        working-directory: source
+        run: python -m pip install -e '.[dev,all,zmqtt,mqttium]'
+      - name: Focused regressions, warnings as errors
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -W error -m unittest tests.test_rtt_cooperation tests.test_rtt_trace_reservations tests.test_rtt_initiator tests.test_pacing tests.test_temporal_trace tests.test_quality tests.test_version_compare -v > focused.log 2>&1
+          cat focused.log
+      - name: Full existing discovery suite
+        if: matrix.full
+        working-directory: source
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -p 'test_*.py' -v > full.log 2>&1
+          tail -25 full.log
+      - name: Read back candidate and export only the four changed files
+        working-directory: source
+        env:
+          EXPORT_FILES: ${{ matrix.full }}
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test "$(git write-tree)" = e746db63c093bbb26ca90bca1df76e8cf5300b06
+          if test "$EXPORT_FILES" = true; then
+            python - <<'PY'
+          import pathlib, os, shutil
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'candidate-files'
+          for name in ('src/mqtt_client_bench/roles/rtt_initiator.py','tests/test_rtt_cooperation.py','tests/test_rtt_trace_reservations.py','docs/BENCHMARK_QUALITY.md'):
+              target=root/name; target.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(name,target)
+          PY
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: matrix.full && success()
+        with:
+          name: validated-candidate-files
+          path: ${{ runner.temp }}/candidate-files/
+          retention-days: 7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: rtt-fix-tests-${{ matrix.runner }}-${{ matrix.python }}
+          path: source/*.log
+          retention-days: 14
+  store-objects:
+    needs: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: validated-candidate-files
+          path: files
+      - name: Store verified blobs and tree, never update refs or merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,urllib.request
+          expected={
+              'src/mqtt_client_bench/roles/rtt_initiator.py':'c038906e7ace0975908544037b2cec56f5bc51d5',
+              'tests/test_rtt_cooperation.py':'8ef4264847f7bb651d50f35a4bd7ca47003872a1',
+              'tests/test_rtt_trace_reservations.py':'50b8ecce667ffe52d01b275cfa02d5225bb637c4',
+              'docs/BENCHMARK_QUALITY.md':'0c764ab29ad91dd1a29ec0b8eda708b7a89e23d4',
+          }
+          def post(endpoint,payload):
+              request=urllib.request.Request('https://api.github.com/repos/yoch/mqtt-python-client-bench/git/'+endpoint,data=json.dumps(payload).encode(),headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/json','Accept':'application/vnd.github+json'},method='POST')
+              with urllib.request.urlopen(request,timeout=30) as response:
+                  return json.load(response)
+          entries=[]
+          for name,sha in expected.items():
+              content=(pathlib.Path('files')/name).read_bytes()
+              assert hashlib.sha1(f'blob {len(content)}\0'.encode()+content).hexdigest()==sha,name
+              result=post('blobs',{'content':content.decode(),'encoding':'utf-8'})
+              assert result['sha']==sha
+              entries.append({'path':name,'mode':'100644','type':'blob','sha':sha})
+          tree=post('trees',{'base_tree':'023cb88187dcc80bb88be1f2c20a7c23dd350d52','tree':entries})
+          assert tree['sha']=='e746db63c093bbb26ca90bca1df76e8cf5300b06'
+          pathlib.Path('published-tree.json').write_text(json.dumps({'sha':tree['sha'],'blobs':expected},indent=2))
+          print('Verified tree:',tree['sha'],'No branch, commit or PR writes.')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rtt-fix-tree
+          path: published-tree.json
+          retention-days: 14
