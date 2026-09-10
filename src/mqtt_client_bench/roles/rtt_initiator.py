@@ -252,8 +252,14 @@ def _commit_trace(state, seq, send_ns, receive_ns) -> None:
     tracer = state.get("temporal_trace")
     if tracer is None:
         return
-    pending = state.get("trace_pending") or {}
-    meta = pending.pop(seq, None) or {}
+    pending = state.get("trace_pending")
+    if pending is None:
+        return
+    meta = pending.pop(seq, None)
+    if meta is None:
+        # Only send-path reservations belong in this every-Nth trace. Filling
+        # missing metadata with zeros instead sampled the first max_points RTTs.
+        return
     tracer.add(
         sequence=int(seq),
         send_ns=int(send_ns),
@@ -990,6 +996,9 @@ async def _send_loop_async(
                 if measure:
                     n_offered += 1
                     n_missed += 1
+                # Charge this due offer as missed before allowing replies and
+                # deferred writes to run. A ready socket/publish need not suspend.
+                await asyncio.sleep(0)
                 continue
         elif open_loop:
             now = time.perf_counter()
@@ -1008,6 +1017,9 @@ async def _send_loop_async(
                 if measure:
                     n_offered += 1
                     n_missed += 1
+                # Charge this due offer as missed before allowing replies and
+                # deferred writes to run. A ready socket/publish need not suspend.
+                await asyncio.sleep(0)
                 continue
         elif len(state["inflight"]) >= outstanding:
             slot_free.clear()
