@@ -123,7 +123,9 @@ class RttCooperationTests(unittest.IsolatedAsyncioTestCase):
                                     state["offered"],
                                     adapter.calls + state["missed_due_to_backpressure"],
                                 )
-                                self.assertGreater(state["missed_due_to_backpressure"], 0)
+                                # Ready replies now progress without requiring a full
+                                # window. Forced saturation is checked separately below.
+                                self.assertGreaterEqual(state["missed_due_to_backpressure"], 0)
                             else:
                                 self.assertEqual(state["offered"], 0)
                                 self.assertEqual(state["sent_in_window"], 0)
@@ -155,7 +157,8 @@ class RttCooperationTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(rtt.asyncio, "sleep", side_effect=observed_sleep):
             await self._drive(adapter, state, 32, 1)
         self.assertTrue(heartbeat)
-        self.assertEqual(delays, [0] * 32)
+        # Each readiness callback returns; no arbitrary sleep is needed.
+        self.assertEqual(delays, [])
         self.assertEqual(state["offered"], 32)
         self.assertEqual(state["missed_due_to_backpressure"], 32)
         self.assertEqual(adapter.calls, 0)
@@ -203,7 +206,11 @@ class RttCooperationTests(unittest.IsolatedAsyncioTestCase):
         state = _state()
         state["inflight"][999] = 1
         adapter = _Adapter(lambda payload: self.fail("missed offer was retried"))
-        asyncio.get_running_loop().call_soon(state["inflight"].clear)
+        class Recorder:
+            def record_receiver(self, *args):
+                # Free the slot only AFTER the current due offer was observed.
+                asyncio.get_running_loop().call_soon(state["inflight"].clear)
+        state["pace_recorder"] = Recorder()
         await self._drive(adapter, state, 1, 1)
         self.assertEqual(state["inflight"], {})
         self.assertEqual(state["offered"], 1)
@@ -237,7 +244,32 @@ class RttCooperationTests(unittest.IsolatedAsyncioTestCase):
                         [] if refused else [2, 4, 6, 8],
                     )
 
-    async def test_unsaturated_immediate_completion_adds_no_scheduling_hop(self):
+    async def test_unsaturated_backlog_cannot_bypass_selector_turns(self):
+        loop = asyncio.get_running_loop()
+        original_select = loop._selector.select
+        turn = 0
+        turns = []
+
+        def select(timeout=None):
+            nonlocal turn
+            turn += 1
+            return original_select(timeout)
+
+        state = _state()
+
+        def deliver(payload):
+            turns.append(turn)
+            rtt._on_message(state, SimpleNamespace(payload=payload))
+
+        with patch.object(loop._selector, "select", side_effect=select):
+            await self._drive(_Adapter(deliver), state, 32, 64)
+        self.assertEqual(len(turns), 32)
+        self.assertEqual(len(set(turns)), 32)
+        self.assertEqual(state["offered"], 32)
+        self.assertEqual(state["completed_in_window"], 32)
+        self.assertEqual(state["missed_due_to_backpressure"], 0)
+
+    async def test_unsaturated_immediate_completion_needs_no_explicit_sleep(self):
         for sync_on_loop in (False, True):
             with self.subTest(sync=sync_on_loop):
                 state = _state()
