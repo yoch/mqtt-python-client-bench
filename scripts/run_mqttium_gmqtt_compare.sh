@@ -16,7 +16,7 @@ cd "$ROOT"
 source .venv/bin/activate
 export PYTHONPATH=src
 
-MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc13}"
+MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc14}"
 MATRIX_RUNS="${MATRIX_RUNS:-5}"
 ABBA_BLOCKS="${ABBA_BLOCKS:-6}"
 
