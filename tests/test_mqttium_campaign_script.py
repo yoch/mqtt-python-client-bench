@@ -24,5 +24,26 @@ class MqttiumCampaignScriptTests(unittest.TestCase):
         self.assertIn('results_dir_for(resolve_host_profile())', self.script)
 
 
+class MqttiumGmqttCompareScriptTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.script = Path("scripts/run_mqttium_gmqtt_compare.sh").read_text(encoding="utf-8")
+
+    def test_accepts_exact_git_sha_and_named_client_path(self) -> None:
+        self.assertIn("MQTTIUM_GIT_SHA", self.script)
+        self.assertIn("MQTTIUM_GIT_REF", self.script)
+        self.assertIn('--client-path "mqttium=${MQTTIUM_CLIENT_PATH}"', self.script)
+        self.assertIn('git -C "$SRC_DIR" checkout --quiet "${MQTTIUM_GIT_SHA}"', self.script)
+
+    def test_git_installs_isolate_results_and_calibration(self) -> None:
+        self.assertIn('MQTTIUM_RUN_LABEL:-mqttium-git', self.script)
+        self.assertIn('calibrations/${MQTTIUM_RUN_LABEL}', self.script)
+        self.assertIn('${MQTTIUM_RUN_LABEL}/mqttium-gmqtt', self.script)
+
+    def test_pypi_default_stays_on_rc14(self) -> None:
+        self.assertIn('MQTTIUM_VER:-1.0.0rc14', self.script)
+        self.assertIn("--load-profile-dir \"$CAL_DIR\"", self.script)
+
+
 if __name__ == "__main__":
     unittest.main()
