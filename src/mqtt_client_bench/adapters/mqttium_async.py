@@ -24,6 +24,7 @@ from mqtt_client_bench.adapters.mqttium import (
     MqttiumAdapter,
     arm_qosn_completion,
     async_client_param_names,
+    is_mqttium_flow_control_error,
     map_async_client_flow_kwargs,
 )
 
@@ -176,7 +177,9 @@ class MqttiumAsyncAdapter:
         if int(qos) == 0:
             try:
                 self._client.publish_nowait(topic, data, qos=0, retain=retain, properties=properties)
-            except FlowControlError:
+            except Exception as exc:
+                if not is_mqttium_flow_control_error(exc):
+                    raise
                 return None
             mid = self._alloc_mid()
             cb = self.on_publish
@@ -188,7 +191,9 @@ class MqttiumAsyncAdapter:
             receipt = self._client.publish_nowait(
                 topic, data, qos=qos, retain=retain, properties=properties
             )
-        except FlowControlError:
+        except Exception as exc:
+            if not is_mqttium_flow_control_error(exc):
+                raise
             return None
         mid = self._alloc_mid()
         if receipt.mid is None:

@@ -6829,6 +6829,22 @@ class MqttiumNativeNowaitTests(unittest.TestCase):
         self.assertIsNone(adapter.publish_nowait("t", b"x", qos=1))
         self.assertEqual(fired, [])
 
+    def test_qos0_flow_control_matches_client_path_reload(self):
+        adapter = MqttiumAsyncAdapter()
+
+        class Reloaded(Exception):
+            pass
+
+        Reloaded.__name__ = "FlowControlError"
+        Reloaded.__module__ = "mqttium.errors"
+
+        class _Client:
+            def publish_nowait(self, *args, **kwargs):
+                raise Reloaded("write pump full")
+
+        adapter._client = _Client()
+        self.assertIsNone(adapter.publish_nowait("t", b"x", qos=0))
+
     def test_qos0_success_still_completes_inline(self):
         adapter = MqttiumAsyncAdapter()
         fired = []
