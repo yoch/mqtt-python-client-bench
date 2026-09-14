@@ -26,7 +26,7 @@ if str(SRC) not in sys.path:
 from mqtt_client_bench.adapters import registry  # noqa: E402
 from mqtt_client_bench.adapters.base import AdapterCapabilities  # noqa: E402
 from mqtt_client_bench.adapters.native import NativeAsyncAdapter  # noqa: E402
-from mqtt_client_bench.adapters.mqttium import MqttiumAdapter  # noqa: E402
+from mqtt_client_bench.adapters.mqttium import MqttiumAdapter, arm_qosn_completion  # noqa: E402
 from mqtt_client_bench.adapters.mqttium_async import FlowControlError, MqttiumAsyncAdapter  # noqa: E402
 from mqtt_client_bench.roles import publisher  # noqa: E402
 from mqtt_client_bench.adapters.registry import (  # noqa: E402
@@ -6842,6 +6842,32 @@ class MqttiumNativeNowaitTests(unittest.TestCase):
         mid = adapter.publish_nowait("t", b"x", qos=0)
         self.assertIsNotNone(mid)
         self.assertEqual(fired, [mid])
+
+    def test_mqttium_qos1_completion_without_on_publish(self):
+        adapter = MqttiumAsyncAdapter()
+        fired = []
+        adapter.on_publish = lambda *args: fired.append(args[2])
+
+        class Receipt:
+            mid = 7
+
+        class Client:
+            def _settle_publish(self, mid, reason=None):
+                self.last = (mid, reason)
+
+            def publish_nowait(self, *args, **kwargs):
+                return Receipt()
+
+        client = Client()
+        adapter._client = client
+        synth = adapter.publish_nowait("t", b"x", qos=1)
+        self.assertFalse(hasattr(client, "on_publish"))
+        self.assertTrue(client._mqtt_bench_on_settle)
+        self.assertEqual(fired, [])
+        self.assertEqual(arm_qosn_completion(client, lambda *_a: None), "settle_publish")
+        client._settle_publish(7, None)
+        self.assertEqual(fired, [synth])
+        self.assertEqual(client.last, (7, None))
 
     def test_other_errors_still_propagate(self):
         adapter = MqttiumAsyncAdapter()
