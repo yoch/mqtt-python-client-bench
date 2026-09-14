@@ -22,6 +22,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from mqtt_client_bench.adapters.base import AdapterCapabilities, SubscribeResult
 from mqtt_client_bench.adapters.mqttium import (
     MqttiumAdapter,
+    arm_qosn_completion,
     async_client_param_names,
     map_async_client_flow_kwargs,
 )
@@ -131,14 +132,13 @@ class MqttiumAsyncAdapter:
             await client.disconnect()
 
     def _arm_completions(self) -> None:
-        """Install on_publish on first QoS>=1 use, never before.
+        """Install QoS>=1 completion on first use, never before.
 
-        mqttium takes its direct QoS0 transport write only while on_publish is
+        rc14 takes its direct QoS0 transport write only while on_publish is
         None (`_direct_qos0_ready`); arming it up front cost 38% of the QoS0
         rate. QoS is fixed per measurement point, so a QoS0 point never arms it.
+        The frozen API has no on_publish; the same hook wraps ``_settle_publish``.
         """
-        if self._client.on_publish is not None:
-            return
 
         def _on_publish(mid, reason=None) -> None:
             if mid is None:
@@ -153,7 +153,7 @@ class MqttiumAsyncAdapter:
             if cb is not None:
                 cb(self, None, synth, 0 if reason is None else 128, None)
 
-        self._client.on_publish = _on_publish
+        arm_qosn_completion(self._client, _on_publish)
 
     def publish_nowait(
         self,

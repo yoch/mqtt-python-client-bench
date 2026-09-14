@@ -82,6 +82,34 @@ def map_async_client_flow_kwargs(
     return kwargs, vocab
 
 
+def arm_qosn_completion(client: Any, on_complete: Any) -> str:
+    """Install a QoS>=1 completion hook on ``client``.
+
+    rc14 exposes ``AsyncClient.on_publish``; the frozen API (PR #460) removed
+    it and settles receipts from ``_settle_publish``. Wrapping that private
+    method keeps a synchronous callback on the loop thread. Awaiting
+    ``receipt.wait()`` would spawn a Task per in-flight publish.
+
+    ``on_complete(mid, reason)`` receives the library packet id and the
+    terminal error (``None`` on success).
+    """
+    if hasattr(client, "on_publish"):
+        if client.on_publish is None:
+            client.on_publish = on_complete
+        return "on_publish"
+    if getattr(client, "_mqtt_bench_on_settle", False):
+        return "settle_publish"
+    orig = client._settle_publish
+
+    def _wrapped(mid, reason=None) -> None:
+        orig(mid, reason)
+        on_complete(mid, reason)
+
+    client._settle_publish = _wrapped
+    client._mqtt_bench_on_settle = True
+    return "settle_publish"
+
+
 class MqttiumAdapter(BridgedAdapterBase):
     """Bench the native ``mqttium.api.AsyncClient`` API (not the Paho façade).
 
@@ -187,12 +215,7 @@ class MqttiumAdapter(BridgedAdapterBase):
             # are not read as if the contracts matched.
             "qos0_boundary": "queue",
             "public_ctor_vocabulary": vocab,
-            "private_api": {
-                "AsyncClient.on_publish is None / _direct_qos0_ready": (
-                    "direct QoS0 transport write is only taken while the library "
-                    "on_publish is unset; the adapter fires the bench callback itself"
-                ),
-            },
+            "private_api": _completion_private_api(vocab),
         }
 
     @classmethod
@@ -350,18 +373,13 @@ class MqttiumAdapter(BridgedAdapterBase):
             return PublishResult(rc=0, mid=mid)
 
         # Correlate the ack instead of suspending a coroutine for the whole
-        # round trip. publish_nowait is synchronous on the loop thread, so
-        # submission and registration happen in one call and the completion
-        # arrives later through on_publish — the same discipline gmqtt and
-        # awscrt use, and measured 11-34% cheaper than awaiting the receipt,
-        # growing with load. Registering after submission is race-free: both run
-        # on the loop thread.
+        # round trip. publish_nowait is synchronous on the loop thread. rc14
+        # delivers via library on_publish; the frozen API wraps
+        # AsyncClient._settle_publish. Both stay on the loop thread — awaiting
+        # receipt.wait() would spawn a Task per in-flight publish.
         def _publish_qosn() -> None:
             try:
-                if client.on_publish is None:
-                    # Same loop thread that will later deliver the ack, so the
-                    # callback is in place before any completion can arrive.
-                    client.on_publish = self._on_publish_cb
+                arm_qosn_completion(client, self._on_publish_cb)
                 receipt = client.publish_nowait(
                     topic, data, qos=qos, retain=retain, properties=properties
                 )
@@ -437,3 +455,21 @@ class MqttiumAdapter(BridgedAdapterBase):
         else:
             return None
         return props
+
+
+def _completion_private_api(vocab: str) -> Dict[str, str]:
+    if vocab == "frozen":
+        return {
+            "PublishReceipt / AsyncClient._settle_publish": (
+                "frozen API has no AsyncClient.on_publish; QoS>=1 completions "
+                "wrap AsyncClient._settle_publish so the bench callback stays on "
+                "the loop thread instead of awaiting wait() (a Task per "
+                "in-flight publish)"
+            ),
+        }
+    return {
+        "AsyncClient.on_publish is None / _direct_qos0_ready": (
+            "direct QoS0 transport write is only taken while the library "
+            "on_publish is unset; the adapter fires the bench callback itself"
+        ),
+    }
