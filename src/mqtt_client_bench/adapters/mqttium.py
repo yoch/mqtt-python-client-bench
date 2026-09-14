@@ -110,6 +110,20 @@ def arm_qosn_completion(client: Any, on_complete: Any) -> str:
     return "settle_publish"
 
 
+def is_mqttium_flow_control_error(exc: BaseException) -> bool:
+    """True for mqttium's backpressure error across ``--client-path`` reloads.
+
+    ``mqttium_async`` imports ``FlowControlError`` at module load, which is
+    site-packages. ``configure_client_path`` then loads a different mqttium
+    tree, so ``except FlowControlError`` misses the checkout's class and a
+    full write pump crashes the worker instead of returning ``mid is None``.
+    """
+    if type(exc).__name__ != "FlowControlError":
+        return False
+    module = type(exc).__module__ or ""
+    return module.startswith("mqttium") or module == "mqtt_client_bench.adapters.mqttium_async"
+
+
 class MqttiumAdapter(BridgedAdapterBase):
     """Bench the native ``mqttium.api.AsyncClient`` API (not the Paho façade).
 
