@@ -2,13 +2,84 @@
 
 from __future__ import annotations
 
+import inspect
 import ssl
 from collections import deque
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from mqtt_client_bench.adapters.async_bridge import BridgedAdapterBase, IncomingMessage
 from mqtt_client_bench.adapters.base import AdapterCapabilities, PublishResult, SubscribeResult
+
+# Native AsyncClient constructor vocabularies. rc14 (PyPI) names the write
+# pump and admission window ``max_outbound_*`` / ``max_pending_outbound_*``.
+# The API freeze (mqttium PR #460) drops aliases and uses
+# ``max_write_queue_*`` / ``max_unacknowledged_*``. The bench window is the
+# same either way: inflight, message depth, then byte floors so a 1 MiB default
+# cannot collapse the payload sweep.
+_CTOR_QUEUED = {
+    "frozen": "max_unacknowledged_messages",
+    "rc14": "max_pending_outbound_messages",
+}
+_CTOR_WRITE_BYTES = {
+    "frozen": "max_write_queue_bytes",
+    "rc14": "max_outbound_bytes",
+}
+_CTOR_ADMISSION_BYTES = {
+    "frozen": "max_unacknowledged_bytes",
+    "rc14": "max_pending_outbound_bytes",
+}
+
+
+def async_client_param_names(client_cls: Any) -> frozenset:
+    return frozenset(inspect.signature(client_cls.__init__).parameters)
+
+
+def async_client_ctor_vocabulary(param_names: Collection[str]) -> str:
+    names = set(param_names)
+    if _CTOR_QUEUED["frozen"] in names:
+        return "frozen"
+    if _CTOR_QUEUED["rc14"] in names:
+        return "rc14"
+    return "unknown"
+
+
+def map_async_client_flow_kwargs(
+    param_names: Collection[str],
+    *,
+    inflight: int,
+    max_queued: int,
+    max_queued_bytes: Optional[int],
+) -> Tuple[Dict[str, Any], str]:
+    """Translate the bench window onto whichever AsyncClient ctor is installed.
+
+    Does not pass iterator bounds or ``manual_ack``: those are refused with
+    ``message_delivery="callback"`` on the frozen API, and they are unused on
+    the rc14 callback path the bench already drives.
+    """
+    names = set(param_names)
+    vocab = async_client_ctor_vocabulary(names)
+    queued_name = _CTOR_QUEUED.get(vocab)
+    if queued_name is None or queued_name not in names:
+        raise TypeError(
+            "mqttium AsyncClient has neither max_unacknowledged_messages "
+            "nor max_pending_outbound_messages"
+        )
+    kwargs: Dict[str, Any] = {
+        "max_outbound_inflight": max(1, int(inflight)),
+        queued_name: max(0, int(max_queued)),
+    }
+    if "message_delivery" in names:
+        kwargs["message_delivery"] = "callback"
+    if max_queued_bytes:
+        write_name = _CTOR_WRITE_BYTES[vocab]
+        admission_name = _CTOR_ADMISSION_BYTES[vocab]
+        if write_name in names:
+            kwargs[write_name] = max(1 << 20, int(max_queued_bytes))
+        if admission_name in names:
+            kwargs[admission_name] = max(64 << 20, int(max_queued_bytes))
+    return kwargs, vocab
 
 
 class MqttiumAdapter(BridgedAdapterBase):
@@ -94,6 +165,12 @@ class MqttiumAdapter(BridgedAdapterBase):
                 version = pkg_version("mqttium")
             except Exception:  # noqa: BLE001
                 version = None
+        try:
+            from mqttium.api import AsyncClient
+
+            vocab = async_client_ctor_vocabulary(async_client_param_names(AsyncClient))
+        except Exception:  # noqa: BLE001
+            vocab = "unknown"
         return {
             "client": "mqttium",
             "adapter": "mqttium",
@@ -109,6 +186,7 @@ class MqttiumAdapter(BridgedAdapterBase):
             # the socket write completes (Paho's boundary). Declared so rankings
             # are not read as if the contracts matched.
             "qos0_boundary": "queue",
+            "public_ctor_vocabulary": vocab,
             "private_api": {
                 "AsyncClient.on_publish is None / _direct_qos0_ready": (
                     "direct QoS0 transport write is only taken while the library "
@@ -158,32 +236,21 @@ class MqttiumAdapter(BridgedAdapterBase):
 
         async def _connect():
             # a2+ removed EngineConfig.max_queued — map bench max_queued onto
-            # max_pending_outbound_messages (admission before MID allocation).
-            #
-            # 0.2.0b2 also bounds the write pump in bytes (max_outbound_bytes,
-            # 1 MiB by default), and publish_nowait raises FlowControlError as
-            # soon as *either* bound is full. At 1 MiB that is 16 slots for a
-            # 64 KiB payload and 1 for a 1 MiB one, i.e. a queue orders of
-            # magnitude shallower than the max_queued messages every client is
-            # given — measured as a 76-98% refusal rate on the payload sweep.
-            # Size the byte bounds from the requested depth so the message
-            # window is what binds, and never shrink them below the library's
-            # own defaults.
-            kwargs = {}
-            if self._max_queued_bytes:
-                kwargs["max_outbound_bytes"] = max(1 << 20, int(self._max_queued_bytes))
-                kwargs["max_pending_outbound_bytes"] = max(
-                    64 << 20, int(self._max_queued_bytes)
-                )
+            # the admission window (rc14: max_pending_outbound_messages; frozen
+            # API: max_unacknowledged_messages). Byte floors keep the payload
+            # sweep from collapsing to the library's 1 MiB write-pump default.
+            flow_kwargs, _vocab = map_async_client_flow_kwargs(
+                async_client_param_names(AsyncClient),
+                inflight=self._max_inflight,
+                max_queued=self._max_queued,
+                max_queued_bytes=self._max_queued_bytes,
+            )
             self._client = AsyncClient(
                 client_id=self._client_id,
                 protocol=proto,
                 clean_start=self._clean_session,
                 keepalive=keepalive,
-                max_outbound_inflight=max(1, int(self._max_inflight)),
-                max_pending_outbound_messages=max(0, int(self._max_queued)),
-                message_delivery="callback",
-                **kwargs,
+                **flow_kwargs,
             )
 
             def _on_publish(mid, reason=None) -> None:

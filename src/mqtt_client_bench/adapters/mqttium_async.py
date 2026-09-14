@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from mqtt_client_bench.adapters.base import AdapterCapabilities, SubscribeResult
-from mqtt_client_bench.adapters.mqttium import MqttiumAdapter
+from mqtt_client_bench.adapters.mqttium import (
+    MqttiumAdapter,
+    async_client_param_names,
+    map_async_client_flow_kwargs,
+)
 
 try:
     from mqttium.errors import FlowControlError
@@ -93,20 +97,18 @@ class MqttiumAsyncAdapter:
         if self._tls_ca_certs:
             tls = ssl.create_default_context(cafile=self._tls_ca_certs)
 
-        kwargs: Dict[str, Any] = {}
-        if self._max_queued_bytes:
-            kwargs["max_outbound_bytes"] = max(1 << 20, int(self._max_queued_bytes))
-            kwargs["max_pending_outbound_bytes"] = max(64 << 20, int(self._max_queued_bytes))
-
+        flow_kwargs, _vocab = map_async_client_flow_kwargs(
+            async_client_param_names(AsyncClient),
+            inflight=self._max_inflight,
+            max_queued=self._max_queued,
+            max_queued_bytes=self._max_queued_bytes,
+        )
         self._client = AsyncClient(
             client_id=self._client_id,
             protocol=getattr(MQTTProtocolVersion, self._protocol),
             clean_start=self._clean_session,
             keepalive=keepalive,
-            max_outbound_inflight=max(1, int(self._max_inflight)),
-            max_pending_outbound_messages=max(0, int(self._max_queued)),
-            message_delivery="callback",
-            **kwargs,
+            **flow_kwargs,
         )
 
         if self.on_message is not None:

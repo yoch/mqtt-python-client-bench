@@ -741,6 +741,85 @@ class AdapterRegistryTests(unittest.TestCase):
         self.assertEqual(inner._engine.config.max_pending_outbound_bytes, 64 << 20)
         self.assertEqual(inner._max_outbound_bytes, 8 << 20)
 
+    def test_mqttium_flow_kwargs_map_rc14_ctor_names(self):
+        from mqtt_client_bench.adapters.mqttium import map_async_client_flow_kwargs
+
+        kwargs, vocab = map_async_client_flow_kwargs(
+            {
+                "max_outbound_inflight",
+                "max_pending_outbound_messages",
+                "max_outbound_bytes",
+                "max_pending_outbound_bytes",
+                "message_delivery",
+            },
+            inflight=64,
+            max_queued=200,
+            max_queued_bytes=8 << 20,
+        )
+        self.assertEqual(vocab, "rc14")
+        self.assertEqual(
+            kwargs,
+            {
+                "max_outbound_inflight": 64,
+                "max_pending_outbound_messages": 200,
+                "message_delivery": "callback",
+                "max_outbound_bytes": 8 << 20,
+                "max_pending_outbound_bytes": 64 << 20,
+            },
+        )
+
+    def test_mqttium_flow_kwargs_map_frozen_ctor_names(self):
+        from mqtt_client_bench.adapters.mqttium import map_async_client_flow_kwargs
+
+        kwargs, vocab = map_async_client_flow_kwargs(
+            {
+                "max_outbound_inflight",
+                "max_unacknowledged_messages",
+                "max_unacknowledged_bytes",
+                "max_write_queue_bytes",
+                "max_write_queue_messages",
+                "max_iterator_messages",
+                "max_iterator_bytes",
+                "manual_ack",
+                "message_delivery",
+            },
+            inflight=64,
+            max_queued=200,
+            max_queued_bytes=8 << 20,
+        )
+        self.assertEqual(vocab, "frozen")
+        self.assertEqual(kwargs["max_unacknowledged_messages"], 200)
+        self.assertEqual(kwargs["max_write_queue_bytes"], 8 << 20)
+        self.assertEqual(kwargs["max_unacknowledged_bytes"], 64 << 20)
+        self.assertEqual(kwargs["message_delivery"], "callback")
+        self.assertNotIn("max_pending_outbound_messages", kwargs)
+        self.assertNotIn("max_iterator_messages", kwargs)
+        self.assertNotIn("manual_ack", kwargs)
+
+    def test_mqttium_flow_kwargs_keep_byte_floors(self):
+        from mqtt_client_bench.adapters.mqttium import map_async_client_flow_kwargs
+
+        kwargs, _vocab = map_async_client_flow_kwargs(
+            {
+                "max_outbound_inflight",
+                "max_pending_outbound_messages",
+                "max_outbound_bytes",
+                "max_pending_outbound_bytes",
+                "message_delivery",
+            },
+            inflight=20,
+            max_queued=200,
+            max_queued_bytes=64 << 10,
+        )
+        self.assertEqual(kwargs["max_outbound_bytes"], 1 << 20)
+        self.assertEqual(kwargs["max_pending_outbound_bytes"], 64 << 20)
+
+    def test_mqttium_identity_records_installed_ctor_vocabulary(self):
+        from mqtt_client_bench.adapters.registry import adapter_identity
+
+        info = adapter_identity("mqttium")
+        self.assertEqual(info["public_ctor_vocabulary"], "rc14")
+
     def test_mqttium_queues_native_filters_until_connect(self):
         adapter = MqttiumAdapter.create(client_id="cb-probe")
         adapter.message_callback_add("bench/+/x", lambda *_a: None)
@@ -1329,6 +1408,39 @@ class CliDefaultsTests(unittest.TestCase):
         self.assertIn('"${BROKER_ARGS[@]}"', official)
         self.assertIn("--broker-pid", official)
         self.assertIn("BENCH_BROKER_PID", official)
+
+    def test_matrix_and_compare_accept_named_client_path(self):
+        from mqtt_client_bench.run import build_parser, parse_client_paths
+
+        parser = build_parser()
+        matrix_args = parser.parse_args(
+            [
+                "matrix",
+                "--clients", "mqttium,gmqtt",
+                "--scenario", "pub_qos_sweep_telemetry",
+                "--client-path", "mqttium=.mqttium-pr460",
+            ]
+        )
+        self.assertEqual(
+            parse_client_paths(matrix_args.client_path_entries),
+            {"mqttium": ".mqttium-pr460"},
+        )
+        compare_args = parser.parse_args(
+            [
+                "compare",
+                "--clients", "gmqtt,mqttium",
+                "--scenario", "pub_qos_sweep_telemetry",
+                "--client-path", "mqttium=.mqttium-pr460",
+            ]
+        )
+        self.assertEqual(
+            parse_client_paths(compare_args.client_path_entries),
+            {"mqttium": ".mqttium-pr460"},
+        )
+        with self.assertRaises(ValueError):
+            parse_client_paths([".mqttium-pr460"])
+        with self.assertRaises(ValueError):
+            parse_client_paths(["nonesuch=/tmp/mqttium"])
 
     def test_compare_cli_pacer_mode_defaults_in_loop(self):
         from mqtt_client_bench.run import build_parser

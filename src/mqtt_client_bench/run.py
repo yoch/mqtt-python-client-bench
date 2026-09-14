@@ -18,6 +18,29 @@ from mqtt_client_bench.report import build_site
 from mqtt_client_bench.scenarios import SCENARIO_BY_NAME, default_runs, estimate_suite, list_scenarios
 
 
+def parse_client_paths(values) -> dict:
+    """Parse repeatable ``--client-path CLIENT=PATH`` entries for matrix/compare.
+
+    ``run`` and ``calibrate`` take a single ``--client-path PATH`` because they
+    already have ``--client``. Interleaved commands need an explicit name so a
+    mqttium checkout cannot be applied to gmqtt.
+    """
+    paths = {}
+    for raw in values or ():
+        if "=" not in raw:
+            raise ValueError(
+                f"--client-path needs CLIENT=PATH (repeatable), got {raw!r}"
+            )
+        name, path = raw.split("=", 1)
+        name, path = name.strip(), path.strip()
+        if not name or not path:
+            raise ValueError(f"--client-path needs CLIENT=PATH, got {raw!r}")
+        if name not in CLIENT_NAMES:
+            raise ValueError(f"unknown client in --client-path: {name}")
+        paths[name] = path
+    return paths
+
+
 def cmd_broker(args: argparse.Namespace) -> int:
     if args.action == "up":
         ensure_certs()
@@ -132,6 +155,12 @@ def cmd_matrix(args: argparse.Namespace) -> int:
         print(f"error: unknown scenario {args.scenario}", file=sys.stderr)
         return 2
 
+    try:
+        client_paths = parse_client_paths(getattr(args, "client_path_entries", None))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     if args.output_dir is None:
         # Not a default in the parser: it depends on which machine this is.
         # Campaign files are named <client>-<scenario>.json, so a runner writing
@@ -170,6 +199,7 @@ def cmd_matrix(args: argparse.Namespace) -> int:
             broker=args.broker,
             network=args.network,
             output_dir=args.output_dir,
+            client_paths=client_paths,
             load_profiles=load_profiles,
             host_profile_path=getattr(args, "host_profile", None),
             seed=args.seed,
@@ -278,6 +308,11 @@ def cmd_compare(args: argparse.Namespace) -> int:
     if len(clients) < 2:
         print("error: --clients needs at least two names, e.g. paho,gmqtt", file=sys.stderr)
         return 2
+    try:
+        client_paths = parse_client_paths(getattr(args, "client_path_entries", None))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     payload = compare_clients(
         clients,
         args.scenario,
@@ -287,6 +322,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         load_profile_path=args.load_profile,
         load_profile_dir=getattr(args, "load_profile_dir", None),
         host_profile_path=getattr(args, "host_profile", None),
+        client_paths=client_paths,
         variant_index=args.variant_index,
         broker=getattr(args, "broker", None),
         broker_pid=getattr(args, "broker_pid", None),
@@ -410,6 +446,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     matrix_p.add_argument("--seed", type=int, default=42)
     matrix_p.add_argument("--variant-index", type=int, default=None, help="Run a single variant index (default: all)")
+    matrix_p.add_argument(
+        "--client-path",
+        action="append",
+        dest="client_path_entries",
+        metavar="CLIENT=PATH",
+        help="Install tree for one client (repeatable). Example: mqttium=.mqttium-pr460",
+    )
     matrix_p.set_defaults(func=cmd_matrix)
 
     cal_p = sub.add_parser("calibrate", help="Create open-loop load profile from baseline capacity")
@@ -487,6 +530,13 @@ def build_parser() -> argparse.ArgumentParser:
             "sleep on the SUT loop (causal control). external is a dedicated "
             "process on the loadgen cpuset. Closed-loop capacity ignores this."
         ),
+    )
+    cmp_p.add_argument(
+        "--client-path",
+        action="append",
+        dest="client_path_entries",
+        metavar="CLIENT=PATH",
+        help="Install tree for one client (repeatable). Example: mqttium=.mqttium-pr460",
     )
     cmp_p.set_defaults(func=cmd_compare)
 
