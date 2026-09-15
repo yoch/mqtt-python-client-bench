@@ -24,50 +24,118 @@ PRIORITY = (
 )
 
 
-def qos_rate(doc, qos: int, proto: str):
-    for p in doc.points:
-        if f"qos={qos}" in p.label and proto in p.label and p.median_msgs_per_s:
-            return p.median_msgs_per_s
+def _label_parts(label: str) -> dict:
+    parts = {}
+    for chunk in str(label or "").split(", "):
+        if "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        parts[key] = value
+    return parts
+
+
+def _ratio(left, right):
+    if left is None or right is None or right == 0:
+        return None
+    return left / right
+
+
+def _point_by_label(doc, label: str):
+    if doc is None:
+        return None
+    for point in doc.points:
+        if point.label == label:
+            return point
     return None
 
 
-def matrix_table(root: Path) -> dict:
-    by_client: dict = {}
-    for d in load_results(root, reference=None):
-        if d.client not in ("mqttium", "gmqtt") or not d.scenario:
+def _union_labels(*docs) -> list:
+    labels = []
+    seen = set()
+    for doc in docs:
+        if doc is None:
             continue
-        by_client.setdefault(d.client, {})[d.scenario] = d
+        for point in doc.points:
+            if point.label in seen:
+                continue
+            seen.add(point.label)
+            labels.append(point.label)
+    return labels
+
+
+def _aligned_row(scenario: str, label: str, mqttium_point, gmqtt_point, comparable: bool) -> dict:
+    mv = mqttium_point.median_msgs_per_s if mqttium_point else None
+    gv = gmqtt_point.median_msgs_per_s if gmqtt_point else None
+    return {
+        "scenario": scenario,
+        "label": label,
+        "mqttium": mv,
+        "gmqtt": gv,
+        "mqttium_over_gmqtt": _ratio(mv, gv) if comparable else None,
+        "cross_client_comparable": comparable,
+        "mqttium_status": mqttium_point.status if mqttium_point else None,
+        "gmqtt_status": gmqtt_point.status if gmqtt_point else None,
+        "mqttium_valid_runs": mqttium_point.valid_runs if mqttium_point else None,
+        "mqttium_total_runs": mqttium_point.total_runs if mqttium_point else None,
+        "gmqtt_valid_runs": gmqtt_point.valid_runs if gmqtt_point else None,
+        "gmqtt_total_runs": gmqtt_point.total_runs if gmqtt_point else None,
+        "mqttium_bottleneck": mqttium_point.bottleneck if mqttium_point else None,
+        "gmqtt_bottleneck": gmqtt_point.bottleneck if gmqtt_point else None,
+    }
+
+
+def matrix_table_from_docs(docs) -> dict:
+    """One headline row per *matched point*, never ResultDoc.median_msgs_per_s.
+
+    ResultDoc.median_msgs_per_s is the median of that document's point medians.
+    On pub_qos_sweep_telemetry that is mqttium QoS1 v5 against gmqtt QoS0 v5
+    in the PR #460 campaign (0.55×), which is not a comparison.
+    """
+    by_client: dict = {}
+    for doc in docs:
+        if doc.client not in ("mqttium", "gmqtt") or not doc.scenario:
+            continue
+        by_client.setdefault(doc.client, {})[doc.scenario] = doc
     rows = []
-    scenarios = sorted({s for docs in by_client.values() for s in docs if s})
+    scenarios = sorted({s for client_docs in by_client.values() for s in client_docs if s})
     ordered = [s for s in PRIORITY if s in scenarios] + [s for s in scenarios if s not in PRIORITY]
     for scenario in ordered:
-        m = by_client.get("mqttium", {}).get(scenario)
-        g = by_client.get("gmqtt", {}).get(scenario)
-        mv = m.median_msgs_per_s if m else None
-        gv = g.median_msgs_per_s if g else None
+        mqttium_doc = by_client.get("mqttium", {}).get(scenario)
+        gmqtt_doc = by_client.get("gmqtt", {}).get(scenario)
         comparable = not intra_client_only(scenario)
-        ratio = (mv / gv) if comparable and mv and gv else None
-        rows.append(
-            {
-                "scenario": scenario,
-                "mqttium": mv,
-                "gmqtt": gv,
-                "mqttium_over_gmqtt": ratio,
-                "cross_client_comparable": comparable,
-            }
-        )
+        for label in _union_labels(mqttium_doc, gmqtt_doc):
+            rows.append(
+                _aligned_row(
+                    scenario,
+                    label,
+                    _point_by_label(mqttium_doc, label),
+                    _point_by_label(gmqtt_doc, label),
+                    comparable,
+                )
+            )
     detail = {}
-    mdoc = by_client.get("mqttium", {}).get("pub_qos_sweep_telemetry")
-    gdoc = by_client.get("gmqtt", {}).get("pub_qos_sweep_telemetry")
-    if mdoc and gdoc:
-        for qos, proto in ((0, "MQTTv311"), (0, "MQTTv5"), (1, "MQTTv311"), (1, "MQTTv5")):
-            mv, gv = qos_rate(mdoc, qos, proto), qos_rate(gdoc, qos, proto)
-            detail[f"QoS{qos} {proto}"] = {
-                "mqttium": mv,
-                "gmqtt": gv,
-                "mqttium_over_gmqtt": (mv / gv) if mv and gv else None,
-            }
-    return {"headlines": rows, "qos_sweep_points": detail}
+    for row in rows:
+        if row["scenario"] != "pub_qos_sweep_telemetry":
+            continue
+        parts = _label_parts(row["label"])
+        qos = parts.get("qos")
+        proto = parts.get("proto")
+        if qos is None or proto is None:
+            continue
+        detail[f"QoS{qos} {proto}"] = {
+            "mqttium": row["mqttium"],
+            "gmqtt": row["gmqtt"],
+            "mqttium_over_gmqtt": row["mqttium_over_gmqtt"],
+        }
+    return {
+        "headlines": rows,
+        "qos_sweep_points": detail,
+        "alignment": "point_label",
+    }
+
+
+def matrix_table(root: Path) -> dict:
+    return matrix_table_from_docs(load_results(root, reference=None))
 
 
 def abba_table(root: Path) -> list:
@@ -264,6 +332,9 @@ def main() -> int:
             "application_rtt_qos1 / puback_latency_qos1 are NOT CROSS-CLIENT COMPARABLE (per-client load_fraction).",
             "application_rtt_fixed_rate uses shared_load_fraction × C_common; puback_latency_fixed_rate uses explicit target_rate.",
             "Unsupported capabilities (gmqtt QoS2, max_inflight) stay N/A: no ratio, no dummy zero.",
+            "matrix.headlines are aligned by PointRow.label (protocol/qos/payload/…). "
+            "Do not ratio ResultDoc.median_msgs_per_s: that is the median of point medians "
+            "and need not be the same axis on both clients.",
         ],
     }
     print(json.dumps(payload, indent=2))
