@@ -7,8 +7,18 @@
 #     per-client calibration so load_fraction is not a shared ceiling
 #   - gmqtt is A (established peer); mqttium is B (candidate)
 #
+# mqttium source:
+#   MQTTIUM_VER=1.0.0rc14          PyPI pin when no git/checkout is set
+#   MQTTIUM_CLIENT_PATH=...        Use this --target install via --client-path
+#   MQTTIUM_GIT_REF=branch         Clone yoch/mqttium@ref into a --target tree
+#   MQTTIUM_GIT_SHA=commit         Checkout exact commit (overrides branch tip)
+#   MQTTIUM_RUN_LABEL=name         Write under $RESULTS_DIR/name/mqttium-gmqtt
+#                                  (git installs default to mqttium-git)
+#
 # Usage:
 #   bash scripts/run_mqttium_gmqtt_compare.sh
+#   MQTTIUM_GIT_SHA=<sha> MQTTIUM_RUN_LABEL=mqttium-pr460 \
+#     bash scripts/run_mqttium_gmqtt_compare.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -17,8 +27,17 @@ source .venv/bin/activate
 export PYTHONPATH=src
 
 MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc14}"
+MQTTIUM_GIT_REF="${MQTTIUM_GIT_REF:-}"
+MQTTIUM_GIT_SHA="${MQTTIUM_GIT_SHA:-}"
+MQTTIUM_CLIENT_PATH="${MQTTIUM_CLIENT_PATH:-}"
 MATRIX_RUNS="${MATRIX_RUNS:-5}"
 ABBA_BLOCKS="${ABBA_BLOCKS:-6}"
+
+if [[ -n "${MQTTIUM_GIT_REF}" || -n "${MQTTIUM_GIT_SHA}" ]]; then
+  MQTTIUM_RUN_LABEL="${MQTTIUM_RUN_LABEL:-mqttium-git}"
+else
+  MQTTIUM_RUN_LABEL="${MQTTIUM_RUN_LABEL:-}"
+fi
 
 HOST_DIR="${RESULTS_DIR:-$(python - <<'PYEOF'
 import sys
@@ -27,13 +46,62 @@ from mqtt_client_bench.hostcal import resolve_host_profile, results_dir_for
 print(results_dir_for(resolve_host_profile()))
 PYEOF
 )}"
-OUT="${HOST_DIR}/mqttium-gmqtt"
-mkdir -p "$OUT" calibrations logs
-echo "writing to $OUT (matrix ${MATRIX_RUNS} runs, ABBA ${ABBA_BLOCKS} blocks)"
+if [[ -n "${MQTTIUM_RUN_LABEL}" ]]; then
+  OUT="${HOST_DIR}/${MQTTIUM_RUN_LABEL}/mqttium-gmqtt"
+  CAL_DIR="calibrations/${MQTTIUM_RUN_LABEL}"
+else
+  OUT="${HOST_DIR}/mqttium-gmqtt"
+  CAL_DIR="calibrations"
+fi
+mkdir -p "$OUT" "$CAL_DIR" logs
+echo "writing to $OUT (matrix ${MATRIX_RUNS} runs, ABBA ${ABBA_BLOCKS} blocks, calib ${CAL_DIR})"
 
-echo "=== pin mqttium==${MQTTIUM_VER} ==="
-pip install --force-reinstall --no-cache-dir "mqttium==${MQTTIUM_VER}"
-python - <<'PY'
+CLIENT_PATH_ARGS=()
+
+if [[ -n "${MQTTIUM_GIT_REF}" || -n "${MQTTIUM_GIT_SHA}" ]]; then
+  INSTALL_ROOT="${MQTTIUM_CLIENT_PATH:-$ROOT/.mqttium-${MQTTIUM_RUN_LABEL}}"
+  SRC_DIR="${INSTALL_ROOT}-src"
+  MQTTIUM_CLIENT_PATH="$INSTALL_ROOT"
+  if [[ -n "${MQTTIUM_GIT_SHA}" ]]; then
+    echo "=== clone mqttium + checkout ${MQTTIUM_GIT_SHA} -> ${MQTTIUM_CLIENT_PATH} ==="
+    rm -rf "$SRC_DIR" "$MQTTIUM_CLIENT_PATH"
+    git clone --filter=blob:none https://github.com/yoch/mqttium.git "$SRC_DIR"
+    git -C "$SRC_DIR" checkout --quiet "${MQTTIUM_GIT_SHA}"
+  else
+    echo "=== clone mqttium@${MQTTIUM_GIT_REF} -> ${SRC_DIR} ==="
+    rm -rf "$SRC_DIR" "$MQTTIUM_CLIENT_PATH"
+    git clone --depth 1 --branch "$MQTTIUM_GIT_REF" https://github.com/yoch/mqttium.git "$SRC_DIR"
+  fi
+  pip install --no-cache-dir --force-reinstall --target "$MQTTIUM_CLIENT_PATH" "$SRC_DIR"
+  MQTTIUM_RESOLVED_SHA="$(git -C "$SRC_DIR" rev-parse HEAD)"
+  echo "mqttium source ${MQTTIUM_RESOLVED_SHA}"
+  printf '%s\n' "$MQTTIUM_RESOLVED_SHA" >"${OUT}/MQTTIUM_GIT_SHA"
+elif [[ -n "$MQTTIUM_CLIENT_PATH" && -f "$MQTTIUM_CLIENT_PATH/pyproject.toml" ]]; then
+  echo "=== install mqttium from ${MQTTIUM_CLIENT_PATH} (--target) ==="
+  TARGET="${MQTTIUM_CLIENT_PATH}-installed"
+  pip install --no-cache-dir --force-reinstall --target "$TARGET" "$MQTTIUM_CLIENT_PATH"
+  MQTTIUM_CLIENT_PATH="$TARGET"
+fi
+
+if [[ -n "$MQTTIUM_CLIENT_PATH" ]]; then
+  CLIENT_PATH_ARGS=(--client-path "mqttium=${MQTTIUM_CLIENT_PATH}")
+  python - <<PY
+import sys
+sys.path.insert(0, "${MQTTIUM_CLIENT_PATH}")
+import mqttium
+from pathlib import Path
+from mqttium.api import AsyncClient
+path = Path(mqttium.__file__).resolve()
+assert str(path).startswith(str(Path("${MQTTIUM_CLIENT_PATH}").resolve())), path
+assert hasattr(AsyncClient, "publish_nowait"), "publish_nowait required"
+print("OK", getattr(mqttium, "__version__", "?"), path)
+import gmqtt
+print("OK gmqtt", getattr(gmqtt, "__version__", "?"))
+PY
+else
+  echo "=== pin mqttium==${MQTTIUM_VER} ==="
+  pip install --force-reinstall --no-cache-dir "mqttium==${MQTTIUM_VER}"
+  python - <<'PY'
 from importlib.metadata import version
 import mqttium
 from mqttium.api import AsyncClient
@@ -44,13 +112,19 @@ print("OK mqttium", version("mqttium"), mqttium.__file__)
 import gmqtt
 print("OK gmqtt", getattr(gmqtt, "__version__", "?"))
 PY
+fi
 
 python -m mqtt_client_bench.run broker up
 
 for client in mqttium gmqtt; do
   echo "=== calibrate ${client} ==="
+  extra=()
+  if [[ "$client" == "mqttium" && -n "$MQTTIUM_CLIENT_PATH" ]]; then
+    extra=(--client-path "$MQTTIUM_CLIENT_PATH")
+  fi
   python -m mqtt_client_bench.run calibrate --client "$client" --profile standard \
-    --output "calibrations/${client}-load.json" | tee "logs/calibrate-${client}-compare.log"
+    "${extra[@]}" \
+    --output "${CAL_DIR}/${client}-load.json" | tee "logs/calibrate-${client}-compare.log"
 done
 
 MATRIX_SCENARIOS=(
@@ -76,7 +150,8 @@ for s in "${MATRIX_SCENARIOS[@]}"; do
     --scenario "$s" \
     --profile standard \
     --runs "$MATRIX_RUNS" \
-    --load-profile-dir calibrations \
+    --load-profile-dir "$CAL_DIR" \
+    "${CLIENT_PATH_ARGS[@]}" \
     --output-dir "$OUT" \
     >"logs/matrix-mqttium-gmqtt-${s}.log" 2>&1 || echo "FAILED matrix ${s}" | tee -a logs/mqttium-gmqtt-compare.log
 done
@@ -99,6 +174,8 @@ for s in "${ABBA_SCENARIOS[@]}"; do
     --scenario "$s" \
     --profile standard \
     --blocks "$ABBA_BLOCKS" \
+    --load-profile-dir "$CAL_DIR" \
+    "${CLIENT_PATH_ARGS[@]}" \
     --output "${OUT}/compare-gmqtt-mqttium-${s}.json" \
     >"logs/abba-gmqtt-mqttium-${s}.log" 2>&1 || echo "FAILED ABBA ${s}" | tee -a logs/mqttium-gmqtt-compare.log
 done
