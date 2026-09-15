@@ -88,6 +88,10 @@ class MqttiumGmqttCompareScriptTests(unittest.TestCase):
         self.assertIn('MQTTIUM_VER:-1.0.0rc14', self.script)
         self.assertIn("--load-profile-dir \"$CAL_DIR\"", self.script)
 
+    def test_skip_abba_is_opt_in(self) -> None:
+        self.assertIn('SKIP_ABBA:-0', self.script)
+        self.assertIn('SKIP_ABBA=1: not running run compare', self.script)
+
 
 class SummarizeMqttiumGmqttAlignmentTests(unittest.TestCase):
     """Headlines must compare the same point, not ResultDoc.median_msgs_per_s."""

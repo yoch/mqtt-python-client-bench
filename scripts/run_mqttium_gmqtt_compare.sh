@@ -14,6 +14,9 @@
 #   MQTTIUM_GIT_SHA=commit         Checkout exact commit (overrides branch tip)
 #   MQTTIUM_RUN_LABEL=name         Write under $RESULTS_DIR/name/mqttium-gmqtt
 #                                  (git installs default to mqttium-git)
+#   SKIP_ABBA=1                    Matrix + calibrate only (no run compare)
+#   MATRIX_RUNS / ABBA_BLOCKS      Defaults 5 and 6
+
 #
 # Usage:
 #   bash scripts/run_mqttium_gmqtt_compare.sh
@@ -32,6 +35,7 @@ MQTTIUM_GIT_SHA="${MQTTIUM_GIT_SHA:-}"
 MQTTIUM_CLIENT_PATH="${MQTTIUM_CLIENT_PATH:-}"
 MATRIX_RUNS="${MATRIX_RUNS:-5}"
 ABBA_BLOCKS="${ABBA_BLOCKS:-6}"
+SKIP_ABBA="${SKIP_ABBA:-0}"
 
 if [[ -n "${MQTTIUM_GIT_REF}" || -n "${MQTTIUM_GIT_SHA}" ]]; then
   MQTTIUM_RUN_LABEL="${MQTTIUM_RUN_LABEL:-mqttium-git}"
@@ -54,7 +58,11 @@ else
   CAL_DIR="calibrations"
 fi
 mkdir -p "$OUT" "$CAL_DIR" logs
-echo "writing to $OUT (matrix ${MATRIX_RUNS} runs, ABBA ${ABBA_BLOCKS} blocks, calib ${CAL_DIR})"
+if [[ "$SKIP_ABBA" == "1" ]]; then
+  echo "writing to $OUT (matrix ${MATRIX_RUNS} runs, ABBA skipped, calib ${CAL_DIR})"
+else
+  echo "writing to $OUT (matrix ${MATRIX_RUNS} runs, ABBA ${ABBA_BLOCKS} blocks, calib ${CAL_DIR})"
+fi
 
 CLIENT_PATH_ARGS=()
 
@@ -167,18 +175,22 @@ ABBA_SCENARIOS=(
   puback_latency_fixed_rate
 )
 
-for s in "${ABBA_SCENARIOS[@]}"; do
-  echo "==> ABBA gmqtt,mqttium ${s} blocks=${ABBA_BLOCKS} $(date -Is)"
-  python -m mqtt_client_bench.run compare \
-    --clients gmqtt,mqttium \
-    --scenario "$s" \
-    --profile standard \
-    --blocks "$ABBA_BLOCKS" \
-    --load-profile-dir "$CAL_DIR" \
-    "${CLIENT_PATH_ARGS[@]}" \
-    --output "${OUT}/compare-gmqtt-mqttium-${s}.json" \
-    >"logs/abba-gmqtt-mqttium-${s}.log" 2>&1 || echo "FAILED ABBA ${s}" | tee -a logs/mqttium-gmqtt-compare.log
-done
+if [[ "$SKIP_ABBA" == "1" ]]; then
+  echo "SKIP_ABBA=1: not running run compare"
+else
+  for s in "${ABBA_SCENARIOS[@]}"; do
+    echo "==> ABBA gmqtt,mqttium ${s} blocks=${ABBA_BLOCKS} $(date -Is)"
+    python -m mqtt_client_bench.run compare \
+      --clients gmqtt,mqttium \
+      --scenario "$s" \
+      --profile standard \
+      --blocks "$ABBA_BLOCKS" \
+      --load-profile-dir "$CAL_DIR" \
+      "${CLIENT_PATH_ARGS[@]}" \
+      --output "${OUT}/compare-gmqtt-mqttium-${s}.json" \
+      >"logs/abba-gmqtt-mqttium-${s}.log" 2>&1 || echo "FAILED ABBA ${s}" | tee -a logs/mqttium-gmqtt-compare.log
+  done
+fi
 
 python scripts/summarize_mqttium_gmqtt.py "$OUT" | tee "${OUT}/summary.json"
 echo "COMPARE_DONE $(date -Is)"
