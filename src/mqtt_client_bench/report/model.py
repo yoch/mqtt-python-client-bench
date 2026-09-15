@@ -687,6 +687,11 @@ class ResultDoc:
     profile: Optional[str]
     non_comparable: bool
     status: str
+    # Median of the scenario's *point* medians (middle point when sorted by
+    # rate). Useful as a page tile; never a cross-client comparable. Two
+    # documents of the same scenario can land this on different QoS / protocol
+    # / payload axes, so a ratio of two ResultDoc.median_msgs_per_s values is
+    # not a same-point comparison. Use PointRow, keyed by label.
     median_msgs_per_s: Optional[float]
     points: List[PointRow]
     environment: Dict[str, Any]
