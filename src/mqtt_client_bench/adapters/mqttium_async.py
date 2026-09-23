@@ -8,10 +8,17 @@ harder than a slow one, which is enough to reorder a ranking.
 ``FlowControlError`` from ``publish_nowait`` is mapped to ``mid is None`` (Paho
 queue-full), not to ``on_publish`` reason 128. The facade in ``mqttium.py`` still
 returns a mid before the bridge call and cannot do that.
+
+Through 1.0.0rc14, QoS>=1 completion is the library ``on_publish`` callback.
+1.0.0rc15 removed it; those completions are ``PublishReceipt.wait()`` tasks.
+``FlowControlError`` below is re-exported for tests. Role workers may have
+imported it before ``client_path`` swapped the package, so the publish path
+also matches a ``FlowControlError`` raised by the checkout actually loaded.
 """
 
 from __future__ import annotations
 
+import asyncio
 import ssl
 from collections import deque
 from dataclasses import fields, is_dataclass
@@ -20,7 +27,13 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from mqtt_client_bench.adapters.base import AdapterCapabilities, SubscribeResult
-from mqtt_client_bench.adapters.mqttium import MqttiumAdapter
+from mqtt_client_bench.adapters.mqttium import (
+    MqttiumAdapter,
+    is_flow_control,
+    outbound_bound_kwargs,
+    receipt_already_done,
+    uses_on_publish,
+)
 
 try:
     from mqttium.errors import FlowControlError
@@ -50,6 +63,9 @@ class MqttiumAsyncAdapter:
         self.on_publish = None
         self.on_message = None
         self._pending_filters: List[Tuple[str, Any]] = []
+        # rc15 receipt waiters. The loop also retains tasks, but dropping the
+        # last Python reference before they finish warns and can lose a completion.
+        self._receipt_tasks: set[asyncio.Task[Any]] = set()
 
     @classmethod
     def capabilities(cls) -> AdapterCapabilities:
@@ -93,20 +109,18 @@ class MqttiumAsyncAdapter:
         if self._tls_ca_certs:
             tls = ssl.create_default_context(cafile=self._tls_ca_certs)
 
-        kwargs: Dict[str, Any] = {}
-        if self._max_queued_bytes:
-            kwargs["max_outbound_bytes"] = max(1 << 20, int(self._max_queued_bytes))
-            kwargs["max_pending_outbound_bytes"] = max(64 << 20, int(self._max_queued_bytes))
-
         self._client = AsyncClient(
             client_id=self._client_id,
             protocol=getattr(MQTTProtocolVersion, self._protocol),
             clean_start=self._clean_session,
             keepalive=keepalive,
-            max_outbound_inflight=max(1, int(self._max_inflight)),
-            max_pending_outbound_messages=max(0, int(self._max_queued)),
             message_delivery="callback",
-            **kwargs,
+            **outbound_bound_kwargs(
+                AsyncClient,
+                max_inflight=self._max_inflight,
+                max_queued=self._max_queued,
+                max_queued_bytes=self._max_queued_bytes,
+            ),
         )
 
         if self.on_message is not None:
@@ -174,28 +188,86 @@ class MqttiumAsyncAdapter:
         if int(qos) == 0:
             try:
                 self._client.publish_nowait(topic, data, qos=0, retain=retain, properties=properties)
-            except FlowControlError:
-                return None
+            except Exception as exc:
+                if is_flow_control(exc):
+                    return None
+                raise
             mid = self._alloc_mid()
-            cb = self.on_publish
-            if cb is not None:
-                cb(self, None, mid, 0, None)
+            self._fire_bench_publish(mid, 0)
             return mid
+        if uses_on_publish(self._client):
+            return self._publish_qos_via_callback(topic, data, qos, retain, properties)
+        return self._publish_qos_via_receipt(topic, data, qos, retain, properties)
+
+    def _fire_bench_publish(self, mid: int, reason_code: int) -> None:
+        cb = self.on_publish
+        if cb is not None:
+            cb(self, None, mid, reason_code, None)
+
+    def _publish_qos_via_callback(
+        self,
+        topic: str,
+        data: bytes,
+        qos: int,
+        retain: bool,
+        properties: Any,
+    ) -> Optional[int]:
+        """rc14: one library on_publish correlates every in-flight packet id."""
         self._arm_completions()
         try:
             receipt = self._client.publish_nowait(
                 topic, data, qos=qos, retain=retain, properties=properties
             )
-        except FlowControlError:
-            return None
+        except Exception as exc:
+            if is_flow_control(exc):
+                return None
+            raise
         mid = self._alloc_mid()
         if receipt.mid is None:
-            cb = self.on_publish
-            if cb is not None:
-                cb(self, None, mid, 0, None)
+            self._fire_bench_publish(mid, 0)
             return mid
         self._real_to_synth.setdefault(int(receipt.mid), deque()).append(mid)
         return mid
+
+    def _publish_qos_via_receipt(
+        self,
+        topic: str,
+        data: bytes,
+        qos: int,
+        retain: bool,
+        properties: Any,
+    ) -> Optional[int]:
+        """rc15: each PublishReceipt is the completion handle on_publish used to be.
+
+        ``wait()`` allocates a future only when observed, which is what the
+        library documents for a caller that needs PUBACK/PUBCOMP. The task is
+        per in-flight publish, not a cross-thread round trip, and admission
+        itself stays inside ``publish_nowait``.
+        """
+        try:
+            receipt = self._client.publish_nowait(
+                topic, data, qos=qos, retain=retain, properties=properties
+            )
+        except Exception as exc:
+            if is_flow_control(exc):
+                return None
+            raise
+        mid = self._alloc_mid()
+        if receipt_already_done(receipt):
+            self._fire_bench_publish(mid, 0)
+            return mid
+        task = asyncio.get_running_loop().create_task(self._relay_receipt(receipt, mid))
+        self._receipt_tasks.add(task)
+        task.add_done_callback(self._receipt_tasks.discard)
+        return mid
+
+    async def _relay_receipt(self, receipt: Any, mid: int) -> None:
+        reason = 0
+        try:
+            await receipt.wait()
+        except Exception:  # noqa: BLE001
+            reason = 128
+        self._fire_bench_publish(mid, reason)
 
     async def publish(self, topic, payload=None, qos=0, retain=False, properties=None):
         # Present for protocol completeness; this client admits synchronously,

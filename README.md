@@ -37,8 +37,8 @@ markup that is already complete without it.
 |---|---|---|
 | `zmqtt` | [faststream-community/zMQTT](https://github.com/faststream-community/zMQTT) | Pure asyncio MQTT 3.1.1/5 (Alpha) — `pip install 'mqtt-client-bench[zmqtt]'` |
 | `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | aiomqtt **v3** alpha (mqtt5 sans-io, MQTT5 only). **Cannot** share an env with `aiomqtt` v2 |
-| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (RC ≥1.0.0rc11, `publish_nowait` on bridge loop, native `message_callback_add`) — `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
-| `mqttium-compat` | same | Paho VERSION2 façade only (`mqttium.compat.paho`) — ranked separately from `mqttium` |
+| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (pinned ≥1.0.0rc15; `publish_nowait` on the owning loop, native `message_callback_add`). 1.0.0rc14 remains drivable via `--client-path` for version A/B. `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
+| `mqttium-compat` | same | Paho VERSION2 façade (`mqttium.compat.paho`) through 1.0.0rc14, removed in 1.0.0rc15 — ranked separately from `mqttium` |
 
 ```bash
 python -m mqtt_client_bench.run clients -v
@@ -208,21 +208,18 @@ on the loop use `schedule_call` (no `asyncio.Task` per message: mqttium
 that its peers do not. Rankings remain peer-grouped by `io_model` (sync vs
 asyncio_bridged vs CRT); do not treat paho and aiomqtt as interchangeable.
 
-`mqttium` uses ``AsyncClient.publish_nowait`` on the bridge event-loop thread
-(PyPI ≥1.0.0rc11; loop-bound, not cross-thread). QoS≥1 completion is
-``receipt.wait()``, which also re-raises an admission failure so a refused
-publish is not counted as a completion. The adapter installs no
-``AsyncClient.on_publish``: mqttium takes its direct QoS0 transport write only
-while that callback is unset, so setting one would benchmark the slower path.
-The Paho façade remains a separate client id (`mqttium-compat`). Bench
-``max_queued`` maps to ``max_pending_outbound_messages``
-(``EngineConfig.max_queued`` was removed in 0.1.0a2). From 1.0.0rc6 the façade
-exposes ``max_outbound_inflight`` on the constructor (still attach-time only);
-the compat adapter passes it through instead of rebuilding the inner
-``AsyncClient``. The write-pump byte bound is still sized from bench
-``max_queued_bytes`` because the façade ctor does not expose
-``max_outbound_bytes``. Campaign helpers:
-`scripts/run_mqttium_campaign.sh`,
+`mqttium` uses ``AsyncClient.publish_nowait`` on the owning event-loop thread
+(loop-bound, not cross-thread). Through 1.0.0rc14, QoS≥1 completion is the
+library ``on_publish`` callback, armed on the first QoS≥1 publish and never on
+a QoS 0 point: the direct QoS 0 write runs only while that callback is unset.
+1.0.0rc15 removed ``on_publish``; QoS≥1 completion is ``PublishReceipt.wait()``,
+scheduled on the loop so admission stays synchronous. A ``FlowControlError``
+is queue-full (``mid is None`` on the native path), not a completed failure.
+Bench ``max_queued`` maps to ``max_pending_outbound_messages`` on rc14 and to
+``max_unacknowledged_messages`` on rc15. The Paho façade (`mqttium-compat`)
+exists through 1.0.0rc14 and was removed in 1.0.0rc15. Same-library before/after
+comparisons use ``python -m mqtt_client_bench.version_compare`` with two clean
+checkouts. Campaign helpers: `scripts/run_mqttium_campaign.sh`,
 `scripts/run_asyncio_bridged_qos0_campaign.sh`.
 
 Mosquitto provides a local broker on `127.0.0.1:11883` (TCP) and
