@@ -212,8 +212,9 @@ asyncio_bridged vs CRT); do not treat paho and aiomqtt as interchangeable.
 (loop-bound, not cross-thread). Through 1.0.0rc14, QoS≥1 completion is the
 library ``on_publish`` callback, armed on the first QoS≥1 publish and never on
 a QoS 0 point: the direct QoS 0 write runs only while that callback is unset.
-1.0.0rc15 removed ``on_publish``; QoS≥1 completion is ``PublishReceipt.wait()``,
-scheduled on the loop so admission stays synchronous. A ``FlowControlError``
+1.0.0rc15 removed ``on_publish``; QoS≥1 completion registers one future on
+``PublishReceipt`` (what ``wait()`` itself does) so admission stays synchronous
+and does not allocate a task per publish. A ``FlowControlError``
 is queue-full (``mid is None`` on the native path), not a completed failure.
 Bench ``max_queued`` maps to ``max_pending_outbound_messages`` on rc14 and to
 ``max_unacknowledged_messages`` on rc15. The Paho façade (`mqttium-compat`)

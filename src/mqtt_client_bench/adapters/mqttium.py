@@ -39,12 +39,38 @@ def receipt_already_done(receipt: Any) -> bool:
     return bool(done()) if callable(done) else False
 
 
-def _private_api() -> Dict[str, str]:
-    """Declare the rc14 on_publish dependency only when this build still has it.
+def observe_receipt(receipt: Any, on_complete: Any) -> None:
+    """Call ``on_complete(reason_code)`` when a 1.0.0rc15 receipt settles.
 
-    1.0.0rc15 completes through the public receipt, so there is nothing private
-    to declare. Claiming the old hook on that build would describe a path the
-    adapter does not take.
+    ``PublishReceipt.wait`` is the public observer. It allocates a future only
+    when somebody waits, then has to be driven by a Task. A Task per in-flight
+    publish is a harness cost 1.0.0rc14 does not pay (one ``on_publish`` for
+    every ack). The waiter list is what ``wait`` itself appends to, so one
+    future and a done callback is the same observation without that task.
+    ``_error`` is where the library records a terminal failure for ``wait`` to
+    re-raise; there is no public accessor.
+    """
+    loop = asyncio.get_running_loop()
+    waiter = loop.create_future()
+    waiters = receipt._waiters
+    if waiters is None:
+        receipt._waiters = [waiter]
+    else:
+        waiters.append(waiter)
+
+    def _done(_fut: asyncio.Future[Any]) -> None:
+        on_complete(128 if receipt._error is not None else 0)
+
+    waiter.add_done_callback(_done)
+
+
+def _private_api() -> Dict[str, str]:
+    """Declare whichever completion hook this build actually forces the adapter to use.
+
+    1.0.0rc14 takes the direct QoS 0 write only while ``on_publish`` is unset.
+    1.0.0rc15 removed that hook. Completion is still observed through
+    ``PublishReceipt._waiters`` and ``_error``, the same fields ``wait()``
+    uses, because awaiting ``wait()`` would allocate a task per publish.
     """
     try:
         from mqttium.api import AsyncClient
@@ -55,7 +81,14 @@ def _private_api() -> Dict[str, str]:
     except (OSError, TypeError):
         return {}
     if "self.on_publish" not in source:
-        return {}
+        return {
+            "PublishReceipt._waiters / PublishReceipt._error": (
+                "1.0.0rc15 removed on_publish. QoS>=1 completion is observed by "
+                "registering one future on the receipt, which is what "
+                "PublishReceipt.wait does, and reading _error when it resolves. "
+                "A Task per publish would be a harness tax rc14 does not pay."
+            ),
+        }
     return {
         "AsyncClient.on_publish is None / _direct_qos0_ready": (
             "direct QoS0 transport write is only taken while the library "
@@ -130,9 +163,10 @@ class MqttiumAdapter(BridgedAdapterBase):
     Through 1.0.0rc14, QoS>=1 completion is the library ``on_publish`` callback,
     armed on the first QoS>=1 publish and never on a QoS 0 point: the direct
     QoS 0 write runs only while ``on_publish is None``. 1.0.0rc15 removed
-    ``on_publish``; QoS>=1 completion is ``PublishReceipt.wait()``, observed
-    from a loop task so admission itself stays synchronous. A refused publish
-    raises ``FlowControlError`` and is not counted as a completion.
+    ``on_publish``; QoS>=1 completion registers one future on the receipt
+    (what ``PublishReceipt.wait()`` itself does) so admission stays synchronous
+    and does not allocate a task per publish. A refused publish raises
+    ``FlowControlError`` and is not counted as a completion.
     """
 
     _NAME = "mqttium"
@@ -384,9 +418,11 @@ class MqttiumAdapter(BridgedAdapterBase):
         # round trip. publish_nowait is synchronous on the loop thread, so
         # submission and registration happen in one call. Through rc14 the
         # completion arrives later through on_publish. rc15 removed that hook;
-        # PublishReceipt.wait() is the public replacement, scheduled as a loop
-        # task so this call still returns before PUBACK. Registering after
-        # submission is race-free: both run on the loop thread.
+        # one future on the receipt (what wait() registers) resolves at
+        # PUBACK/PUBCOMP without a Task per publish. Registering after
+        # submission is race-free: both run on the loop thread. The façade
+        # has already handed the role a mid, so a refusal is reason 128 here;
+        # the native path returns None instead.
         def _publish_qosn() -> None:
             try:
                 if uses_on_publish(client):
@@ -405,28 +441,19 @@ class MqttiumAdapter(BridgedAdapterBase):
                 receipt = client.publish_nowait(
                     topic, data, qos=qos, retain=retain, properties=properties
                 )
-            except Exception as exc:  # noqa: BLE001
-                if not is_flow_control(exc):
-                    self._fire_on_publish(mid, reason_code=128)
-                    return
+            except Exception:  # noqa: BLE001
                 self._fire_on_publish(mid, reason_code=128)
                 return
             if receipt_already_done(receipt):
                 self._fire_on_publish(mid, reason_code=0)
                 return
-            asyncio.get_running_loop().create_task(self._relay_facade_receipt(receipt, mid))
+            observe_receipt(
+                receipt,
+                lambda reason, synth=mid: self._fire_on_publish(synth, reason_code=reason),
+            )
 
         self.schedule_call(_publish_qosn)
         return PublishResult(rc=0, mid=mid)
-
-    async def _relay_facade_receipt(self, receipt: Any, mid: int) -> None:
-        """Bridge rc15's public receipt onto the façade's on_publish callback."""
-        reason = 0
-        try:
-            await receipt.wait()
-        except Exception:  # noqa: BLE001
-            reason = 128
-        self._fire_on_publish(mid, reason_code=reason)
 
     def _wrap_native_message_cb(self, callback: Any) -> Any:
         def _cb(msg: Any) -> None:
