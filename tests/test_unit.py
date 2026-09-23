@@ -734,7 +734,11 @@ class AdapterRegistryTests(unittest.TestCase):
             self.assertTrue(hasattr(Properties, "set"))
             return
 
+        from mqttium.api.models import PublishReceipt
+
         self.assertNotIn("on_publish", params)
+        self.assertIn("_waiters", PublishReceipt.__dataclass_fields__)
+        self.assertIn("_error", PublishReceipt.__dataclass_fields__)
         self.assertIn("max_unacknowledged_messages", params)
         self.assertIn("max_unacknowledged_bytes", params)
         self.assertIn("max_write_queue_bytes", params)
@@ -6766,28 +6770,25 @@ class MqttiumNativeNowaitTests(unittest.TestCase):
         adapter.on_publish = lambda *args: fired.append((args[2], args[3]))
 
         class _Receipt:
-            def is_done(self):
-                return self._settled
-
             def __init__(self):
                 self.mid = 3
                 self._settled = False
                 self._error = None
-                self._waiter = None
+                self._waiters = None
 
-            async def wait(self):
-                if not self._settled:
-                    self._waiter = asyncio.get_running_loop().create_future()
-                    await self._waiter
-                if self._error is not None:
-                    raise self._error
+            def is_done(self):
+                return self._settled
 
             def settle(self, error=None):
                 self._error = error
                 self._settled = True
-                waiter = self._waiter
-                if waiter is not None and not waiter.done():
-                    waiter.set_result(None)
+                waiters = self._waiters
+                self._waiters = None
+                if not waiters:
+                    return
+                for waiter in waiters:
+                    if not waiter.done():
+                        waiter.set_result(None)
 
         receipt = _Receipt()
 
@@ -6801,13 +6802,10 @@ class MqttiumNativeNowaitTests(unittest.TestCase):
             mid = adapter.publish_nowait("t", b"x", qos=1)
             self.assertEqual(fired, [])
             receipt.settle()
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
             return mid
 
         mid = asyncio.run(drive())
         self.assertEqual(fired, [(mid, 0)])
-        self.assertFalse(adapter._receipt_tasks)
 
     def test_rc15_flow_control_returns_none(self):
         adapter = MqttiumAsyncAdapter()
