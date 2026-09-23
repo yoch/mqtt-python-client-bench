@@ -573,7 +573,12 @@ class AdapterRegistryTests(unittest.TestCase):
 
         for name in ("gmqtt", "aiomqtt", "mqttium-compat", "amqtt", "mqttium"):
             info = adapter_identity(name)
-            declared = info.get("private_api")
+            declared = info.get("private_api") or {}
+            # rc15 native completion is the public receipt, and the Paho façade
+            # is gone, so those two declare nothing on that build. Earlier
+            # builds still have to name every private reach.
+            if name in ("mqttium", "mqttium-compat") and not declared:
+                continue
             self.assertTrue(declared, f"{name} must declare its private API use")
             for attr, reason in declared.items():
                 self.assertTrue(reason.strip(), f"{name}:{attr} needs a reason")
@@ -687,47 +692,71 @@ class AdapterRegistryTests(unittest.TestCase):
                 )
 
     def test_mqttium_private_api_shape(self):
-        # mqttium moves fast and the compat adapter still reaches into the
-        # façade for TLS, SUBACK delivery, and write-pump sizing. If a release
-        # moves any of that, fail here rather than let the adapter silently
-        # measure something else.
+        # mqttium moves fast. rc14's compat adapter reaches into the façade for
+        # TLS, SUBACK delivery, and write-pump sizing. rc15 removed that façade
+        # and on_publish; the native adapter then uses the public receipt.
+        # Either shape must fail here rather than silently measure something else.
         import inspect
 
         from mqttium.api import AsyncClient
-        from mqttium.compat import paho as mqtt
+        from mqttium.types import Properties
 
         async_client = AsyncClient(client_id="shape-probe")
-        for attr in (
-            "publish_nowait",
-            "message_callback_add",
-            "message_callback_remove",
-            "_engine",
-            "_engine_lock",
-            "_sub_futs",
-            "_collect_effects_locked",
-            "_drain_effects",
-            "_reconfigure",
-            "_max_outbound_bytes",
-        ):
+        for attr in ("publish_nowait", "message_callback_add", "message_callback_remove"):
             self.assertTrue(hasattr(async_client, attr), f"mqttium no longer exposes {attr}")
-        # No on_subscribe hook is why the compat adapter mirrors the SUBACK
-        # future registration by hand.
-        self.assertFalse(hasattr(async_client, "on_subscribe"))
+        params = inspect.signature(AsyncClient.__init__).parameters
+        self.assertIn("max_outbound_inflight", params)
+        self.assertIn("message_delivery", params)
 
-        facade = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="shape-probe")
-        for attr in ("_async", "_loop", "_submit", "_run_loop_mutation"):
-            self.assertTrue(hasattr(facade, attr), f"mqttium façade no longer exposes {attr}")
-        # rc6 added the ctor parameter the adapter used to rebuild the inner
-        # client to set. Keep asserting attach-time-only so a later release
-        # that makes it runtime-mutable can drop the ctor-only comment.
-        self.assertIn(
-            "max_outbound_inflight", inspect.signature(mqtt.Client.__init__).parameters
-        )
-        with self.assertRaises(AttributeError):
-            facade._async._reconfigure(max_outbound_inflight=64)
+        if hasattr(async_client, "on_publish"):
+            from mqttium.compat import paho as mqtt
+
+            for attr in (
+                "_engine",
+                "_engine_lock",
+                "_sub_futs",
+                "_collect_effects_locked",
+                "_drain_effects",
+                "_reconfigure",
+                "_max_outbound_bytes",
+            ):
+                self.assertTrue(hasattr(async_client, attr), f"mqttium no longer exposes {attr}")
+            self.assertIn("max_pending_outbound_messages", params)
+            self.assertFalse(hasattr(async_client, "on_subscribe"))
+            facade = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="shape-probe")
+            for attr in ("_async", "_loop", "_submit", "_run_loop_mutation"):
+                self.assertTrue(hasattr(facade, attr), f"mqttium façade no longer exposes {attr}")
+            self.assertIn(
+                "max_outbound_inflight", inspect.signature(mqtt.Client.__init__).parameters
+            )
+            with self.assertRaises(AttributeError):
+                facade._async._reconfigure(max_outbound_inflight=64)
+            self.assertTrue(hasattr(Properties, "set"))
+            return
+
+        self.assertNotIn("on_publish", params)
+        self.assertIn("max_unacknowledged_messages", params)
+        self.assertIn("max_unacknowledged_bytes", params)
+        self.assertIn("max_write_queue_bytes", params)
+        self.assertFalse(hasattr(Properties, "set"))
+        props = Properties({"content_type": "application/json"})
+        self.assertEqual(props.get("content_type"), "application/json")
+        try:
+            from mqttium.compat import paho as mqtt  # noqa: F401
+        except ImportError:
+            mqtt = None
+        self.assertIsNone(mqtt, "1.0.0rc15 removed mqttium.compat")
 
     def test_mqttium_compat_passes_inflight_and_write_pump_on_create(self):
         from mqtt_client_bench.adapters.mqttium_compat import MqttiumCompatAdapter
+
+        try:
+            from mqttium.compat import paho as _mqtt  # noqa: F401
+        except ImportError:
+            with self.assertRaises(ImportError) as caught:
+                MqttiumCompatAdapter.create(client_id="inflight-probe")
+            self.assertIn("1.0.0rc15", str(caught.exception))
+            return
 
         adapter = MqttiumCompatAdapter.create(
             client_id="inflight-probe",
@@ -5146,7 +5175,7 @@ class NativeRttDriveTests(unittest.TestCase):
     def test_official_pairwise_script_never_builds_a_three_way_grid(self):
         official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
         legacy = (ROOT / "scripts/run_mqttium_gmqtt_paho_arm64.sh").read_text()
-        self.assertIn('assert version("mqttium") == "1.0.0rc13"', official)
+        self.assertIn('assert version("mqttium") == "1.0.0rc15"', official)
         self.assertIn('assert version("gmqtt") == "0.7.0"', official)
         self.assertIn('assert version("paho-mqtt") == "2.1.0"', official)
         self.assertIn('mqttium==${MQTTIUM_VER}', official)
@@ -5190,7 +5219,7 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertNotIn("scripts/run_mqttium_gmqtt_paho_arm64.sh", workflow)
         self.assertIn("BENCH_SHA", workflow)
         self.assertIn("pairwise-native-rtt", workflow)
-        self.assertIn('MQTTIUM_VER: "1.0.0rc13"', workflow)
+        self.assertIn('MQTTIUM_VER: "1.0.0rc15"', workflow)
         self.assertIn('GMQTT_VER: "0.7.0"', workflow)
         self.assertIn('PAHO_VER: "2.1.0"', workflow)
         self.assertIn("ABBA_VARIANT_INDEXES=0,1", workflow)
@@ -6730,6 +6759,112 @@ class MqttiumNativeNowaitTests(unittest.TestCase):
         mid = adapter.publish_nowait("t", b"x", qos=0)
         self.assertIsNotNone(mid)
         self.assertEqual(fired, [mid])
+
+    def test_rc15_qos1_receipt_relays_puback(self):
+        adapter = MqttiumAsyncAdapter()
+        fired = []
+        adapter.on_publish = lambda *args: fired.append((args[2], args[3]))
+
+        class _Receipt:
+            def is_done(self):
+                return self._settled
+
+            def __init__(self):
+                self.mid = 3
+                self._settled = False
+                self._error = None
+                self._waiter = None
+
+            async def wait(self):
+                if not self._settled:
+                    self._waiter = asyncio.get_running_loop().create_future()
+                    await self._waiter
+                if self._error is not None:
+                    raise self._error
+
+            def settle(self, error=None):
+                self._error = error
+                self._settled = True
+                waiter = self._waiter
+                if waiter is not None and not waiter.done():
+                    waiter.set_result(None)
+
+        receipt = _Receipt()
+
+        class _Client:
+            def publish_nowait(self, *args, **kwargs):
+                return receipt
+
+        adapter._client = _Client()
+
+        async def drive():
+            mid = adapter.publish_nowait("t", b"x", qos=1)
+            self.assertEqual(fired, [])
+            receipt.settle()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return mid
+
+        mid = asyncio.run(drive())
+        self.assertEqual(fired, [(mid, 0)])
+        self.assertFalse(adapter._receipt_tasks)
+
+    def test_rc15_flow_control_returns_none(self):
+        adapter = MqttiumAsyncAdapter()
+        fired = []
+        adapter.on_publish = lambda *args: fired.append(args)
+
+        class _Client:
+            def publish_nowait(self, *args, **kwargs):
+                raise FlowControlError("writer full")
+
+        adapter._client = _Client()
+        self.assertIsNone(adapter.publish_nowait("t", b"x", qos=1))
+        self.assertEqual(fired, [])
+
+    def test_outbound_bounds_follow_the_frozen_vocabulary(self):
+        from mqtt_client_bench.adapters.mqttium import outbound_bound_kwargs
+
+        class Rc14:
+            def __init__(
+                self,
+                max_outbound_inflight=20,
+                max_pending_outbound_messages=200,
+                max_pending_outbound_bytes=None,
+                max_outbound_bytes=None,
+            ):
+                del (
+                    max_outbound_inflight,
+                    max_pending_outbound_messages,
+                    max_pending_outbound_bytes,
+                    max_outbound_bytes,
+                )
+
+        class Rc15:
+            def __init__(
+                self,
+                max_outbound_inflight=20,
+                max_unacknowledged_messages=200,
+                max_unacknowledged_bytes=None,
+                max_write_queue_bytes=None,
+            ):
+                del (
+                    max_outbound_inflight,
+                    max_unacknowledged_messages,
+                    max_unacknowledged_bytes,
+                    max_write_queue_bytes,
+                )
+
+        rc14 = outbound_bound_kwargs(Rc14, max_inflight=64, max_queued=200, max_queued_bytes=8 << 20)
+        self.assertEqual(rc14["max_outbound_inflight"], 64)
+        self.assertEqual(rc14["max_pending_outbound_messages"], 200)
+        self.assertEqual(rc14["max_pending_outbound_bytes"], 64 << 20)
+        self.assertEqual(rc14["max_outbound_bytes"], 8 << 20)
+        rc15 = outbound_bound_kwargs(Rc15, max_inflight=64, max_queued=200, max_queued_bytes=8 << 20)
+        self.assertEqual(rc15["max_unacknowledged_messages"], 200)
+        self.assertEqual(rc15["max_unacknowledged_bytes"], 64 << 20)
+        self.assertEqual(rc15["max_write_queue_bytes"], 8 << 20)
+        self.assertNotIn("max_pending_outbound_messages", rc15)
 
     def test_other_errors_still_propagate(self):
         adapter = MqttiumAsyncAdapter()

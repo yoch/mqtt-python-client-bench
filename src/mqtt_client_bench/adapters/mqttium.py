@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import ssl
 from collections import deque
 from pathlib import Path
@@ -10,29 +12,138 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from mqtt_client_bench.adapters.async_bridge import BridgedAdapterBase, IncomingMessage
 from mqtt_client_bench.adapters.base import AdapterCapabilities, PublishResult, SubscribeResult
 
+try:
+    from mqttium.errors import FlowControlError
+except ImportError:  # mqttium extra not installed; the adapter is still importable
+
+    class FlowControlError(Exception):
+        """Stand-in so the module imports without the mqttium extra."""
+
+
+def is_flow_control(exc: BaseException) -> bool:
+    """True for this process's FlowControlError and for one loaded via client_path.
+
+    Role workers import the adapter before ``configure_client_path`` swaps the
+    mqttium package. ``except FlowControlError`` then misses the class the
+    checkout actually raises. Matching the name and module keeps both builds.
+    """
+    if isinstance(exc, FlowControlError):
+        return True
+    cls = type(exc)
+    return cls.__name__ == "FlowControlError" and cls.__module__.startswith("mqttium")
+
+
+def receipt_already_done(receipt: Any) -> bool:
+    """QoS 0 receipts are complete at admission; QoS>=1 wait for PUBACK/PUBCOMP."""
+    done = getattr(receipt, "is_done", None)
+    return bool(done()) if callable(done) else False
+
+
+def _private_api() -> Dict[str, str]:
+    """Declare the rc14 on_publish dependency only when this build still has it.
+
+    1.0.0rc15 completes through the public receipt, so there is nothing private
+    to declare. Claiming the old hook on that build would describe a path the
+    adapter does not take.
+    """
+    try:
+        from mqttium.api import AsyncClient
+    except ImportError:
+        return {}
+    try:
+        source = inspect.getsource(AsyncClient.__init__)
+    except (OSError, TypeError):
+        return {}
+    if "self.on_publish" not in source:
+        return {}
+    return {
+        "AsyncClient.on_publish is None / _direct_qos0_ready": (
+            "direct QoS0 transport write is only taken while the library "
+            "on_publish is unset; the adapter fires the bench callback itself "
+            "and arms on_publish on the first QoS>=1 publish"
+        ),
+    }
+
+
+def uses_on_publish(client: Any) -> bool:
+    """1.0.0rc14 and earlier complete QoS>=1 through ``AsyncClient.on_publish``.
+
+    1.0.0rc15 removed that hook. The direct QoS 0 write used to require it to
+    stay unset, so the rc14 adapter arms it lazily; rc15 has nothing to arm.
+    """
+    return hasattr(client, "on_publish")
+
+
+def outbound_bound_kwargs(
+    client_cls: type,
+    *,
+    max_inflight: int,
+    max_queued: int,
+    max_queued_bytes: Optional[int],
+) -> Dict[str, int]:
+    """Map bench inflight/queue knobs onto whichever names this build froze.
+
+    1.0.0rc14: ``max_pending_outbound_messages`` / ``max_pending_outbound_bytes``
+    / ``max_outbound_bytes``. 1.0.0rc15: ``max_unacknowledged_messages`` /
+    ``max_unacknowledged_bytes`` / ``max_write_queue_bytes``. A build that
+    exposes neither is refused rather than run with the library default, which
+    would silently change the window being measured.
+    """
+    names = set(inspect.signature(client_cls.__init__).parameters)
+    if "max_outbound_inflight" not in names:
+        raise RuntimeError("mqttium AsyncClient no longer accepts max_outbound_inflight")
+    queued = max(0, int(max_queued))
+    if "max_pending_outbound_messages" in names:
+        message_key = "max_pending_outbound_messages"
+        pending_bytes_key = "max_pending_outbound_bytes"
+        queue_bytes_key = "max_outbound_bytes"
+    elif "max_unacknowledged_messages" in names:
+        message_key = "max_unacknowledged_messages"
+        pending_bytes_key = "max_unacknowledged_bytes"
+        queue_bytes_key = "max_write_queue_bytes"
+    else:
+        raise RuntimeError("mqttium AsyncClient has no known outbound message bound")
+    kwargs: Dict[str, int] = {
+        "max_outbound_inflight": max(1, int(max_inflight)),
+        message_key: queued,
+    }
+    if max_queued_bytes:
+        missing = [key for key in (pending_bytes_key, queue_bytes_key) if key not in names]
+        if missing:
+            raise RuntimeError(
+                "mqttium AsyncClient is missing outbound byte bounds: " + ", ".join(missing)
+            )
+        # The 1 MiB write-pump default is 16 slots of a 64 KiB payload. Size
+        # both byte windows from the requested depth so the message bound is
+        # what binds, and never shrink them below the library defaults.
+        kwargs[queue_bytes_key] = max(1 << 20, int(max_queued_bytes))
+        kwargs[pending_bytes_key] = max(64 << 20, int(max_queued_bytes))
+    return kwargs
+
 
 class MqttiumAdapter(BridgedAdapterBase):
     """Bench the native ``mqttium.api.AsyncClient`` API (not the Paho façade).
 
     Publishes go through ``publish_nowait()``: loop-bound, non-suspending
-    admission + coalesced effect flush. Completions report via synthetic mid +
-    ``on_publish`` after ``receipt.wait()``, which returns immediately for QoS0
-    and raises whatever the admission path recorded, so a refused publish is
-    counted as a failure rather than as a completion.
+    admission. QoS 0 completes when that call returns (handed to the writer).
 
-    This adapter sets no ``AsyncClient.on_publish``: it fires the bench callback
-    itself. That is deliberate — mqttium's direct QoS0 transport write is only
-    taken while ``on_publish is None`` (``_direct_qos0_ready``), so installing a
-    library-level callback would benchmark the slower path.
+    Through 1.0.0rc14, QoS>=1 completion is the library ``on_publish`` callback,
+    armed on the first QoS>=1 publish and never on a QoS 0 point: the direct
+    QoS 0 write runs only while ``on_publish is None``. 1.0.0rc15 removed
+    ``on_publish``; QoS>=1 completion is ``PublishReceipt.wait()``, observed
+    from a loop task so admission itself stays synchronous. A refused publish
+    raises ``FlowControlError`` and is not counted as a completion.
     """
 
     _NAME = "mqttium"
     _NOTES = (
         "MQTTium AsyncClient (https://pypi.org/project/mqttium/) — async-native MQTT "
-        "3.1.1/5; QoS0 via publish_nowait + schedule_call on the bridge loop "
-        "(PyPI ≥1.0.0rc11). Native ``message_callback_add`` (rc11). Ranked under "
-        "--suite experimental. Paho VERSION2 "
-        "façade is `mqttium-compat`."
+        "3.1.1/5; QoS0 via publish_nowait on the owning loop (PyPI ≥1.0.0rc11). "
+        "Through 1.0.0rc14, QoS>=1 uses on_publish armed lazily so the direct QoS0 "
+        "write stays available. From 1.0.0rc15, QoS>=1 uses PublishReceipt.wait(). "
+        "Native message_callback_add. Ranked under --suite experimental. The Paho "
+        "VERSION2 façade (`mqttium-compat`) exists through 1.0.0rc14 and was removed "
+        "in 1.0.0rc15."
     )
 
     def __init__(self) -> None:
@@ -109,12 +220,7 @@ class MqttiumAdapter(BridgedAdapterBase):
             # the socket write completes (Paho's boundary). Declared so rankings
             # are not read as if the contracts matched.
             "qos0_boundary": "queue",
-            "private_api": {
-                "AsyncClient.on_publish is None / _direct_qos0_ready": (
-                    "direct QoS0 transport write is only taken while the library "
-                    "on_publish is unset; the adapter fires the bench callback itself"
-                ),
-            },
+            "private_api": _private_api(),
         }
 
     @classmethod
@@ -157,33 +263,25 @@ class MqttiumAdapter(BridgedAdapterBase):
             tls = ssl.create_default_context(cafile=self._tls_ca_certs)
 
         async def _connect():
-            # a2+ removed EngineConfig.max_queued — map bench max_queued onto
-            # max_pending_outbound_messages (admission before MID allocation).
-            #
-            # 0.2.0b2 also bounds the write pump in bytes (max_outbound_bytes,
-            # 1 MiB by default), and publish_nowait raises FlowControlError as
-            # soon as *either* bound is full. At 1 MiB that is 16 slots for a
-            # 64 KiB payload and 1 for a 1 MiB one, i.e. a queue orders of
-            # magnitude shallower than the max_queued messages every client is
-            # given — measured as a 76-98% refusal rate on the payload sweep.
-            # Size the byte bounds from the requested depth so the message
-            # window is what binds, and never shrink them below the library's
-            # own defaults.
-            kwargs = {}
-            if self._max_queued_bytes:
-                kwargs["max_outbound_bytes"] = max(1 << 20, int(self._max_queued_bytes))
-                kwargs["max_pending_outbound_bytes"] = max(
-                    64 << 20, int(self._max_queued_bytes)
-                )
+            # a2+ removed EngineConfig.max_queued. rc14 names the admission
+            # window max_pending_outbound_*; rc15 names it max_unacknowledged_*
+            # and the writer window max_write_queue_*. Both still raise
+            # FlowControlError when either the message or the byte bound is
+            # full, and the 1 MiB writer default is 16 slots of a 64 KiB
+            # payload — a 76-98% refusal rate on the payload sweep unless the
+            # byte window is sized from bench max_queued_bytes.
             self._client = AsyncClient(
                 client_id=self._client_id,
                 protocol=proto,
                 clean_start=self._clean_session,
                 keepalive=keepalive,
-                max_outbound_inflight=max(1, int(self._max_inflight)),
-                max_pending_outbound_messages=max(0, int(self._max_queued)),
                 message_delivery="callback",
-                **kwargs,
+                **outbound_bound_kwargs(
+                    AsyncClient,
+                    max_inflight=self._max_inflight,
+                    max_queued=self._max_queued,
+                    max_queued_bytes=self._max_queued_bytes,
+                ),
             )
 
             def _on_publish(mid, reason=None) -> None:
@@ -284,29 +382,51 @@ class MqttiumAdapter(BridgedAdapterBase):
 
         # Correlate the ack instead of suspending a coroutine for the whole
         # round trip. publish_nowait is synchronous on the loop thread, so
-        # submission and registration happen in one call and the completion
-        # arrives later through on_publish — the same discipline gmqtt and
-        # awscrt use, and measured 11-34% cheaper than awaiting the receipt,
-        # growing with load. Registering after submission is race-free: both run
-        # on the loop thread.
+        # submission and registration happen in one call. Through rc14 the
+        # completion arrives later through on_publish. rc15 removed that hook;
+        # PublishReceipt.wait() is the public replacement, scheduled as a loop
+        # task so this call still returns before PUBACK. Registering after
+        # submission is race-free: both run on the loop thread.
         def _publish_qosn() -> None:
             try:
-                if client.on_publish is None:
-                    # Same loop thread that will later deliver the ack, so the
-                    # callback is in place before any completion can arrive.
-                    client.on_publish = self._on_publish_cb
+                if uses_on_publish(client):
+                    if client.on_publish is None:
+                        # Same loop thread that will later deliver the ack, so the
+                        # callback is in place before any completion can arrive.
+                        client.on_publish = self._on_publish_cb
+                    receipt = client.publish_nowait(
+                        topic, data, qos=qos, retain=retain, properties=properties
+                    )
+                    if receipt.mid is None:
+                        self._fire_on_publish(mid, reason_code=0)
+                        return
+                    self._real_to_synth.setdefault(int(receipt.mid), deque()).append(mid)
+                    return
                 receipt = client.publish_nowait(
                     topic, data, qos=qos, retain=retain, properties=properties
                 )
-                if receipt.mid is None:
-                    self._fire_on_publish(mid, reason_code=0)
+            except Exception as exc:  # noqa: BLE001
+                if not is_flow_control(exc):
+                    self._fire_on_publish(mid, reason_code=128)
                     return
-                self._real_to_synth.setdefault(int(receipt.mid), deque()).append(mid)
-            except Exception:  # noqa: BLE001
                 self._fire_on_publish(mid, reason_code=128)
+                return
+            if receipt_already_done(receipt):
+                self._fire_on_publish(mid, reason_code=0)
+                return
+            asyncio.get_running_loop().create_task(self._relay_facade_receipt(receipt, mid))
 
         self.schedule_call(_publish_qosn)
         return PublishResult(rc=0, mid=mid)
+
+    async def _relay_facade_receipt(self, receipt: Any, mid: int) -> None:
+        """Bridge rc15's public receipt onto the façade's on_publish callback."""
+        reason = 0
+        try:
+            await receipt.wait()
+        except Exception:  # noqa: BLE001
+            reason = 128
+        self._fire_on_publish(mid, reason_code=reason)
 
     def _wrap_native_message_cb(self, callback: Any) -> Any:
         def _cb(msg: Any) -> None:
@@ -354,19 +474,29 @@ class MqttiumAdapter(BridgedAdapterBase):
             return None
         from mqttium.types import Properties
 
-        props = Properties()
         if profile == "realistic":
-            props.set("payload_format_indicator", 1)
-            props.set("content_type", "application/json")
-            props.set("message_expiry_interval", 60)
-            props.set("user_property", [("schema", "telemetry.v1"), ("region", "eu-west-1")])
+            values: Dict[str, Any] = {
+                "payload_format_indicator": 1,
+                "content_type": "application/json",
+                "message_expiry_interval": 60,
+                "user_property": [("schema", "telemetry.v1"), ("region", "eu-west-1")],
+            }
         elif profile == "rich":
-            props.set("payload_format_indicator", 1)
-            props.set("content_type", "application/json")
-            props.set("message_expiry_interval", 60)
-            props.set("correlation_data", b"c" * 32)
-            props.set("response_topic", "bench/response/" + ("r" * 48))
-            props.set("user_property", [(f"k{i:02d}", "v" * 64) for i in range(16)])
+            values = {
+                "payload_format_indicator": 1,
+                "content_type": "application/json",
+                "message_expiry_interval": 60,
+                "correlation_data": b"c" * 32,
+                "response_topic": "bench/response/" + ("r" * 48),
+                "user_property": [(f"k{i:02d}", "v" * 64) for i in range(16)],
+            }
         else:
             return None
-        return props
+        # rc14 Properties is a mutable bag with set(); rc15 freezes the mapping
+        # passed to the constructor and has no setter.
+        if hasattr(Properties, "set"):
+            props = Properties()
+            for name, value in values.items():
+                props.set(name, value)
+            return props
+        return Properties(values)
