@@ -15,7 +15,7 @@ cd "$ROOT"
 source .venv/bin/activate
 export PYTHONPATH=src
 
-MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc13}"
+MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc15}"
 FULL="${FULL:-0}"
 RECALIBRATE="${RECALIBRATE:-0}"
 if [ "$FULL" = "1" ]; then

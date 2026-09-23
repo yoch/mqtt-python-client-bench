@@ -16,6 +16,21 @@ from mqtt_client_bench.adapters.base import (
 )
 
 
+def _compat_private_api() -> Dict[str, str]:
+    """The façade's private surface exists only through 1.0.0rc14.
+
+    1.0.0rc15 removed ``mqttium.compat``. Declaring those attributes against a
+    build that does not have them would claim the adapter still reaches in.
+    """
+    try:
+        from mqttium.compat import paho as mqtt
+    except ImportError:
+        return {}
+    if not hasattr(mqtt, "Client"):
+        return {}
+    return dict(MqttiumCompatAdapter._PRIVATE_API)
+
+
 class MqttiumCompatAdapter:
     """Bench ``mqttium.compat.paho`` only — not comparable to native ``mqttium``."""
 
@@ -96,11 +111,11 @@ class MqttiumCompatAdapter:
             "completion_mechanism": caps.completion_mechanism,
             "synthetic_mids": caps.synthetic_mids,
             "display_note": caps.notes,
-            "private_api": dict(cls._PRIVATE_API),
             # Façade publish_nowait admits to the write pump; Paho fires after
             # the socket send completes. Same peer group (sync) but different
             # QoS0 completion boundary.
             "qos0_boundary": "queue",
+            "private_api": _compat_private_api(),
         }
 
     @classmethod
@@ -119,8 +134,16 @@ class MqttiumCompatAdapter:
             from mqttium.compat import paho as mqtt
             from mqttium.enums import MQTTProtocolVersion
         except ImportError as exc:
+            try:
+                import mqttium
+            except ImportError:
+                raise ImportError(
+                    "mqttium is not installed. Install with: pip install 'mqtt-client-bench[mqttium]'"
+                ) from exc
+            version = getattr(mqttium, "__version__", "unknown")
             raise ImportError(
-                "mqttium is not installed. Install with: pip install 'mqtt-client-bench[mqttium]'"
+                f"mqttium {version} has no Paho façade (mqttium.compat was removed "
+                "in 1.0.0rc15); mqttium-compat cannot run against this build"
             ) from exc
 
         proto = getattr(MQTTProtocolVersion, protocol)
