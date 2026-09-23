@@ -10,7 +10,8 @@ queue-full), not to ``on_publish`` reason 128. The facade in ``mqttium.py`` stil
 returns a mid before the bridge call and cannot do that.
 
 Through 1.0.0rc14, QoS>=1 completion is the library ``on_publish`` callback.
-1.0.0rc15 removed it; those completions are ``PublishReceipt.wait()`` tasks.
+1.0.0rc15 removed it; those completions are one future on ``PublishReceipt``,
+the same waiter ``wait()`` would register, without a Task per publish.
 ``FlowControlError`` below is re-exported for tests. Role workers may have
 imported it before ``client_path`` swapped the package, so the publish path
 also matches a ``FlowControlError`` raised by the checkout actually loaded.
@@ -18,7 +19,6 @@ also matches a ``FlowControlError`` raised by the checkout actually loaded.
 
 from __future__ import annotations
 
-import asyncio
 import ssl
 from collections import deque
 from dataclasses import fields, is_dataclass
@@ -30,6 +30,7 @@ from mqtt_client_bench.adapters.base import AdapterCapabilities, SubscribeResult
 from mqtt_client_bench.adapters.mqttium import (
     MqttiumAdapter,
     is_flow_control,
+    observe_receipt,
     outbound_bound_kwargs,
     receipt_already_done,
     uses_on_publish,
@@ -63,9 +64,6 @@ class MqttiumAsyncAdapter:
         self.on_publish = None
         self.on_message = None
         self._pending_filters: List[Tuple[str, Any]] = []
-        # rc15 receipt waiters. The loop also retains tasks, but dropping the
-        # last Python reference before they finish warns and can lose a completion.
-        self._receipt_tasks: set[asyncio.Task[Any]] = set()
 
     @classmethod
     def capabilities(cls) -> AdapterCapabilities:
@@ -239,10 +237,9 @@ class MqttiumAsyncAdapter:
     ) -> Optional[int]:
         """rc15: each PublishReceipt is the completion handle on_publish used to be.
 
-        ``wait()`` allocates a future only when observed, which is what the
-        library documents for a caller that needs PUBACK/PUBCOMP. The task is
-        per in-flight publish, not a cross-thread round trip, and admission
-        itself stays inside ``publish_nowait``.
+        Admission stays inside ``publish_nowait``. Completion is one future on
+        the receipt — what ``PublishReceipt.wait`` registers — so the publish
+        loop does not allocate a Task per message.
         """
         try:
             receipt = self._client.publish_nowait(
@@ -256,18 +253,8 @@ class MqttiumAsyncAdapter:
         if receipt_already_done(receipt):
             self._fire_bench_publish(mid, 0)
             return mid
-        task = asyncio.get_running_loop().create_task(self._relay_receipt(receipt, mid))
-        self._receipt_tasks.add(task)
-        task.add_done_callback(self._receipt_tasks.discard)
+        observe_receipt(receipt, lambda reason, synth=mid: self._fire_bench_publish(synth, reason))
         return mid
-
-    async def _relay_receipt(self, receipt: Any, mid: int) -> None:
-        reason = 0
-        try:
-            await receipt.wait()
-        except Exception:  # noqa: BLE001
-            reason = 128
-        self._fire_bench_publish(mid, reason)
 
     async def publish(self, topic, payload=None, qos=0, retain=False, properties=None):
         # Present for protocol completeness; this client admits synchronously,
