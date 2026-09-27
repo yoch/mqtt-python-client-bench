@@ -737,8 +737,13 @@ class AdapterRegistryTests(unittest.TestCase):
         from mqttium.api.models import PublishReceipt
 
         self.assertNotIn("on_publish", params)
-        self.assertIn("_waiters", PublishReceipt.__dataclass_fields__)
-        self.assertIn("_error", PublishReceipt.__dataclass_fields__)
+        # rc15/rc16 expose the waiter fields as dataclass attributes. rc17
+        # freezes the receipt as a slotted type; the same fields remain.
+        declared = getattr(PublishReceipt, "__dataclass_fields__", None)
+        if declared is None:
+            declared = set(PublishReceipt.__slots__)
+        self.assertIn("_waiters", declared)
+        self.assertIn("_error", declared)
         self.assertIn("max_unacknowledged_messages", params)
         self.assertIn("max_unacknowledged_bytes", params)
         self.assertIn("max_write_queue_bytes", params)
@@ -5179,7 +5184,7 @@ class NativeRttDriveTests(unittest.TestCase):
     def test_official_pairwise_script_never_builds_a_three_way_grid(self):
         official = (ROOT / "scripts/run_pairwise_rtt_campaign.sh").read_text()
         legacy = (ROOT / "scripts/run_mqttium_gmqtt_paho_arm64.sh").read_text()
-        self.assertIn('assert version("mqttium") == "1.0.0rc15"', official)
+        self.assertIn('assert version("mqttium") == "1.0.0rc17"', official)
         self.assertIn('assert version("gmqtt") == "0.7.0"', official)
         self.assertIn('assert version("paho-mqtt") == "2.1.0"', official)
         self.assertIn('mqttium==${MQTTIUM_VER}', official)
@@ -5223,7 +5228,7 @@ class NativeRttDriveTests(unittest.TestCase):
         self.assertNotIn("scripts/run_mqttium_gmqtt_paho_arm64.sh", workflow)
         self.assertIn("BENCH_SHA", workflow)
         self.assertIn("pairwise-native-rtt", workflow)
-        self.assertIn('MQTTIUM_VER: "1.0.0rc15"', workflow)
+        self.assertIn('MQTTIUM_VER: "1.0.0rc17"', workflow)
         self.assertIn('GMQTT_VER: "0.7.0"', workflow)
         self.assertIn('PAHO_VER: "2.1.0"', workflow)
         self.assertIn("ABBA_VARIANT_INDEXES=0,1", workflow)

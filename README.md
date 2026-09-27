@@ -37,7 +37,7 @@ markup that is already complete without it.
 |---|---|---|
 | `zmqtt` | [faststream-community/zMQTT](https://github.com/faststream-community/zMQTT) | Pure asyncio MQTT 3.1.1/5 (Alpha) — `pip install 'mqtt-client-bench[zmqtt]'` |
 | `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | aiomqtt **v3** alpha (mqtt5 sans-io, MQTT5 only). **Cannot** share an env with `aiomqtt` v2 |
-| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (pinned ≥1.0.0rc15; `publish_nowait` on the owning loop, native `message_callback_add`). 1.0.0rc14 remains drivable via `--client-path` for version A/B. `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
+| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (pinned ≥1.0.0rc17; `publish_nowait` on the owning loop, native `message_callback_add`). 1.0.0rc14 and 1.0.0rc16 remain drivable via `--client-path` for version A/B. `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
 | `mqttium-compat` | same | Paho VERSION2 façade (`mqttium.compat.paho`) through 1.0.0rc14, removed in 1.0.0rc15 — ranked separately from `mqttium` |
 
 ```bash
@@ -217,7 +217,9 @@ a QoS 0 point: the direct QoS 0 write runs only while that callback is unset.
 and does not allocate a task per publish. A ``FlowControlError``
 is queue-full (``mid is None`` on the native path), not a completed failure.
 Bench ``max_queued`` maps to ``max_pending_outbound_messages`` on rc14 and to
-``max_unacknowledged_messages`` on rc15. The Paho façade (`mqttium-compat`)
+``max_unacknowledged_messages`` from rc15 onward. 1.0.0rc17 keeps that receipt
+contract; ``mid`` and ``qos`` are read-only and the waiter fields stay on the
+instance. The Paho façade (`mqttium-compat`)
 exists through 1.0.0rc14 and was removed in 1.0.0rc15. Same-library before/after
 comparisons use ``python -m mqtt_client_bench.version_compare`` with two clean
 checkouts. Campaign helpers: `scripts/run_mqttium_campaign.sh`,
