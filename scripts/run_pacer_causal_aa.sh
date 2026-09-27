@@ -25,7 +25,7 @@ cd "$ROOT"
 source .venv/bin/activate
 export PYTHONPATH=src
 
-MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc15}"
+MQTTIUM_VER="${MQTTIUM_VER:-1.0.0rc17}"
 GMQTT_VER="${GMQTT_VER:-0.7.0}"
 PAHO_VER="${PAHO_VER:-2.1.0}"
 PROFILE="${PROFILE:-smoke}"
@@ -51,7 +51,7 @@ pip install --force-reinstall --no-cache-dir \
   "paho-mqtt==${PAHO_VER}"
 python - <<'PY'
 from importlib.metadata import version
-assert version("mqttium") == "1.0.0rc15", version("mqttium")
+assert version("mqttium") == "1.0.0rc17", version("mqttium")
 assert version("gmqtt") == "0.7.0", version("gmqtt")
 assert version("paho-mqtt") == "2.1.0", version("paho-mqtt")
 print("mqttium", version("mqttium"))
