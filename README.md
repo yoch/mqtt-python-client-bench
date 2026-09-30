@@ -187,7 +187,8 @@ src/mqtt_client_bench/
 results/v2/<campaign>/        manifest.json + one <client>.json per client
 ```
 
-The v1 harness and its corpus are archived under the `corpus-v1` tag.
+The v1 harness is archived under the `corpus-v1` tag. Its result corpus
+(1.9 GB) was removed from git history and is kept in an offline git bundle.
 
 ## Tests
 

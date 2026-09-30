@@ -21,8 +21,9 @@ them. **CI never runs benchmarks**: it runs only the unit tests and the report
 build.
 
 Reference docs: `README.md` (clients, statuses, quick start, limitations) and
-`SCENARIOS.md` (per-point wiring and checks). The v1 harness and its corpus are
-archived under the `corpus-v1` tag. Do not resurrect v1 concepts (load
+`SCENARIOS.md` (per-point wiring and checks). The v1 harness is
+archived under the `corpus-v1` tag; its result corpus was removed from git
+history and is kept only in an offline bundle. Do not resurrect v1 concepts (load
 profiles, calibration, fractions of a client's own capacity, ABBA, host
 profiles); they were removed because they could not be verified.
 
