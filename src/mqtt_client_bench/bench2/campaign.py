@@ -161,6 +161,8 @@ def run_campaign(
                 point, client, i = key
                 record = run_once(client, by_name[point], profile, ctx, run_index=i)
                 record["attempt"] = attempt
+                # Index into manifest["sessions"]: host, ceiling, harness floor.
+                record["session"] = len(manifest["sessions"]) - 1
                 store.add(record)
                 elapsed = time.monotonic() - started
                 per_run = elapsed / (n + 1)

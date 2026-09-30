@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from mqtt_client_bench.bench2 import campaign, catalog, envs
+from mqtt_client_bench.bench2 import campaign, catalog, envs, harness_cost
 from mqtt_client_bench.bench2.histogram import summary
 from mqtt_client_bench.bench2.runner import run_once
 from mqtt_client_bench.bench2.session import open_session
@@ -120,6 +120,14 @@ def cmd_run(args) -> int:
     return 0 if all(r["status"] != "invalid" for r in records) else 1
 
 
+def cmd_harness_cost(args) -> int:
+    costs = harness_cost.measure()
+    for shape, ns in costs.items():
+        print(f"{shape:16s} {ns:7.1f} ns/msg")
+    print(f"budget {harness_cost.BUDGET_NS} ns/msg; worker RSS floor {harness_cost.baseline_rss_kb()} KiB")
+    return 0 if all(ns <= harness_cost.BUDGET_NS for ns in costs.values()) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="bench2", description="MQTT client benchmark, v2 core.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -156,6 +164,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-dir", default=str(campaign.RESULTS_DIR))
     p.add_argument("--resume", help="campaign directory to continue")
     p.set_defaults(func=cmd_campaign)
+
+    p = sub.add_parser("harness-cost", help="harness ns/message against a null client")
+    p.set_defaults(func=cmd_harness_cost)
     return parser
 
 

@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 
 from mqtt_client_bench.adapters.base import PublishResult
-from mqtt_client_bench.bench2 import campaign, catalog, checks, drive, histogram, peer, sysprobe
+from mqtt_client_bench.bench2 import campaign, catalog, checks, drive, harness_cost, histogram, peer, sysprobe
 
 
 class HistogramTests(unittest.TestCase):
@@ -224,6 +224,36 @@ class DriveTests(unittest.TestCase):
         self.assertGreaterEqual(run.latencies[0], 0)
         self.assertLess(run.latencies[0], 1_000_000_000)
         self.assertEqual(len(Msg.payload), 64)
+
+
+class NullClientTests(unittest.TestCase):
+    """The harness's share of a message, against a client that does nothing.
+
+    Every figure includes the null adapter's own call and stop check, so the
+    true harness share is lower still. 1 us is ~5% of the fastest client's
+    period on the reference host (mqttium, ~15 us/msg at QoS 0).
+    """
+
+    def test_every_drive_shape_is_within_budget(self):
+        costs = harness_cost.measure(n=50_000, repeats=3)
+        for shape, ns in costs.items():
+            with self.subTest(shape=shape):
+                self.assertLessEqual(ns, harness_cost.BUDGET_NS, costs)
+
+    def test_null_client_counts_are_exact(self):
+        run = drive.Run()
+        adapter = harness_cost.NullSync()
+        inner = adapter.publish
+
+        def publish(topic, payload, qos):
+            if run.sent >= 999:
+                run.stop = True
+            return inner(topic, payload, qos)
+
+        adapter.publish = publish
+        drive.pub_capacity_sync(adapter, run, topic="t", qos=1, make=drive.payload_maker(8, False), window=4, t_start=0)
+        self.assertEqual(run.sent, run.done)
+        self.assertEqual(run.failed + run.rejected, 0)
 
 
 class CatalogTests(unittest.TestCase):
