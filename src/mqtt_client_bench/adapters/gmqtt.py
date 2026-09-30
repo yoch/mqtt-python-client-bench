@@ -56,7 +56,7 @@ class GmqttAdapter(BridgedAdapterBase):
             native_message_callback_add=False,
             v5_publish_properties=True,
             stability="stable",
-            io_model="asyncio_bridged",
+            io_model="asyncio",
             implementation_language="python",
             # publish() returns synthetic mids; PUBACKs are translated back
             # from real packet ids via an on-loop mapping.

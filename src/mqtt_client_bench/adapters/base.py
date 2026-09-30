@@ -62,7 +62,7 @@ class AdapterCapabilities:
     # against a fresh session.
     reconnect: bool = True
     stability: str = "stable"  # stable | experimental
-    io_model: str = "sync"  # sync | asyncio_bridged | crt_event_loop
+    io_model: str = "sync"  # sync | asyncio | crt_event_loop
     implementation_language: str = "python"  # python | native
     # How a QoS>=1 completion reaches the role worker. Not cosmetic: an adapter
     # whose coroutine stays suspended for the whole round trip pays a resume per

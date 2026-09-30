@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from mqtt_client_bench.bench import envs
-from mqtt_client_bench.bench.catalog import RUN_OVERHEAD_S, Point, Profile
+from mqtt_client_bench.bench.catalog import ALL_POINTS, PROFILES, RUN_OVERHEAD_S, Point, Profile
 from mqtt_client_bench.bench.runner import refusals, run_once, unsupported_record
 from mqtt_client_bench.bench.session import open_session
 
@@ -112,6 +112,37 @@ class Store:
         tmp.replace(path)
 
 
+def resume_settings(root: Path) -> Tuple[Profile, List[Point], List[str], int]:
+    """What a campaign was started with, so resuming it cannot mix settings."""
+    path = root / "manifest.json"
+    if not path.exists():
+        raise FileNotFoundError(f"{root} has no manifest.json: nothing to resume")
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    name = manifest["profile"]["name"]
+    if name not in PROFILES:
+        raise ValueError(f"{root}: unknown profile {name!r}")
+    points = []
+    for recorded in manifest["points"]:
+        current = ALL_POINTS.get(recorded["name"])
+        if current is None or current.as_dict() != recorded:
+            raise ValueError(f"{root}: point {recorded['name']!r} changed in the catalogue since the campaign started")
+        points.append(current)
+    return PROFILES[name], points, list(manifest["clients"]), int(manifest["runs_per_point"])
+
+
+def _mismatches(manifest: dict, profile: Profile, points: List[Point], clients: List[str], runs: int) -> List[str]:
+    out = []
+    if manifest["profile"] != profile.__dict__:
+        out.append(f"profile {manifest['profile'].get('name')} != {profile.name}")
+    if manifest["points"] != [p.as_dict() for p in points]:
+        out.append("points differ")
+    if list(manifest["clients"]) != list(clients):
+        out.append(f"clients {', '.join(manifest['clients'])} != {', '.join(clients)}")
+    if int(manifest["runs_per_point"]) != runs:
+        out.append(f"runs per point {manifest['runs_per_point']} != {runs}")
+    return out
+
+
 def run_campaign(
     points: List[Point],
     clients: List[str],
@@ -124,6 +155,11 @@ def run_campaign(
 ) -> Store:
     runs = runs or profile.runs
     store = Store(root)
+    existing = store.manifest()
+    if existing is not None:
+        mismatches = _mismatches(existing, profile, points, clients, runs)
+        if mismatches:
+            raise ValueError(f"{root} was started with other settings: {'; '.join(mismatches)}")
     by_name = {p.name: p for p in points}
     for point in points:
         for client in clients:

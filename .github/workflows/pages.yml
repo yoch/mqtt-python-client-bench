@@ -24,11 +24,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install package
-        run: pip install -e .
-
       - name: Build report site
-        run: python -m mqtt_client_bench.run report build --input results --output site
+        # The report is standard library only; no install needed.
+        run: PYTHONPATH=src python -m mqtt_client_bench.run report --input results/v2 --output site
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5

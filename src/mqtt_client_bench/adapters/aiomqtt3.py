@@ -79,7 +79,7 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
             native_message_callback_add=False,
             v5_publish_properties=False,
             stability="experimental",
-            io_model="asyncio_bridged",
+            io_model="asyncio",
             implementation_language="python",
             completion_mechanism="awaited",
             native_async=True,

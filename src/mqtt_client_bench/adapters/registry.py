@@ -18,6 +18,7 @@ from mqtt_client_bench.adapters.mqttium_async import MqttiumAsyncAdapter
 from mqtt_client_bench.adapters.native import native_async_for
 from mqtt_client_bench.adapters.paho import PahoAdapter
 from mqtt_client_bench.adapters.zmqtt import ZmqttAdapter
+from mqtt_client_bench.paths import portable_path
 
 _ADAPTERS: Dict[str, Type] = {
     "paho": PahoAdapter,
@@ -213,8 +214,10 @@ def adapter_identity(client: str, client_path: Optional[str] = None) -> dict:
         info = cls.identity()
     except Exception as exc:  # noqa: BLE001
         info = {"client": client, "adapter": client, "error": str(exc)}
+    if info.get("client_module"):
+        info["client_module"] = portable_path(str(info["client_module"]))
     if client_path:
-        info["client_path"] = str(Path(client_path).resolve())
+        info["client_path"] = portable_path(str(Path(client_path).resolve()))
     return info
 
 

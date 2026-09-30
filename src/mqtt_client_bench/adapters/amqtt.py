@@ -52,7 +52,7 @@ class AmqttAdapter(BridgedAdapterBase):
             native_message_callback_add=False,
             v5_publish_properties=False,
             stability="stable",
-            io_model="asyncio_bridged",
+            io_model="asyncio",
             implementation_language="python",
             completion_mechanism="awaited",
             native_async=True,

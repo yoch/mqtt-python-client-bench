@@ -43,7 +43,7 @@ class ZmqttAdapter(BridgedAdapterBase):
             native_message_callback_add=False,
             v5_publish_properties=True,
             stability="experimental",
-            io_model="asyncio_bridged",
+            io_model="asyncio",
             implementation_language="python",
             completion_mechanism="awaited",
             native_async=True,

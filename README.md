@@ -132,7 +132,10 @@ PYTHONPATH=src python -m mqtt_client_bench.run harness-cost
 ```
 
 A standard campaign over `core,v5` for all eight clients takes about an hour
-(`list` prints the estimate from the real plan). The `smoke` profile (0.5 s
+(`list` prints the estimate from the real plan). `--resume` continues with the
+profile, points, clients and run count recorded in the campaign's manifest,
+and refuses any option that would mix settings in one campaign. `report`
+only ever replaces an output directory it built itself. The `smoke` profile (0.5 s
 warm-up, 2 s window, one run) is for development only. It is tagged
 `non_comparable` and never published.
 

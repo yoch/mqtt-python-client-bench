@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import inspect
 import random
+import re
 import shutil
 import tempfile
 import time
@@ -13,7 +15,7 @@ import unittest
 from pathlib import Path
 
 from mqtt_client_bench.adapters.base import PublishResult
-from mqtt_client_bench.bench import campaign, catalog, checks, drive, harness_cost, histogram, peer, sysprobe
+from mqtt_client_bench.bench import campaign, catalog, checks, drive, harness_cost, histogram, peer, runner, sysprobe
 
 
 class HistogramTests(unittest.TestCase):
@@ -95,6 +97,15 @@ def _record(kind="pub", qos=1, rate=2000, **over):
 
 
 class CheckTests(unittest.TestCase):
+    def test_every_check_and_flag_is_documented(self):
+        # The methodology page is generated from CHECK_DOCS and FLAG_DOCS.
+        source = inspect.getsource(checks) + inspect.getsource(runner)
+        emitted_checks = set(re.findall(r'checks\.add\(\s*"(\w+)"', source))
+        emitted_flags = set(re.findall(r'flags\.append\("(\w+)"\)', source)) | {"non_comparable"}
+        self.assertTrue(emitted_checks)
+        self.assertEqual(emitted_checks, set(checks.CHECK_DOCS))
+        self.assertEqual(emitted_flags, set(checks.FLAG_DOCS))
+
     def test_reconciled_runs_are_valid(self):
         for kind in ("pub", "sub", "rtt"):
             with self.subTest(kind=kind):
@@ -295,6 +306,54 @@ class CampaignTests(unittest.TestCase):
             self.assertTrue(store.done(key))
             reloaded = campaign.Store(Path(tmp))
             self.assertEqual(len(reloaded.attempts(key)), 2)
+
+    def _started(self, root: Path, profile, points, clients, runs) -> None:
+        campaign.Store(root).write_manifest(
+            {
+                "profile": profile.__dict__,
+                "points": [p.as_dict() for p in points],
+                "clients": {c: "1.0" for c in clients},
+                "runs_per_point": runs,
+                "sessions": [],
+            }
+        )
+
+    def test_resume_takes_the_settings_it_was_started_with(self):
+        points = catalog.resolve(["pub_qos1_fixed", "idle_connect"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._started(root, catalog.PROFILES["smoke"], points, ["paho", "gmqtt"], 2)
+            profile, got, clients, runs = campaign.resume_settings(root)
+            self.assertEqual(profile.name, "smoke")
+            self.assertEqual([p.name for p in got], ["pub_qos1_fixed", "idle_connect"])
+            self.assertEqual((clients, runs), (["paho", "gmqtt"], 2))
+
+    def test_resume_refuses_a_point_the_catalogue_changed(self):
+        point = catalog.ALL_POINTS["pub_qos1_fixed"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._started(root, catalog.PROFILES["smoke"], [point], ["paho"], 1)
+            manifest = campaign.Store(root).manifest()
+            manifest["points"][0]["rate"] = 1234
+            campaign.Store(root).write_manifest(manifest)
+            with self.assertRaises(ValueError):
+                campaign.resume_settings(root)
+
+    def test_campaign_refuses_to_mix_settings(self):
+        points = catalog.resolve(["pub_qos1_fixed"])
+        smoke, standard = catalog.PROFILES["smoke"], catalog.PROFILES["standard"]
+        mixes = {
+            "profile": (standard, points, ["paho"], 1),
+            "points": (smoke, catalog.resolve(["idle_connect"]), ["paho"], 1),
+            "clients": (smoke, points, ["paho", "gmqtt"], 1),
+            "runs": (smoke, points, ["paho"], 3),
+        }
+        for what, (profile, pts, clients, runs) in mixes.items():
+            with self.subTest(what=what), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self._started(root, smoke, points, ["paho"], 1)
+                with self.assertRaises(ValueError):
+                    campaign.run_campaign(pts, clients, profile, root, runs=runs, log=lambda _m: None)
 
 
 class SysProbeTests(unittest.TestCase):

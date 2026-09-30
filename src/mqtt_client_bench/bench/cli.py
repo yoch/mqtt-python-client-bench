@@ -8,8 +8,8 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+from mqtt_client_bench import report
 from mqtt_client_bench.bench import campaign, catalog, envs, harness_cost
-from mqtt_client_bench.bench.histogram import summary
 from mqtt_client_bench.bench.runner import run_once
 from mqtt_client_bench.bench.session import open_session
 
@@ -43,21 +43,31 @@ def cmd_list(args) -> int:
 
 
 def cmd_campaign(args) -> int:
-    profile = catalog.PROFILES[args.profile]
-    points = catalog.resolve(_split(args.points), _split(args.suites) or ["core", "v5"])
-    clients = _split(args.clients) or list(envs.CLIENT_EXTRAS)
+    if args.resume:
+        given = [f"--{k.replace('_', '-')}" for k in ("profile", "points", "suites", "clients", "runs") if getattr(args, k) is not None]
+        if given:
+            print(f"--resume reads its settings from the manifest; drop {', '.join(given)}", file=sys.stderr)
+            return 2
+        root = Path(args.resume)
+        try:
+            profile, points, clients, runs = campaign.resume_settings(root)
+        except (OSError, ValueError) as exc:
+            print(exc, file=sys.stderr)
+            return 2
+    else:
+        profile = catalog.PROFILES[args.profile or "standard"]
+        points = catalog.resolve(_split(args.points), _split(args.suites) or ["core", "v5"])
+        clients = _split(args.clients) or list(envs.CLIENT_EXTRAS)
+        runs = args.runs or profile.runs
+        name = campaign.campaign_id() + ("" if profile.comparable else f"-{profile.name}")
+        root = Path(args.output_dir) / name
     missing = [c for c in clients if not envs.env_ready(c)]
     if missing:
         print(f"no environment for {', '.join(missing)}; run: envs --sync --clients {','.join(missing)}", file=sys.stderr)
         return 2
-    if args.resume:
-        root = Path(args.resume)
-    else:
-        name = campaign.campaign_id() + ("" if profile.comparable else f"-{profile.name}")
-        root = Path(args.output_dir) / name
-    order = campaign.plan(points, clients, args.runs or profile.runs)
+    order = campaign.plan(points, clients, runs)
     print(f"{root}: {len(order)} runs, ~{campaign.estimate_s(order, profile) / 60:.0f} min")
-    store = campaign.run_campaign(points, clients, profile, root, runs=args.runs, describe=describe)
+    store = campaign.run_campaign(points, clients, profile, root, runs=runs, describe=describe)
     statuses: dict = {}
     for doc in store.docs.values():
         for r in doc["runs"]:
@@ -81,8 +91,8 @@ def describe(record: dict) -> str:
         parts.append(f"{m['cpu_cores'] * 100:5.1f}% core")
     if m.get("rss_peak_kb"):
         parts.append(f"rss {m['rss_peak_kb'] / 1024:5.1f} MiB")
-    if m.get("latency"):
-        s = summary(m["latency"])
+    s = m.get("latency_summary") or {}
+    if s.get("count"):
         parts.append(f"p50 {s['p50_us']:.0f} p99 {s['p99_us']:.0f} us")
     if "connect_ms" in m:
         parts.append(f"connect {m['connect_ms']:.1f} ms")
@@ -128,6 +138,16 @@ def cmd_harness_cost(args) -> int:
     return 0 if all(ns <= harness_cost.BUDGET_NS for ns in costs.values()) else 1
 
 
+def cmd_report(args) -> int:
+    try:
+        name = report.build(Path(args.input), Path(args.output), campaign=args.campaign)
+    except (FileNotFoundError, ValueError) as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    print(f"{args.output}: {name or 'no comparable campaign'}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mqtt-client-bench", description="MQTT client benchmark, v2 core.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -159,14 +179,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--clients", help="default: every client")
     p.add_argument("--points")
     p.add_argument("--suites", help="default: core,v5")
-    p.add_argument("--profile", default="standard", choices=sorted(catalog.PROFILES))
+    p.add_argument("--profile", choices=sorted(catalog.PROFILES), help="default: standard")
     p.add_argument("--runs", type=int)
     p.add_argument("--output-dir", default=str(campaign.RESULTS_DIR))
-    p.add_argument("--resume", help="campaign directory to continue")
+    p.add_argument("--resume", help="campaign directory to continue, with the settings it was started with")
     p.set_defaults(func=cmd_campaign)
 
     p = sub.add_parser("harness-cost", help="harness ns/message against a null client")
     p.set_defaults(func=cmd_harness_cost)
+
+    p = sub.add_parser("report", help="build the static site from a campaign")
+    p.add_argument("--input", default=str(campaign.RESULTS_DIR))
+    p.add_argument("--output", default="site")
+    p.add_argument("--campaign", help="build this campaign, even a development one (default: newest comparable)")
+    p.set_defaults(func=cmd_report)
     return parser
 
 

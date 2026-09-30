@@ -30,6 +30,60 @@ NOT_SUSTAINED = "not_sustained"
 VALID = "valid"
 
 
+STATUS_DOCS = {
+    VALID: "Every check passed. Only valid runs enter a median.",
+    NOT_SUSTAINED: (
+        "The client could not hold the fixed offer. A real finding about the client, kept out of "
+        "cost and latency medians because a backlog's latency is queueing time."
+    ),
+    INVALID: (
+        "The harness, the peer, the broker or the host failed. The run says nothing about the "
+        "client; the campaign retries it once."
+    ),
+}
+
+# The report's methodology page is generated from these; a test fails when a
+# check or flag emitted by evaluate() is missing here.
+CHECK_DOCS = {
+    "worker_completed": "The client worker connected, followed the schedule and reported its counters.",
+    "peer_completed": "The C peer connected, followed the schedule and reported its counters.",
+    "broker_counters_read": "A fresh $SYS reading was taken before and after the run.",
+    "broker_confirms_client_publishes": (
+        "Publishes the broker received from the client lie between the client's completions and "
+        "its sends (round trips subtract the echo's republishes)."
+    ),
+    "broker_confirms_peer_publishes": "Publishes the broker received equal what the C source wrote.",
+    "broker_confirms_deliveries": (
+        "Messages the broker sent equal what the receiving side counted. At receive capacity, "
+        "only receiving more than was sent fails: a slow client still has data in its socket "
+        "buffers when the run stops."
+    ),
+    "no_loss": (
+        "QoS 1: every acknowledged publish reached its subscriber. A client that fell behind "
+        "until the broker's queue overflowed is not_sustained; a loss without drops is invalid."
+    ),
+    "offered_rate_held": f"At least {RATE_HELD:.0%} of the fixed offer was produced in the window.",
+    "responses_kept_up": f"Round trips: at least {RATE_HELD:.0%} of the requests were answered in the window.",
+    "client_kept_up": f"Receive: the client took at least {RATE_HELD:.0%} of the offer in the window.",
+    "broker_headroom": f"Fixed-rate and idle points: the broker used less than {BROKER_CPU_LIMIT:.0%} of its core.",
+    "host_quiet": (
+        f"At most {HOST_NOISE_CORES} cores were busy outside the client, the peer and the broker. "
+        "Enforced on comparable profiles only."
+    ),
+}
+
+FLAG_DOCS = {
+    "broker_bound": (
+        f"Capacity point where the broker used at least {BROKER_CPU_LIMIT:.0%} of its core: the "
+        "rate is partly the broker's."
+    ),
+    "offer_bound": "The client received the whole receive offer; its capacity is at least this rate.",
+    "broker_queue_overflow": "The broker discarded QoS 1 messages a slower client could not drain.",
+    "host_noisy": "The rest of the host was busy (only tolerated on non-comparable profiles).",
+    "non_comparable": "Development profile: never published or compared.",
+}
+
+
 def tolerance(n: int) -> int:
     return 5 + int(0.0005 * max(0, n))
 
