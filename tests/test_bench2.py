@@ -7,11 +7,13 @@ import asyncio
 import copy
 import random
 import shutil
+import tempfile
 import time
 import unittest
+from pathlib import Path
 
 from mqtt_client_bench.adapters.base import PublishResult
-from mqtt_client_bench.bench2 import catalog, checks, drive, histogram, peer, sysprobe
+from mqtt_client_bench.bench2 import campaign, catalog, checks, drive, histogram, peer, sysprobe
 
 
 class HistogramTests(unittest.TestCase):
@@ -240,6 +242,29 @@ class CatalogTests(unittest.TestCase):
             base = core[p.name[: -len("_v5")]]
             self.assertEqual((p.kind, p.qos, p.rate, p.payload), (base.kind, base.qos, base.rate, base.payload))
             self.assertEqual(p.protocol, "MQTTv5")
+
+
+class CampaignTests(unittest.TestCase):
+    def test_plan_rotates_clients_and_skips_refusals(self):
+        points = catalog.resolve(["pub_qos1_fixed", "pub_qos1_fixed_v5"])
+        order = campaign.plan(points, ["paho", "gmqtt", "aiomqtt3", "amqtt"], runs=2)
+        v311 = [(c, i) for p, c, i in order if p == "pub_qos1_fixed"]
+        self.assertEqual(v311, [("paho", 0), ("gmqtt", 0), ("amqtt", 0), ("gmqtt", 1), ("amqtt", 1), ("paho", 1)])
+        v5 = {c for p, c, _ in order if p == "pub_qos1_fixed_v5"}
+        self.assertEqual(v5, {"paho", "gmqtt", "aiomqtt3"})
+
+    def test_store_retries_invalid_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = campaign.Store(Path(tmp))
+            key = ("pub_qos1_fixed", "paho", 0)
+            base = {"client": "paho", "point": {"name": "pub_qos1_fixed"}, "run_index": 0, "worker": {}}
+            store.docs["paho"] = {"client": "paho", "runs": [], "unsupported": [], "identity": None}
+            store.add(dict(base, status="invalid"))
+            self.assertFalse(store.done(key))
+            store.add(dict(base, status="invalid"))
+            self.assertTrue(store.done(key))
+            reloaded = campaign.Store(Path(tmp))
+            self.assertEqual(len(reloaded.attempts(key)), 2)
 
 
 class SysProbeTests(unittest.TestCase):

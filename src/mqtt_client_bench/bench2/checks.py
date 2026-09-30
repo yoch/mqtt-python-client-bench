@@ -160,6 +160,11 @@ def evaluate(record: dict, *, strict: bool = True) -> dict:
             delivered >= acked - tolerance(acked),
             f"client saw {acked} PUBACKs; peer received {delivered}",
         )
+    elif qos == 1 and kind == "sub" and not rate:
+        # A capacity offer exceeds what a slow client drains; the broker's
+        # queue limit then discards the excess, which is the measurement.
+        if int(sysd.get("dropped", 0)):
+            flags.append("broker_queue_overflow")
     elif qos == 1 and kind == "sub":
         acked = int(peer["acked_total"])
         delivered = int(final["received"])

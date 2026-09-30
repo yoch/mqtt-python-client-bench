@@ -132,15 +132,10 @@ class Profile:
 
 
 PROFILES: Dict[str, Profile] = {
-    "standard": Profile("standard", warmup_s=2.0, measure_s=10.0, drain_s=2.0, runs=3, comparable=True),
+    "standard": Profile("standard", warmup_s=2.0, measure_s=8.0, drain_s=2.0, runs=3, comparable=True),
     "smoke": Profile("smoke", warmup_s=0.5, measure_s=2.0, drain_s=1.0, runs=1, comparable=False),
 }
 
 # Fixed cost of one run beyond its schedule: process start, connect, and one
-# fresh $SYS reading before and after (sys_interval is 1 s).
-RUN_OVERHEAD_S = 3.0
-
-
-def estimate_s(points: List[Point], clients: int, profile: Profile, runs: Optional[int] = None) -> float:
-    per_run = profile.warmup_s + profile.measure_s + profile.drain_s + RUN_OVERHEAD_S
-    return len(points) * clients * (runs or profile.runs) * per_run
+# fresh $SYS reading before and after (sys_interval is 1 s). Measured ~1.8 s.
+RUN_OVERHEAD_S = 2.0

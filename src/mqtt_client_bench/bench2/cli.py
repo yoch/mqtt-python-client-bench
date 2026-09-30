@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from mqtt_client_bench.bench2 import catalog, envs
+from mqtt_client_bench.bench2 import campaign, catalog, envs
 from mqtt_client_bench.bench2.histogram import summary
 from mqtt_client_bench.bench2.runner import run_once
 from mqtt_client_bench.bench2.session import open_session
@@ -35,9 +35,34 @@ def cmd_list(args) -> int:
         rate = f"{p.rate}/s" if p.rate else ("max" if p.kind != "idle" else "-")
         print(f"{p.name:22s} {p.suite:9s} {p.kind:4s} qos{p.qos} {p.payload:>6d}B {rate:>9s} {p.protocol:9s} {p.question}")
     profile = catalog.PROFILES[args.profile]
-    clients = len(_split(args.clients)) or len(envs.CLIENT_EXTRAS)
-    minutes = catalog.estimate_s(points, clients, profile) / 60
-    print(f"\n{len(points)} points x {clients} clients x {profile.runs} runs ({profile.name}): ~{minutes:.0f} min")
+    clients = _split(args.clients) or list(envs.CLIENT_EXTRAS)
+    order = campaign.plan(points, clients, profile.runs)
+    minutes = campaign.estimate_s(order, profile) / 60
+    print(f"\n{len(order)} runs ({len(points)} points x {len(clients)} clients x {profile.runs}, unsupported pairs skipped), {profile.name}: ~{minutes:.0f} min")
+    return 0
+
+
+def cmd_campaign(args) -> int:
+    profile = catalog.PROFILES[args.profile]
+    points = catalog.resolve(_split(args.points), _split(args.suites) or ["core", "v5"])
+    clients = _split(args.clients) or list(envs.CLIENT_EXTRAS)
+    missing = [c for c in clients if not envs.env_ready(c)]
+    if missing:
+        print(f"no environment for {', '.join(missing)}; run: envs --sync --clients {','.join(missing)}", file=sys.stderr)
+        return 2
+    if args.resume:
+        root = Path(args.resume)
+    else:
+        name = campaign.campaign_id() + ("" if profile.comparable else f"-{profile.name}")
+        root = Path(args.output_dir) / name
+    order = campaign.plan(points, clients, args.runs or profile.runs)
+    print(f"{root}: {len(order)} runs, ~{campaign.estimate_s(order, profile) / 60:.0f} min")
+    store = campaign.run_campaign(points, clients, profile, root, runs=args.runs, describe=describe)
+    statuses: dict = {}
+    for doc in store.docs.values():
+        for r in doc["runs"]:
+            statuses[r["status"]] = statuses.get(r["status"], 0) + 1
+    print(f"done: {statuses}")
     return 0
 
 
@@ -121,6 +146,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-ceiling", action="store_true", help="skip the C->C ceiling measurement")
     p.add_argument("--output")
     p.set_defaults(func=cmd_run)
+
+    p = sub.add_parser("campaign", help="every point x client x run, interleaved and resumable")
+    p.add_argument("--clients", help="default: every client")
+    p.add_argument("--points")
+    p.add_argument("--suites", help="default: core,v5")
+    p.add_argument("--profile", default="standard", choices=sorted(catalog.PROFILES))
+    p.add_argument("--runs", type=int)
+    p.add_argument("--output-dir", default=str(campaign.RESULTS_DIR))
+    p.add_argument("--resume", help="campaign directory to continue")
+    p.set_defaults(func=cmd_campaign)
     return parser
 
 
