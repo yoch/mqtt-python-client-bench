@@ -1,22 +1,10 @@
-# Generated TLS material (ensure_certs regenerates everything; committing the
-# .crt without its gitignored .key desyncs fresh checkouts)
-certs/
-
-# Local run artefacts (committed results/*.json are publication outputs only)
-calibrations/
-logs/
-results/_*.json
-results/_archive_*/
-results/*-smoke.json
-results/*.log
+# Local run artefacts. Campaigns under results/v2/ are publication outputs;
+# smoke campaigns are tagged -smoke and never published.
+results/v2/*-smoke/
+results/_*/
+results/*.json
 site/
-!results/.gitkeep
-
-# Per-point Mosquitto overlays (Receive Maximum). The directory stays in git.
-mosquitto/conf.d/*.conf
-
-# Ephemeral NanoMQ / broker probe configs
-.nanomq-probe/
+build/
 
 # Local tooling
 .venv/
@@ -27,11 +15,11 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 dist/
-build/
 
-# Compiled QoS0 ingress hammer (scripts/mqtt_hammer.c).
-scripts/mqtt_hammer
+# Left over from the v1 harness in existing checkouts.
+certs/
+calibrations/
+logs/
 
-# Full-fidelity raw samples moved out of results/ by `run results archive`.
+# Local v1 raw samples (the corpus itself is under the corpus-v1 tag).
 archive/
-build/

@@ -16,7 +16,6 @@ from mqtt_client_bench.adapters.gmqtt_async import GmqttAsyncAdapter
 from mqtt_client_bench.adapters.mqttium import MqttiumAdapter
 from mqtt_client_bench.adapters.mqttium_async import MqttiumAsyncAdapter
 from mqtt_client_bench.adapters.native import native_async_for
-from mqtt_client_bench.adapters.mqttium_compat import MqttiumCompatAdapter
 from mqtt_client_bench.adapters.paho import PahoAdapter
 from mqtt_client_bench.adapters.zmqtt import ZmqttAdapter
 
@@ -29,7 +28,6 @@ _ADAPTERS: Dict[str, Type] = {
     "zmqtt": ZmqttAdapter,
     "aiomqtt3": Aiomqtt3Adapter,
     "mqttium": MqttiumAdapter,
-    "mqttium-compat": MqttiumCompatAdapter,
 }
 
 # Adapters driven directly on the role worker's own loop. A client is listed
@@ -57,7 +55,6 @@ EXPERIMENTAL_CLIENTS = tuple(
 _CLIENT_MODULE_PREFIXES = {
     "paho": ("paho",),
     "mqttium": ("mqttium",),
-    "mqttium-compat": ("mqttium",),
     "gmqtt": ("gmqtt",),
     "aiomqtt": ("aiomqtt",),
     "aiomqtt3": ("aiomqtt", "mqtt5"),

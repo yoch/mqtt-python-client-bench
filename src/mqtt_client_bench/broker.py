@@ -1,57 +1,32 @@
-"""Mosquitto broker lifecycle, certificates and health checks."""
+"""Mosquitto lifecycle and readiness, driven through docker compose."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import socket
 import subprocess
 import time
-from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
-from mqtt_client_bench.paths import (
-    CERT_DIR,
-    COMPOSE_FILE,
-    MOSQUITTO_CONF,
-    MOSQUITTO_CONF_D,
-    RECEIVE_MAXIMUM_OVERRIDE,
-)
+from mqtt_client_bench.paths import COMPOSE_FILE, MOSQUITTO_CONF
 
-# Pin by tag+digest; mixed images are not comparable.
-# Default is upstream Mosquitto 2.1.2 (packet_buffer_size already in tree).
-# Override with MQTT_BENCH_MOSQUITTO_IMAGE to A/B. 2.0 rejects packet_buffer_size
-# in mosquitto/mosquitto.conf.
+# Pinned by tag and digest; results from different images are not comparable.
+# MQTT_BENCH_MOSQUITTO_IMAGE overrides it for an A/B of the broker itself.
 MOSQUITTO_IMAGE = os.environ.get(
     "MQTT_BENCH_MOSQUITTO_IMAGE",
-    os.environ.get(
-        "PAHO_BENCH_MOSQUITTO_IMAGE",
-        "eclipse-mosquitto:2.1.2-alpine@sha256:38c0da4f2ef84284d47b3b3eeea1cb3bdeabe81ee10caf0cd5c5ff61ee3ea408",
-    ),
-)
-EMQTT_BENCH_IMAGE = os.environ.get(
-    "MQTT_BENCH_EMQTT_IMAGE",
-    os.environ.get(
-        "PAHO_BENCH_EMQTT_IMAGE",
-        "emqx/emqtt-bench:latest@sha256:ae7f2d56cd49b14824c835140c808b093c5e3f2defb3a29b34b17560feb456cd",
-    ),
+    "eclipse-mosquitto:2.1.2-alpine@sha256:38c0da4f2ef84284d47b3b3eeea1cb3bdeabe81ee10caf0cd5c5ff61ee3ea408",
 )
 
 DEFAULT_HOST = "127.0.0.1"
-# Dedicated ports so the harness does not collide with a system Mosquitto on 1883/8883.
+# Off the default 1883 so a system Mosquitto cannot answer in its place.
 DEFAULT_PORT = 11883
-DEFAULT_TLS_PORT = 11884
+
+_CONTAINER: Optional[str] = None
 
 
-def _run(cmd, *, check=True, capture=True, env=None):
-    return subprocess.run(
-        cmd,
-        check=check,
-        capture_output=capture,
-        text=True,
-        env=env,
-    )
+def _run(cmd, *, check=True, env=None):
+    return subprocess.run(cmd, check=check, capture_output=True, text=True, env=env)
 
 
 def config_hash() -> str:
@@ -62,445 +37,98 @@ def config_hash() -> str:
 def image_digest(image: str) -> Optional[str]:
     try:
         proc = _run(["docker", "image", "inspect", "--format", "{{index .RepoDigests 0}}", image], check=False)
-        if proc.returncode != 0:
-            return None
-        digest = (proc.stdout or "").strip()
-        return digest or None
     except FileNotFoundError:
         return None
-
-
-def ensure_certs(force: bool = False) -> dict:
-    """Generate a dedicated benchmark CA + server cert with SANs."""
-    CERT_DIR.mkdir(parents=True, exist_ok=True)
-    ca_key = CERT_DIR / "ca.key"
-    ca_crt = CERT_DIR / "ca.crt"
-    server_key = CERT_DIR / "server.key"
-    server_crt = CERT_DIR / "server.crt"
-    openssl_cfg = CERT_DIR / "openssl.cnf"
-
-    # Keys are gitignored: a fresh checkout can have the .crt files without
-    # their private keys, which crashes the broker's TLS listener.
-    if server_crt.exists() and ca_crt.exists() and server_key.exists() and not force:
-        return {
-            "ca_crt": str(ca_crt),
-            "server_crt": str(server_crt),
-            "server_key": str(server_key),
-            "fingerprint": _fingerprint(server_crt),
-        }
-
-    openssl_cfg.write_text(
-        """
-[req]
-distinguished_name = req_distinguished_name
-x509_extensions = v3_req
-prompt = no
-
-[req_distinguished_name]
-CN = mqtt-bench-ca
-
-[v3_req]
-basicConstraints = CA:TRUE
-keyUsage = keyCertSign, cRLSign
-
-[server_req]
-distinguished_name = server_dn
-req_extensions = server_ext
-prompt = no
-
-[server_dn]
-CN = localhost
-
-[server_ext]
-subjectAltName = @alt_names
-keyUsage = digitalSignature, keyEncipherment
-extendedKeyUsage = serverAuth
-
-[alt_names]
-DNS.1 = localhost
-IP.1 = 127.0.0.1
-""".strip()
-        + "\n"
-    )
-
-    _run(["openssl", "genrsa", "-out", str(ca_key), "2048"])
-    _run(
-        [
-            "openssl",
-            "req",
-            "-x509",
-            "-new",
-            "-nodes",
-            "-key",
-            str(ca_key),
-            "-sha256",
-            "-days",
-            "3650",
-            "-out",
-            str(ca_crt),
-            "-config",
-            str(openssl_cfg),
-            "-extensions",
-            "v3_req",
-        ]
-    )
-    _run(["openssl", "genrsa", "-out", str(server_key), "2048"])
-    csr = CERT_DIR / "server.csr"
-    _run(
-        [
-            "openssl",
-            "req",
-            "-new",
-            "-key",
-            str(server_key),
-            "-out",
-            str(csr),
-            "-config",
-            str(openssl_cfg),
-            "-section",
-            "server_req",
-        ]
-    )
-    _run(
-        [
-            "openssl",
-            "x509",
-            "-req",
-            "-in",
-            str(csr),
-            "-CA",
-            str(ca_crt),
-            "-CAkey",
-            str(ca_key),
-            "-CAcreateserial",
-            "-out",
-            str(server_crt),
-            "-days",
-            "825",
-            "-sha256",
-            "-extfile",
-            str(openssl_cfg),
-            "-extensions",
-            "server_ext",
-        ]
-    )
-    # The container runs as uid 1883; throwaway bench key must be world-readable.
-    os.chmod(server_key, 0o644)
-    return {
-        "ca_crt": str(ca_crt),
-        "server_crt": str(server_crt),
-        "server_key": str(server_key),
-        "fingerprint": _fingerprint(server_crt),
-    }
-
-
-def _fingerprint(cert_path: Path) -> str:
-    proc = _run(["openssl", "x509", "-in", str(cert_path), "-noout", "-fingerprint", "-sha256"])
-    return (proc.stdout or "").strip()
+    return (proc.stdout or "").strip() or None if proc.returncode == 0 else None
 
 
 def compose_cmd(*args: str) -> list:
     return ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
 
 
-_BROKER_CONTAINER_CACHE: Optional[str] = None
-
-
-def broker_running(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> bool:
-    """Is a broker accepting connections right now?
-
-    Deliberately a socket probe rather than a container query: what a caller
-    needs to know is whether the thing it is about to measure through will
-    answer, and a container can be `Up` while the listener is not.
-    """
-    try:
-        with socket.create_connection((host, port), timeout=2.0):
-            return True
-    except OSError:
-        return False
-
-
-def broker_container_name() -> str:
-    """Resolve the actual container name for the compose 'mosquitto' service.
-
-    Compose prefixes the project name (e.g. 'client-mosquitto-1'); targeting a
-    bare 'mosquitto' silently breaks cpuset pinning and docker stats sampling.
-    """
-    global _BROKER_CONTAINER_CACHE
-    if _BROKER_CONTAINER_CACHE is not None:
-        return _BROKER_CONTAINER_CACHE
-    # -a also matches a crash-looping (exited) container so failures are attributed.
-    for args in (("ps", "-a", "--format", "{{.Name}}", "mosquitto"), ("ps", "-a", "-q", "mosquitto")):
+def container_name() -> str:
+    """The compose-prefixed name of the mosquitto service's container."""
+    global _CONTAINER
+    if _CONTAINER is None:
         try:
-            proc = _run(compose_cmd(*args), check=False)
+            proc = _run(compose_cmd("ps", "-a", "--format", "{{.Name}}", "mosquitto"), check=False)
+            lines = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip()]
         except FileNotFoundError:
-            break
-        lines = [ln.strip() for ln in (proc.stdout or "").strip().splitlines() if ln.strip()]
-        if proc.returncode == 0 and lines:
-            _BROKER_CONTAINER_CACHE = lines[0]
-            return lines[0]
-    return "mosquitto"
+            lines = []
+        if not lines:
+            return "mosquitto"
+        _CONTAINER = lines[0]
+    return _CONTAINER
 
 
-def _container_state(name: str) -> Optional[str]:
+def _inspect(name: str, fmt: str) -> Optional[str]:
     try:
-        proc = _run(["docker", "inspect", "--format", "{{.State.Status}}", name], check=False)
+        proc = _run(["docker", "inspect", "--format", fmt, name], check=False)
     except FileNotFoundError:
         return None
-    if proc.returncode != 0:
-        return None
-    return (proc.stdout or "").strip() or None
+    return (proc.stdout or "").strip() or None if proc.returncode == 0 else None
 
 
-def broker_up(wait: bool = True, timeout_s: float = 30.0, cpuset: Optional[str] = None) -> dict:
-    ensure_certs()
-    env = os.environ.copy()
-    env["MQTT_BENCH_MOSQUITTO_IMAGE"] = MOSQUITTO_IMAGE
+def broker_up(*, cpuset: Optional[str] = None, timeout_s: float = 30.0) -> dict:
+    env = dict(os.environ, MQTT_BENCH_MOSQUITTO_IMAGE=MOSQUITTO_IMAGE)
     _run(compose_cmd("up", "-d", "mosquitto"), env=env)
-    container = broker_container_name()
-    # With network_mode=host, a stale mosquitto from another checkout can hold
-    # the ports: our container then crash-loops on "Address in use" while the
-    # foreign broker answers the health check. Fail closed instead of silently
-    # benchmarking against an unmanaged, unpinned broker.
+    name = container_name()
+    # With network_mode=host, a broker from another checkout can hold the port:
+    # ours then exits on "Address in use" while the stranger answers pings.
     deadline = time.time() + 10.0
-    state = _container_state(container)
+    state = _inspect(name, "{{.State.Status}}")
     while state != "running" and time.time() < deadline:
         time.sleep(0.5)
-        state = _container_state(container)
+        state = _inspect(name, "{{.State.Status}}")
     if state == "running":
-        # Guard against an immediate "Address in use" crash (restart=no).
         time.sleep(1.5)
-        state = _container_state(container)
+        state = _inspect(name, "{{.State.Status}}")
     if state != "running":
-        logs = _run(["docker", "logs", "--tail", "5", container], check=False)
+        logs = _run(["docker", "logs", "--tail", "5", name], check=False)
         raise RuntimeError(
-            f"managed mosquitto container {container!r} is {state or 'absent'} after compose up; "
-            f"another broker may hold ports {DEFAULT_PORT}/{DEFAULT_TLS_PORT} "
-            f"(e.g. a stale container from another checkout). Last logs: "
-            f"{(logs.stdout or logs.stderr or '').strip()!r}"
+            f"mosquitto container {name!r} is {state or 'absent'} after compose up; another broker "
+            f"may hold port {DEFAULT_PORT}. Last logs: {(logs.stdout or logs.stderr or '').strip()!r}"
         )
     if cpuset:
-        _run(["docker", "update", "--cpuset-cpus", cpuset, container], check=False)
-    meta = {
-        "managed_broker": True,
+        _run(["docker", "update", "--cpuset-cpus", cpuset, name], check=False)
+    wait_for_broker(DEFAULT_HOST, DEFAULT_PORT, timeout_s=timeout_s)
+    return {
         "image": MOSQUITTO_IMAGE,
         "image_digest": image_digest(MOSQUITTO_IMAGE),
         "config_hash": config_hash(),
-        "host": DEFAULT_HOST,
-        "port": DEFAULT_PORT,
-        "tls_port": DEFAULT_TLS_PORT,
-        "certs": ensure_certs(),
-        "cpuset": cpuset,
-        "container_name": container,
+        "container_name": name,
+        "cpuset": _inspect(name, "{{.HostConfig.CpusetCpus}}") or cpuset,
     }
-    if wait:
-        wait_for_broker(DEFAULT_HOST, DEFAULT_PORT, timeout_s=timeout_s)
-        wait_for_broker(DEFAULT_HOST, DEFAULT_TLS_PORT, timeout_s=timeout_s, tls=True, ca_certs=meta["certs"]["ca_crt"])
-    if cpuset:
-        meta["cpuset_observed"] = _container_cpuset(container)
-    return meta
-
-
-def _container_cpuset(name: str) -> Optional[str]:
-    try:
-        proc = _run(
-            ["docker", "inspect", "--format", "{{.HostConfig.CpusetCpus}}", name],
-            check=False,
-        )
-        if proc.returncode != 0:
-            return None
-        return (proc.stdout or "").strip() or None
-    except FileNotFoundError:
-        return None
 
 
 def broker_down() -> None:
     _run(compose_cmd("down", "--remove-orphans"), check=False)
 
 
-def wait_for_broker(
-    host: str,
-    port: int,
-    *,
-    timeout_s: float = 30.0,
-    tls: bool = False,
-    ca_certs: Optional[str] = None,
-) -> None:
-    """Broker ready means MQTT CONNACK success, not merely TCP accept."""
+def wait_for_broker(host: str, port: int, *, timeout_s: float = 30.0) -> None:
+    """Ready means a CONNACK, not merely an accepted TCP connection."""
     deadline = time.time() + timeout_s
-    last_err = None
+    last_err: Optional[Exception] = None
     while time.time() < deadline:
         try:
-            _mqtt_ping(host, port, tls=tls, ca_certs=ca_certs)
+            _mqtt_ping(host, port)
             return
-        except Exception as exc:  # noqa: BLE001 - collect and retry until timeout
+        except (OSError, RuntimeError) as exc:
             last_err = exc
-            time.sleep(0.25)
+        time.sleep(0.25)
     raise TimeoutError(f"broker not ready at {host}:{port}: {last_err}")
 
 
-def _mqtt_ping(host: str, port: int, *, tls: bool = False, ca_certs: Optional[str] = None) -> None:
-    """Minimal MQTT CONNECT/CONNACK using stdlib sockets (no paho import in orchestrator)."""
-    sock = socket.create_connection((host, port), timeout=3.0)
-    try:
-        if tls:
-            import ssl
-
-            ctx = ssl.create_default_context(cafile=ca_certs) if ca_certs else ssl.create_default_context()
-            ctx.check_hostname = True
-            sock = ctx.wrap_socket(sock, server_hostname=host)
-        # MQTT 3.1.1 CONNECT with client_id "benchping", clean session, keepalive 10
+def _mqtt_ping(host: str, port: int) -> None:
+    with socket.create_connection((host, port), timeout=3.0) as sock:
         client_id = b"benchping"
-        # Variable header + payload
-        proto_name = b"MQTT"
-        vh = struct_pack_string(proto_name) + bytes([0x04, 0x02, 0x00, 0x0A])
-        payload = struct_pack_string(client_id)
-        remaining = vh + payload
-        packet = bytes([0x10]) + encode_remaining_length(len(remaining)) + remaining
-        sock.sendall(packet)
-        # Expect CONNACK: 20 02 00 00
-        data = _recv_exact(sock, 4)
+        body = b"\x00\x04MQTT\x04\x02\x00\x0a" + len(client_id).to_bytes(2, "big") + client_id
+        sock.sendall(bytes([0x10, len(body)]) + body)
+        data = b""
+        while len(data) < 4:
+            chunk = sock.recv(4 - len(data))
+            if not chunk:
+                raise ConnectionError("socket closed while reading CONNACK")
+            data += chunk
         if data[0] != 0x20 or data[3] != 0x00:
             raise RuntimeError(f"unexpected CONNACK: {data!r}")
-    finally:
-        sock.close()
-
-
-def struct_pack_string(value: bytes) -> bytes:
-    return len(value).to_bytes(2, "big") + value
-
-
-def encode_remaining_length(value: int) -> bytes:
-    out = bytearray()
-    while True:
-        byte = value % 128
-        value //= 128
-        if value > 0:
-            byte |= 0x80
-        out.append(byte)
-        if value == 0:
-            break
-    return bytes(out)
-
-
-def _recv_exact(sock: socket.socket, n: int) -> bytes:
-    buf = bytearray()
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise ConnectionError("socket closed while reading CONNACK")
-        buf.extend(chunk)
-    return bytes(buf)
-
-
-def receive_maximum_overlay_text(n: int) -> str:
-    """Mosquitto drop-in that advertises MQTT v5 Receive Maximum = n.
-
-    Mosquitto 2.x sends CONNACK Receive Maximum from ``max_inflight_messages``.
-    The overlay is loaded after the main config (include_dir at the end) so it
-    wins for new connections after SIGHUP.
-    """
-    value = int(n)
-    if value < 1:
-        raise ValueError("receive_maximum must be >= 1")
-    return f"max_inflight_messages {value}\n"
-
-
-def write_receive_maximum_overlay(n: int) -> Path:
-    MOSQUITTO_CONF_D.mkdir(parents=True, exist_ok=True)
-    path = RECEIVE_MAXIMUM_OVERRIDE
-    path.write_text(receive_maximum_overlay_text(n), encoding="utf-8")
-    return path
-
-
-def clear_receive_maximum_overlay() -> None:
-    if RECEIVE_MAXIMUM_OVERRIDE.exists():
-        RECEIVE_MAXIMUM_OVERRIDE.unlink()
-
-
-def advertised_receive_maximum(
-    host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, timeout_s: float = 10.0
-) -> Optional[int]:
-    """The Receive Maximum this broker puts in a CONNACK, read from the wire.
-
-    The only trustworthy answer. A config file says what was asked for; this
-    says what the running process is telling clients, which is what the flow
-    control scenario is about.
-    """
-    import paho.mqtt.client as mqtt
-    from paho.mqtt.enums import CallbackAPIVersion
-
-    seen: dict = {}
-
-    def _on_connect(client, userdata, flags, reason_code, properties=None):
-        seen["value"] = getattr(properties, "ReceiveMaximum", None) if properties else None
-        seen["done"] = True
-
-    client = mqtt.Client(CallbackAPIVersion.VERSION2, protocol=mqtt.MQTTv5)
-    client.on_connect = _on_connect
-    try:
-        client.connect(host, port, 30)
-        client.loop_start()
-        deadline = time.time() + timeout_s
-        while not seen.get("done") and time.time() < deadline:
-            time.sleep(0.02)
-    finally:
-        try:
-            client.loop_stop()
-            client.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
-    return seen.get("value")
-
-
-def apply_receive_maximum(
-    n: int, *, cpuset: Optional[str] = None, verify: bool = True
-) -> dict:
-    """Pin the broker's advertised Receive Maximum, and prove it took.
-
-    Mosquitto does not apply ``max_inflight_messages`` on SIGHUP. Measured on
-    2.1.2: writing the overlay and reloading moved the advertised value on the
-    *first* application after a container start and never again — apply(10)
-    reached the wire, apply(100) and the restore both stayed at 10. A scenario
-    that sweeps two values inside one broker lifetime therefore measured the
-    same broker twice while reporting `valid`, which is worse than reporting
-    nothing.
-
-    So the overlay is applied by recreating the container, and the result is
-    read back off a CONNACK rather than assumed. A caller that gets
-    ``applied`` False must fail the point closed.
-    """
-    path = write_receive_maximum_overlay(n)
-    broker_down()
-    meta = broker_up(wait=True, cpuset=cpuset)
-    advertised = advertised_receive_maximum(meta["host"], meta["port"]) if verify else None
-    return {
-        "receive_maximum": int(n),
-        "overlay": str(path),
-        "advertised": advertised,
-        "applied": (advertised == int(n)) if verify else None,
-    }
-
-
-def restore_receive_maximum(*, cpuset: Optional[str] = None) -> None:
-    """Drop the overlay so the main ``max_inflight_messages`` applies again."""
-    clear_receive_maximum_overlay()
-    broker_down()
-    broker_up(wait=True, cpuset=cpuset)
-
-
-def sighup_broker() -> None:
-    """Ask Mosquitto to reload config. New connections see the overlay."""
-    container = broker_container_name()
-    proc = _run(["docker", "kill", "--signal", "HUP", container], check=False)
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip()
-        raise RuntimeError(f"broker SIGHUP failed on {container!r}: {err}")
-    wait_for_broker(DEFAULT_HOST, DEFAULT_PORT, timeout_s=15.0)
-
-
-def parse_broker_endpoint(value: str) -> Tuple[str, int]:
-    if ":" in value:
-        host, port_s = value.rsplit(":", 1)
-        return host, int(port_s)
-    return value, DEFAULT_PORT

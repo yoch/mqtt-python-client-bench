@@ -1,4 +1,4 @@
-"""Project-root paths for infra assets (compose, certs, mosquitto)."""
+"""Project-root paths for infra assets (compose, mosquitto, the C peer)."""
 
 from __future__ import annotations
 
@@ -9,8 +9,3 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_DIR.parent.parent
 COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yml"
 MOSQUITTO_CONF = PROJECT_ROOT / "mosquitto" / "mosquitto.conf"
-MOSQUITTO_CONF_D = PROJECT_ROOT / "mosquitto" / "conf.d"
-RECEIVE_MAXIMUM_OVERRIDE = MOSQUITTO_CONF_D / "zz-receive-maximum.conf"
-CERT_DIR = PROJECT_ROOT / "certs"
-ROLES_DIR = PACKAGE_DIR / "roles"
-FIXTURES_DIR = PROJECT_ROOT / "fixtures"

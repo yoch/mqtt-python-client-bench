@@ -11,16 +11,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
 
-      - name: Install package
-        # zmqtt and mqttium are experimental (outside [all]) but unit tests cover
-        # their adapters, including the private-API shape pins.
-        run: pip install -e ".[dev,all,zmqtt,mqttium]"
+      - name: Install every client but aiomqtt3
+        # aiomqtt3 shares aiomqtt's import name; the adapter tests read its
+        # capabilities without importing it.
+        run: >-
+          uv sync --frozen --extra dev --extra paho --extra gmqtt --extra aiomqtt
+          --extra amqtt --extra awscrt --extra zmqtt --extra mqttium
 
       - name: Run unit tests
-        # Discover instead of maintaining a hand-written module list. The fixed
-        # list silently skipped new quality/version_compare test modules.
-        run: PYTHONPATH=src python -m unittest discover -s tests -p 'test_*.py' -v
+        run: PYTHONPATH=src uv run --frozen --no-sync python -m unittest discover -s tests -v

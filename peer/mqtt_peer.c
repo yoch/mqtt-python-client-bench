@@ -24,7 +24,7 @@
  *
  * A stamp is the first 8 payload bytes, little-endian CLOCK_MONOTONIC ns.
  * Latency buckets are log-linear, 16 per power of two (<= 6.25 % wide), with
- * values below 32 ns exact; bench2/histogram.py implements the same indexing.
+ * values below 32 ns exact; src/mqtt_client_bench/bench/histogram.py implements the same indexing.
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

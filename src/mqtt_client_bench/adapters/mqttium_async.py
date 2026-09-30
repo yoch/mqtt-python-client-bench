@@ -23,7 +23,6 @@ import ssl
 from collections import deque
 from dataclasses import fields, is_dataclass
 from enum import Enum
-from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from mqtt_client_bench.adapters.base import AdapterCapabilities, SubscribeResult

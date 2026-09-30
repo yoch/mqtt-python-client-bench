@@ -175,9 +175,7 @@ class MqttiumAdapter(BridgedAdapterBase):
         "3.1.1/5; QoS0 via publish_nowait on the owning loop (PyPI ≥1.0.0rc11). "
         "Through 1.0.0rc14, QoS>=1 uses on_publish armed lazily so the direct QoS0 "
         "write stays available. From 1.0.0rc15, QoS>=1 uses PublishReceipt.wait(). "
-        "Native message_callback_add. Ranked under --suite experimental. The Paho "
-        "VERSION2 façade (`mqttium-compat`) exists through 1.0.0rc14 and was removed "
-        "in 1.0.0rc15."
+        "Native message_callback_add."
     )
 
     def __init__(self) -> None:

@@ -1,351 +1,192 @@
 # MQTT Python client comparative benchmark
 
-End-to-end harness that measures popular **Python MQTT client libraries** under
-realistic publish/subscribe workloads against a local Mosquitto broker.
+Measures popular **Python MQTT client libraries** against a local Mosquitto
+broker and reports only what can be checked: how many messages a client sent,
+how many arrived, how much CPU and memory it used to do it, and how late the
+messages were — each count confirmed by a party that does not share code with
+the client.
 
-Extracted from the Eclipse Paho MQTT Python client benchmark suite and
-generalized behind a per-library adapter layer.
-
-**Live reports:** [yoch.github.io/mqtt-python-client-bench](https://yoch.github.io/mqtt-python-client-bench/)
-(generated automatically from committed `results/*.json`).
-
-The site has six kinds of page: an **overview** with the throughput and latency
-rankings and the performance matrix; one page per **scenario**, comparing every
-client along that scenario's own axis; one page per **client**, with its
-identity, the library internals its adapter depends on and the capabilities it
-declines; a **corpus** page showing coverage, what was invalidated and what has
-never been run; one page per **result file**; and the **methodology**. Charts are
-inline SVG rendered at build time — the site pulls nothing from a CDN, and a
-small same-origin script adds hover, sorting and a dark-mode switch on top of
-markup that is already complete without it.
+**Live report:** [yoch.github.io/mqtt-python-client-bench](https://yoch.github.io/mqtt-python-client-bench/)
+(rebuilt from the committed campaigns under `results/v2/`).
 
 ## Clients
 
-### Stable catalogue
+| Client | Library | Drive shape | Notes |
+|---|---|---|---|
+| `paho` | [eclipse-paho/paho.mqtt.python](https://github.com/eclipse-paho/paho.mqtt.python) | sync | Reference; network thread + callbacks |
+| `awscrt` | [awslabs/aws-crt-python](https://github.com/awslabs/aws-crt-python) | sync | Native engine (`aws-c-mqtt`), not pure Python |
+| `gmqtt` | [wialon/gmqtt](https://github.com/wialon/gmqtt) | nowait | asyncio; publish admitted synchronously on the loop |
+| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) | nowait | asyncio; `publish_nowait` + public receipts (≥ 1.1.0) |
+| `aiomqtt` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) v2 | awaited | asyncio, paho backend |
+| `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) v3 alpha | awaited | MQTT 5 only; own environment (same import name as v2) |
+| `amqtt` | [Yakifo/amqtt](https://github.com/Yakifo/amqtt) | awaited | MQTT 3.1.1 only |
+| `zmqtt` | [faststream-community/zMQTT](https://github.com/faststream-community/zMQTT) | awaited | asyncio, alpha |
 
-| Client | Repository | Notes |
+Each library is driven the fastest way its own API allows:
+
+- **sync**: from a plain thread;
+- **nowait**: one coroutine on the worker's loop with a completion callback;
+- **awaited**: `window` reused coroutines, so awaiting never pins the in-flight
+  window at 1.
+
+The drive shape is derived from the adapter's declared capabilities
+(`bench/worker.py:drive_shape`) and a test pins it per client. A capability a
+library lacks (MQTT 5 for amqtt, MQTT 3.1.1 for aiomqtt3) is refused, never
+approximated; refused pairs appear as `unsupported` in the report's coverage
+section.
+
+## What a run measures
+
+Each run has three parties, each in its own process and pinned to its own
+physical core:
+
+- **the client worker**, which runs the library under test in that client's
+  own uv environment and only drives it and counts;
+- **the C peer** (`peer/mqtt_peer.c`), the neutral party on the other side of
+  the broker, acting as a sink, source or echo;
+- **Mosquitto**, whose `$SYS` counters are read fresh before and after the run.
+
+The orchestrator reads CPU time, RSS and context switches from `/proc` from
+outside the worker, so the worker never samples itself.
+
+| Point | Kind | Question |
 |---|---|---|
-| `paho` | [eclipse-paho/paho.mqtt.python](https://github.com/eclipse-paho/paho.mqtt.python) | Eclipse Paho MQTT Python (sync callbacks) — reference |
-| `gmqtt` | [wialon/gmqtt](https://github.com/wialon/gmqtt) | asyncio + callbacks; sync facade via `AsyncioBridge` (QoS2 refused: PUBREC≠PUBCOMP) |
-| `aiomqtt` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | asyncio idiomatic API **v2.x** (paho backend); sync facade |
-| `amqtt` | [Yakifo/amqtt](https://github.com/Yakifo/amqtt) | asyncio client only (MQTT 3.1.1; v5 refused) |
-| `awscrt` | [awslabs/aws-crt-python](https://github.com/awslabs/aws-crt-python) | AWS Common Runtime (`aws-c-mqtt`) — **native** engine, not pure Python |
+| `pub_qos0_max` | publish capacity | QoS 0 messages published per second |
+| `pub_qos1_max` | publish capacity | QoS 1 messages completed (PUBACK) per second, 64 in flight |
+| `pub_qos1_fixed` | fixed 2,000/s | cost per message and publish→delivery latency |
+| `sub_qos0_max` | receive capacity | QoS 0 messages received per second |
+| `sub_qos1_fixed` | fixed 2,000/s | receive cost per message and delivery latency |
+| `rtt_qos1_fixed` | fixed 1,000 req/s | application round trip against the C echo |
+| `pub_16k_fixed` | fixed 1,000/s | cost of 16 KiB payloads |
+| `idle_connect` | idle | connect time and idle footprint |
 
-### Experimental catalogue (separate rankings)
+The `v5` suite repeats the three fixed-rate points over MQTT 5, and
+`extended` adds more capacity and QoS 0 variants. [SCENARIOS.md](SCENARIOS.md)
+describes the wiring of every point.
 
-| Client | Repository | Notes |
-|---|---|---|
-| `zmqtt` | [faststream-community/zMQTT](https://github.com/faststream-community/zMQTT) | Pure asyncio MQTT 3.1.1/5 (Alpha) — `pip install 'mqtt-client-bench[zmqtt]'` |
-| `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) | aiomqtt **v3** alpha (mqtt5 sans-io, MQTT5 only). **Cannot** share an env with `aiomqtt` v2 |
-| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) / [PyPI](https://pypi.org/project/mqttium/) | Native `AsyncClient` (pinned ≥1.0.0rc17; `publish_nowait` on the owning loop, native `message_callback_add`). 1.0.0rc14 and 1.0.0rc16 remain drivable via `--client-path` for version A/B. `pip install 'mqtt-client-bench[mqttium]'` + `--suite experimental` |
-| `mqttium-compat` | same | Paho VERSION2 façade (`mqttium.compat.paho`) through 1.0.0rc14, removed in 1.0.0rc15 — ranked separately from `mqttium` |
+Capacity points rank throughput. **Fixed-rate points** give every client the
+identical absolute offer, so CPU µs per message, RSS and latency compare across
+all libraries. Latency is measured from a `CLOCK_MONOTONIC` stamp in the first
+8 payload bytes to its arrival. The peer measures it on publish points and
+the client callback on receive and round-trip points. It is recorded in the
+same log-linear histogram in C and Python (16 buckets per power of two, at
+most 6.25 % wide).
 
-```bash
-python -m mqtt_client_bench.run clients -v
-```
+### Statuses
 
-Unsupported scenario knobs for a given adapter are refused with
-`not_implemented:...` instead of silently measuring something else.
+- **`valid`**: every check passed.
+- **`not_sustained`**: the client could not hold the fixed offer. This is a
+  real finding about the client, but the run stays out of cost and latency
+  tables, because a backlog's latency is queueing time.
+- **`invalid`**: the harness, the peer, the broker or the host failed. The run
+  says nothing about the client and is retried once.
 
-### Watchlist (not in catalogue yet)
+The checks compare counts across parties with a tolerance of `5 + 0.05 %`:
 
-[`mqttproto`](https://github.com/agronholm/mqttproto), [`ohmqtt`](https://github.com/ohmqtt/ohmqtt_python) — too early / no stable PyPI story.
-Wrappers of Paho/gmqtt (`fastapi-mqtt`, `jmqtt`, …) are intentionally excluded.
+- the broker confirms what the client published and what was delivered;
+- QoS 1 loses nothing;
+- the offer was actually produced and absorbed;
+- the broker kept headroom on fixed points;
+- the rest of the host stayed quiet.
 
-### Suites
+Flags qualify a valid run without invalidating it:
 
-| Suite | Purpose |
-|---|---|
-| `core` | Stable publication suite (experimental clients **refused**) |
-| `full` | Extended stable scenarios |
-| `experimental` | Same contracts as `core`, for `zmqtt` / `aiomqtt3` / `mqttium` / `mqttium-compat` rankings |
+- `broker_bound`: Mosquitto was at its core limit on a capacity point;
+- `offer_bound`: the client received the whole receive offer, so its capacity
+  is higher still;
+- `broker_queue_overflow`: `sub_qos1_max` exceeded the broker queue;
+- `host_noisy`: only on non-comparable profiles.
 
-### Comparability matrix (high level)
+### What makes the numbers trustworthy
 
-| Scenario family | Comparable across | Notes |
-|---|---|---|
-| Dual-protocol core (pub qos sweep, sub_exact, puback, RTT) | clients at the **same MQTT protocol** | Expanded as `MQTTv311` and `MQTTv5` rows; never mix protocols in a ranking cell |
-| Other publisher capacity / QoS0–1 | stable clients with matching caps | still MQTTv311-only; QoS2 excluded for gmqtt and aiomqtt3 |
-| `pub_qos1_inflight` | paho, aiomqtt | requires `max_inflight` |
-| Application RTT fractions | **NOT CROSS-CLIENT COMPARABLE** | `application_rtt_qos1` / `puback_latency_qos1`: per-client `load_fraction`; `run compare` / `run matrix` refuse them |
-| Application RTT / PUBACK matched load | same protocol + same absolute offer | `application_rtt_fixed_rate` (`shared_load_fraction` × `C_common`) and `puback_latency_fixed_rate`; awscrt refused on RTT (no `TCP_NODELAY`) |
-| `sub_callback_matching` | paho, mqttium, mqttium-compat | native `message_callback_add`; peer-grouped by `io_model` |
-| Fleet idle | sync clients only | async_bridged refused (1 loop/thread per conn) |
-| MQTT v5 properties | paho, gmqtt, aiomqtt, awscrt, zmqtt | amqtt / aiomqtt3 constraints apply |
-| `aiomqtt3` rankings | **MQTTv5 peers only** | v5-only client; calibrate via `protocol_capacities.MQTTv5` |
-| Netem (`lan`/`wan`/`edge`) | diagnostic only | marked `non_comparable` on loopback |
-| Smoke profile | never | always `non_comparable` |
-| I/O peer groups | within the same `io_model` | `sync` (paho, mqttium-compat) ≠ `asyncio_bridged` (aiomqtt, gmqtt, mqttium, …) ≠ `crt_event_loop` (awscrt); `mqttium` ≠ `mqttium-compat` |
-| Stability | does **not** split a group | stable and pre-release clients of the same `io_model` compete directly; stable sorts first and pre-release carries an `exp` badge |
+- **Harness cost is measured, not assumed.** `harness-cost` drives every
+  shape against a null client. The floor is 0.4–0.6 µs per message and about
+  20 MiB of RSS, against a 1 µs budget. Both are recorded in every campaign.
+- **Receive capacity is offered by C.** The offer is 90 % of the broker's
+  measured C→C ceiling, so the broker is not the first limit.
+- **Clients are interleaved.** A campaign rotates clients within every point
+  and run, so host drift spreads over all libraries instead of landing on
+  whichever ran last.
+- **Cross-validation against v1.** On a 134-run smoke, 134 of 134 client
+  counts matched `$SYS` exactly. Capacity rose where the v1 harness had taxed
+  the fast clients: gmqtt went from 28.9k to 40k QoS 0 msgs/s, and paho from
+  11.3k to 11.7k. Worker RSS dropped from 42 MiB to 22–26 MiB.
 
 ## Quick start
 
 ```bash
-# From the project root
-pip install -e ".[paho]"
+# One lockfile, one environment per client under .venvs/<extra>
+uv sync --extra dev
+PYTHONPATH=src python -m mqtt_client_bench.run envs --sync
 
-# Generate TLS certs and start Mosquitto (Docker required)
-python -m mqtt_client_bench.run broker up
+# Mosquitto in Docker; the C peer is compiled on first use (cc required)
+PYTHONPATH=src python -m mqtt_client_bench.run list --suites core,v5
+PYTHONPATH=src python -m mqtt_client_bench.run run --clients paho,gmqtt --points pub_qos1_fixed
 
-# List scenarios
-python -m mqtt_client_bench.run list --suite core
+# The published form: every client x point x run, interleaved and resumable
+PYTHONPATH=src python -m mqtt_client_bench.run campaign
+PYTHONPATH=src python -m mqtt_client_bench.run campaign --resume results/v2/<campaign>
 
-# Standard run with Paho (default profile is standard)
-python -m mqtt_client_bench.run run \
-  --scenario pub_qos_sweep_telemetry \
-  --client paho \
-  --output results/paho-pub-qos-sweep-telemetry.json
-
-# Smoke (short, non-comparable) — must be requested explicitly
-python -m mqtt_client_bench.run run \
-  --scenario pub_qos_sweep_telemetry \
-  --profile smoke \
-  --client paho
-
-# Stop broker
-python -m mqtt_client_bench.run broker down
+PYTHONPATH=src python -m mqtt_client_bench.run report --input results/v2 --output site
+PYTHONPATH=src python -m mqtt_client_bench.run harness-cost
 ```
 
-Optional extras: `.[gmqtt]`, `.[aiomqtt]`, `.[amqtt]`, `.[awscrt]`, or `.[all]`.
-Experimental: `.[zmqtt]`, `.[aiomqtt3]`, or `.[mqttium]` (aiomqtt3 needs a separate env; the extra also installs `paho-mqtt` for the harness `$SYS` probe, not as the SUT).
+A standard campaign over `core,v5` for all eight clients takes about an hour
+(`list` prints the estimate from the real plan). The `smoke` profile (0.5 s
+warm-up, 2 s window, one run) is for development only. It is tagged
+`non_comparable` and never published.
 
-## Commands
-
-| Command | Purpose |
-|---|---|
-| `broker up` / `broker down` | Local Mosquitto via docker compose (`network_mode: host`). Pulls `eclipse-mosquitto:2.1.2-alpine`. |
-| `clients` | Adapter catalogue / capability matrix |
-| `list [--suite core\|full]` | Scenario catalogue |
-| `run --scenario NAME --client LIB` | Run one scenario (default `--profile standard`) |
-| `run --suite core\|full --client LIB` | Run a suite |
-| `calibrate --client LIB --output load.json` | Publish + RTT closed-loop baselines → open-loop fractions |
-| `matrix --clients A,B,C [--scenario NAME]` | **Recommended for published rankings** — runs every client interleaved within each point, rotating the order between repetitions |
-| `compare --clients A,B --scenario NAME` | ABBA A/B comparison (all variants by default) |
-| `report build [--input results] [--output site]` | Build static HTML reports for GitHub Pages |
-
-Useful flags:
-
-- `--profile smoke|standard` — smoke is short and marked `non_comparable` (default: **standard**: 12 s measure / 3 s warmup / 3 runs; smoke: 3 s / 1 s / 1 run)
-- `--client …` — system under test
-- `--client-path` — optional checkout/worktree for A/B of the same library
-- `--broker host:port` — external broker (`managed_broker=false`)
-- `--network localhost|lan|wan|edge` — netem profiles need `tc` + `CAP_NET_ADMIN` (diagnostic / non-comparable)
-- `--variant-index N` — compare a single scenario variant
-- `--load-profile` — JSON produced by `calibrate` (must match client/version/broker)
-- `--output` — write full JSON result
-
-## Scenario design
-
-How each scenario is wired (topology, cadence, primary metric, caps, refusals):
-see **[SCENARIOS.md](SCENARIOS.md)**. Broker vs client ceiling probes:
-**[docs/CEILING_PROBES.md](docs/CEILING_PROBES.md)**.
-
-## What is measured
-
-Three protocols are never mixed:
-
-1. **Capacity** — closed-loop bounded outstanding window; primary metric is
-   `completed_success` in `[T0_measure, T1)`.
-2. **Latency** — open-loop at calibrated fractions of **that client's** baseline
-   capacity *in the same regime* (publish capacity for PUBACK latency; RTT
-   capacity for application RTT).
-3. **Integrity** — bounded-rate sequence checks (missing/duplicate/out-of-order).
-
-Worker-owned measurement memory is bounded independently of elapsed message
-count. Latencies and scheduler lag use deterministic reservoir sampling
-(50,000 samples by default); sequence integrity uses bounded exact detail plus
-two online 64-bit commutative fingerprints. Result metadata records observed
-and retained sample counts so percentile quality remains auditable.
-
-Publisher payload backlog is separately capped at 64 MiB by default by reducing
-the effective outstanding window for large payloads. A single payload larger
-than the cap is still admitted alone and reported explicitly. Periodic worker
-telemetry includes RSS, RSS high-water, USS and PSS; abnormal exits retain the
-return code, signal and a `possible_oom_or_sigkill` marker instead of looking
-like an unexplained missing result.
-
-### Application RTT
-
-`application_rtt_qos1` measures a **homogeneous product loop**: the SUT library
-drives both the initiator (`sut` cpuset) and the responder (`orch` cpuset). The
-primary sample is one completed request/response pair. That amplifies stack
-cost relative to a single-sided client benchmark — intentional for “gateway /
-peer of the same stack” questions; it is not a neutral peer RTT.
-
-Open-loop RTT fractions are sized from `rtt_capacity_qos1` (closed-loop max
-completed pairs/s for that client), **not** from publisher-only capacity. A
-publish QoS1 baseline understates the RTT ceiling (two publishes + two
-deliveries per sample) and would mark high fractions inconclusive.
-
-RTT scenarios require `TCP_NODELAY` end to end: without it, ping-pong traffic
-measures a deterministic Nagle+delayed-ACK plateau (~40 ms/hop ≈ 84 ms/pair on
-loopback), not the client. The broker sets `set_tcp_nodelay true`; paho and
-aiomqtt set it on their sockets; asyncio clients get it from the runtime.
-`awscrt` (aws-c-io) exposes no such knob, so its RTT points are refused with
-`not_implemented:tcp_nodelay` rather than published as a TCP artifact.
-
-### Publish completion contract
-
-| QoS | `on_publish` means |
-|---|---|
-| 0 | Packet handed to the transport |
-| 1 | PUBACK received |
-| 2 | PUBCOMP received (adapters that fire earlier must set `qos2=False`) |
-
-Counters: `offered`, `submitted`, `sync_rejected`, `completed_success`,
-`completed_failed`, `missed_due_to_backpressure`. Only `completed_success`
-feeds the primary throughput.
-
-Async libraries use a sync facade (`AsyncioBridge`). That cost is assumed and
-documented; scenarios where it is not representative (`fleet`, native callback
-matching) are refused for bridged clients. Bridged adapters share one submission
-discipline: `publish()` allocates a synthetic mid, enqueues work through a
-**coalesced** cross-thread wake (one `call_soon_threadsafe` per burst), and
-reports completion via `on_publish`. QoS0 paths that can publish synchronously
-on the loop use `schedule_call` (no `asyncio.Task` per message: mqttium
-`publish_nowait`, gmqtt `_connection.publish`); await-only APIs keep
-`schedule_coro`. No adapter pays a per-publish *blocking* bridge round-trip
-that its peers do not. Rankings remain peer-grouped by `io_model` (sync vs
-asyncio_bridged vs CRT); do not treat paho and aiomqtt as interchangeable.
-
-`mqttium` uses ``AsyncClient.publish_nowait`` on the owning event-loop thread
-(loop-bound, not cross-thread). Through 1.0.0rc14, QoS≥1 completion is the
-library ``on_publish`` callback, armed on the first QoS≥1 publish and never on
-a QoS 0 point: the direct QoS 0 write runs only while that callback is unset.
-1.0.0rc15 removed ``on_publish``; QoS≥1 completion registers one future on
-``PublishReceipt`` (what ``wait()`` itself does) so admission stays synchronous
-and does not allocate a task per publish. A ``FlowControlError``
-is queue-full (``mid is None`` on the native path), not a completed failure.
-Bench ``max_queued`` maps to ``max_pending_outbound_messages`` on rc14 and to
-``max_unacknowledged_messages`` from rc15 onward. 1.0.0rc17 keeps that receipt
-contract; ``mid`` and ``qos`` are read-only and the waiter fields stay on the
-instance. The Paho façade (`mqttium-compat`)
-exists through 1.0.0rc14 and was removed in 1.0.0rc15. Same-library before/after
-comparisons use ``python -m mqtt_client_bench.version_compare`` with two clean
-checkouts. Campaign helpers: `scripts/run_mqttium_campaign.sh`,
-`scripts/run_asyncio_bridged_qos0_campaign.sh`.
-
-Mosquitto provides a local broker on `127.0.0.1:11883` (TCP) and
-`127.0.0.1:11884` (TLS — established TLS, no TLS 1.3 guarantee claimed).
-The compose file pulls **eclipse-mosquitto:2.1.2-alpine** (pinned digest).
-Override with `MQTT_BENCH_MOSQUITTO_IMAGE` to A/B; Mosquitto 2.0 rejects
-`packet_buffer_size` in `mosquitto.conf`.
-`emqtt-bench` is the ingress generator for templated topics and QoS>0, capped
-at 100k msgs/s. QoS0 exact-topic `sub_*` capacity uses paced `mqtt_hammer`
-(`scripts/mqtt_hammer.c`, an in-tree C publisher — not emqtt-bench) at
-`--rate 200000`. MQTT version for emqtt-bench is aligned to `point.protocol`.
-
-## Adapter architecture
-
-Role workers (publisher / subscriber / RTT / responder) talk only to
-`MqttClientAdapter`. Library-specific code lives under
-`src/mqtt_client_bench/adapters/`.
-
-## Publishing results
-
-Benchmarks always run **locally** (Docker Mosquitto, host networking). GitHub
-Actions does **not** execute the suites; it only rebuilds the report site.
-
-1. Run with `--profile standard` and write JSON into `results/`.
-2. Preview with `report build`, then open `site/index.html` in a browser.
-3. Commit JSON under `results/` and push to `main`.
-
-## Comparative runs
-
-```bash
-python -m mqtt_client_bench.run compare \
-  --clients paho,gmqtt \
-  --scenario pub_qos_sweep_telemetry \
-  --blocks 4 \
-  --profile standard \
-  --output /tmp/ab.json
-```
-
-ABBA blocks bootstrap per-block `median(B)/median(A)` ratios. Only fully valid
-slots enter the verdict. Load-fraction scenarios auto-calibrate each client once
-against its own MQTT 3.1.1 and MQTT 5 regime capacities (publish or RTT), then
-execute every client × protocol × 50/75/90/100 % point. Fixed 5 s cooldown
-between slots.
-
-## Planned knobs (per-point refusals)
-
-These catalogue variants still refuse with `not_implemented:*` until they can
-be driven honestly. They are not tagged `planned` on a whole scenario:
-
-- `fleet4k_zipf` / `fleet100k` topic cardinality in the loadgen
-- `wan_cut` controlled blackhole outage
-- `mqttv5_rich` variants `topic_alias` / `subscription_identifier` and
-  `connect_latency_and_churn` variants `tls_resume` / `tcp_concurrent`
-
-`mqttv5_flow_control`, `queue_rejection` and `retained_bootstrap` are executable
-in the `full` suite (see `SCENARIOS.md`). `session_resume_qos1` is too.
+The standard profile needs one physical core each for the broker, the client,
+the peer and the orchestrator, plus the `performance` CPU governor and a quiet
+host. Otherwise runs fail `host_quiet`.
 
 ## Layout
 
 ```
+peer/mqtt_peer.c              neutral C sink / source / echo
+mosquitto/mosquitto.conf      one plaintext listener, $SYS every second
 src/mqtt_client_bench/
-  run.py              CLI
-  harness.py          orchestration / barriers / drain
-  scenarios.py        catalogue
-  adapters/           paho, gmqtt, aiomqtt, amqtt, awscrt, zmqtt, aiomqtt3, mqttium, mqttium-compat
-  roles/              worker processes
-docker-compose.yml    Mosquitto 2.1.2-alpine (pinned digest)
-mosquitto/            broker config (packet_buffer_size)
-scripts/mqtt_hammer.c in-tree QoS0 ingress loadgen
-docs/                 CEILING_PROBES.md
-tests/                unit tests
-results/              committed raw JSON outputs
+  adapters/                   one module per library + registry + capabilities
+  bench/
+    catalog.py                points, suites, profiles
+    worker.py, drive.py       the client process: drive shapes and counters
+    runner.py, session.py     one run; one broker + peer + probe session
+    checks.py                 what a run's counts may be used for
+    campaign.py               interleaved, resumable campaigns
+    sysprobe.py, procstat.py  $SYS and /proc readers
+    histogram.py              latency histogram shared with the peer
+    harness_cost.py           null-client floor
+  report/                     static site generator
+results/v2/<campaign>/        manifest.json + one <client>.json per client
 ```
+
+The v1 harness and its corpus are archived under the `corpus-v1` tag.
 
 ## Tests
 
 ```bash
-PYTHONPATH=src python -m unittest tests.test_unit -v
+uv sync --extra dev --extra paho --extra gmqtt --extra aiomqtt --extra amqtt \
+  --extra awscrt --extra zmqtt --extra mqttium
+PYTHONPATH=src uv run --no-sync python -m unittest discover -s tests -v
 ```
+
+No broker or Docker is needed. The histogram parity test compiles the peer
+when a C compiler is available.
+
+## Known limitations
+
+- One host, loopback only: results describe CPU cost and latency without a
+  network in the way, on the machine named in each campaign's manifest.
+- `awscrt` cannot set `TCP_NODELAY` (aws-c-io hides the socket). Its ~25 ms
+  round trip at 1,000 req/s is Nagle's algorithm meeting delayed ACKs. That is
+  real behaviour of the library as shipped, reported as measured.
+- `aiomqtt` v2 and v3 cannot share an environment. Each client has its own,
+  so this only matters for the adapter tests, which skip aiomqtt3.
+- CPU per message at a fixed rate is higher than at capacity, because a
+  mostly idle process pays for wake-ups. Compare fixed-rate costs with each
+  other, never with capacity costs.
 
 ## Contributing
 
 All repository content is written in **English**: documentation, comments,
-docstrings, scenario descriptions, commit messages and report output.
-
-## Known limitations
-
-- `mqttv5_rich` `topic_alias` / `subscription_identifier`, connect
-  `tls_resume` / `tcp_concurrent`, `fleet4k_zipf` / `fleet100k` and `wan_cut`
-  still refuse with `not_implemented:*` — see “Planned knobs”.
-- `aiomqtt` v2 and v3 cannot cohabit in one environment.
-- `amqtt` has no MQTT v5 client path in this bench (`mqtt_v5=false`).
-- `gmqtt` QoS2 completion is at PUBREC in 0.7 (`qos2=false`).
-- `awscrt` cannot set `TCP_NODELAY` (aws-c-io hides the fd) → RTT scenarios
-  refused; its publish/ingress numbers are unaffected (pipelined writes).
-- Sync facade overhead for asyncio clients is intentional and documented.
-- **Latency at a *fraction* of each client's own capacity is not a cross-client
-  comparison.** `puback_latency_qos1` and `application_rtt_qos1` pace each client
-  at 50-100 % of its *own* calibrated ceiling, which answers "how does this
-  client behave near its limit" — a real question, and the reason those
-  scenarios exist. But a faster client is thereby offered a higher absolute
-  rate and sits further along its own latency-versus-load curve, so reading
-  those tables across clients penalises exactly the clients with the most
-  headroom. Doing so produced a published claim that one client had a 2.95x
-  latency floor; measured at a matched absolute rate the ratio was 1.24x, and
-  the entire difference was the offered rate. For cross-client latency use
-  `puback_latency_fixed_rate` (explicit `target_rate`) and
-  `application_rtt_fixed_rate` (`shared_load_fraction` ×
-  `C_common = min(capacities)`), which offer every client the same absolute
-  rates and let a client that cannot sustain one come back inconclusive.
-  `run compare` / `run matrix` refuse per-client `load_fraction` so it cannot
-  silently become an A/B ranking.
-- Core `sub_*` QoS0 exact-topic capacity offers **200k msgs/s** via paced
-  `mqtt_hammer --rate 200000`. emqtt-bench cannot hold 150k on one loadgen
-  core (`-I` is milliseconds; 150×`I=1` tops out around 100k `$SYS received`
-  here). Templated topics and QoS>0 stay on emqtt-bench, capped at 100k —
-  `clamp_emqtt_offer` raises the publisher count so I=1 actually holds that
-  cap (32 catalogue clients must not remain a silent 32k offer). Burst
-  recovery keeps the I=1 offer of the configured client count on purpose.
-  Older JSON under `results/` was measured at 32k against Mosquitto 2.0.20
-  and is not comparable.
-- The 64 KiB and 1 MiB points of `pub_payload_sweep_qos0` are **broker bound**:
-  Mosquitto saturates before most clients do, so a valid median survives mainly
-  for the clients too slow to saturate it. That inverts the ranking at those two
-  sizes, and they should not be read as a comparison until the broker has more
-  headroom than the clients.
+docstrings, commit messages and report output.
