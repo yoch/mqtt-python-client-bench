@@ -4,48 +4,44 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mqtt-client-bench"
-version = "0.1.0"
+version = "0.2.0"
 description = "Comparative end-to-end benchmark for popular Python MQTT client libraries"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = { text = "EPL-2.0 OR EDL-1.0" }
 authors = [{ name = "MQTT client bench contributors" }]
+# The harness itself has no third-party dependency: the orchestrator, the $SYS
+# probe and the report are standard library only. Each extra below is one
+# system under test, installed in its own environment by `bench envs sync`.
 dependencies = []
 
 [project.optional-dependencies]
 paho = ["paho-mqtt>=2.1.0"]
 gmqtt = ["gmqtt>=0.7.0"]
-aiomqtt = ["aiomqtt>=2.3.0,<3"]
-# Separate env from aiomqtt v2 — same import name.
-# paho-mqtt is the harness $SYS probe, not the SUT: without it every
-# publisher_only run comes back publisher_completions_unconfirmed.
-aiomqtt3 = ["aiomqtt==3.0.0a1", "paho-mqtt>=2.1.0"]
-amqtt = ["amqtt>=0.11.0"]
-awscrt = ["awscrt>=0.23.0"]
-zmqtt = ["zmqtt>=0.2.1"]
-mqttium = ["mqttium>=1.0.0rc17"]
-all = [
-  "mqtt-client-bench[paho]",
-  "mqtt-client-bench[gmqtt]",
-  "mqtt-client-bench[aiomqtt]",
-  "mqtt-client-bench[amqtt]",
-  "mqtt-client-bench[awscrt]",
-]
-# Experimental clients must be installed separately (aiomqtt3 conflicts with aiomqtt).
-experimental-zmqtt = ["mqtt-client-bench[zmqtt]"]
-experimental-aiomqtt3 = ["mqtt-client-bench[aiomqtt3]"]
-experimental-mqttium = ["mqtt-client-bench[mqttium]"]
+aiomqtt = ["aiomqtt>=2.5.1,<3"]
+# Same import name as aiomqtt v2: declared as a conflict below, so it always
+# gets an environment of its own.
+aiomqtt3 = ["aiomqtt==3.0.0a1"]
+amqtt = ["amqtt>=0.12.1"]
+awscrt = ["awscrt>=0.37.0"]
+zmqtt = ["zmqtt>=0.2.4"]
+# Also the extra for the `mqttium-compat` client (same distribution).
+mqttium = ["mqttium>=1.1.0"]
 dev = ["pytest>=7"]
 
 [project.scripts]
 mqtt-client-bench = "mqtt_client_bench.run:main"
 
+[tool.uv]
+conflicts = [
+  [{ extra = "aiomqtt" }, { extra = "aiomqtt3" }],
+]
+
 [tool.hatch.build.targets.sdist]
 include = [
   "/src",
   "/mosquitto",
-  "/certs",
-  "/fixtures",
+  "/peer",
   "/tests",
   "/docker-compose.yml",
   "/README.md",

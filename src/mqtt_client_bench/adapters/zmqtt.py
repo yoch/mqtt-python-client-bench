@@ -155,11 +155,9 @@ class ZmqttAdapter(BridgedAdapterBase):
                     )
 
         sub = self._client.subscribe(topic, qos=qos_enum)
-        # Native mode has no bridge: the running loop is the client's own.
-        if self._bridge is not None:
-            self._bridge.create_task(_pump(sub))
-        else:
-            asyncio.ensure_future(_pump(sub))
+        # Always awaited on the loop that owns the client (the bridge's in the
+        # facade, the worker's in native mode), so the pump belongs there too.
+        asyncio.ensure_future(_pump(sub))
 
     async def adisconnect(self) -> None:
         self._stopping = True
