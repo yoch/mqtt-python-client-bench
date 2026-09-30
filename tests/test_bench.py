@@ -15,6 +15,7 @@ import unittest
 from pathlib import Path
 
 from mqtt_client_bench.adapters.base import PublishResult
+from mqtt_client_bench.adapters.registry import CLIENT_NAMES
 from mqtt_client_bench.bench import campaign, catalog, checks, drive, harness_cost, histogram, peer, runner, sysprobe
 
 
@@ -56,10 +57,10 @@ class HistogramTests(unittest.TestCase):
         self.assertEqual(peer.bucket_indices(values), [histogram.bucket_of(v) for v in values])
 
 
-def _record(kind="pub", qos=1, rate=2000, **over):
+def _record(kind="pub", qos=1, rate=2000, point_kw=None, **over):
     """A run whose counts reconcile exactly; tests perturb one number."""
     window = 10.0
-    point = catalog.Point("t", kind, "?", qos=qos, rate=rate).as_dict()
+    point = catalog.Point("t", kind, "?", qos=qos, rate=rate, **(point_kw or {})).as_dict()
     n_window = int((rate or 20000) * window)
     total = n_window + n_window // 5
     worker = {
@@ -93,6 +94,18 @@ def _record(kind="pub", qos=1, rate=2000, **over):
     }
     for key, value in over.items():
         rec[key] = value
+    return rec
+
+
+def _duplex_record(qos=1, rate=1000):
+    """Client publishes to a C sink while a C source feeds it, all reconciled."""
+    rec = _record("pub", qos=qos, rate=rate)
+    rec["point"] = catalog.Point("t", "duplex", "?", qos=qos, rate=rate).as_dict()
+    total = rec["worker"]["final"]["sent"]
+    n_window = rec["peer"]["received_window"]
+    rec["peer_source"] = {"error": None, "sent_total": total, "sent_window": n_window, "acked_total": total}
+    rec["broker"]["sys"] = {"received": 2 * total, "sent": 2 * total, "dropped": 0}
+    rec["worker"]["latency"] = histogram.from_values([300_000] * 10)
     return rec
 
 
@@ -169,6 +182,61 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(m["lag_summary"]["unsent"], 1)
         self.assertAlmostEqual(m["lag_summary"]["p50_us"], 50, delta=50 / 16)
         self.assertEqual(m["latency_summary"]["count"], 10)
+
+    def test_qos2_counts_like_qos1(self):
+        for kind in ("pub", "sub"):
+            with self.subTest(kind=kind):
+                self.assertEqual(checks.evaluate(_record(kind, qos=2))["status"], checks.VALID)
+        rec = _record("pub", qos=2)
+        rec["peer"]["received_total"] -= 500
+        rec["broker"]["sys"]["sent"] -= 500
+        out = checks.evaluate(rec)
+        self.assertIn("no_loss", [c["name"] for c in out["checks"] if not c["passed"]])
+
+    def test_duplex_reconciles_both_directions(self):
+        out = checks.evaluate(_duplex_record())
+        self.assertEqual(out["status"], checks.VALID, [c for c in out["checks"] if not c["passed"]])
+        self.assertIn("no_loss_inbound", [c["name"] for c in out["checks"]])
+        m = out["metrics"]
+        self.assertEqual(m["msgs_per_s"], (m["client_sent"] + m["received"]) / m["window_s"])
+        self.assertIn("latency_rx", m)
+
+        rec = _duplex_record()
+        rec["worker"]["end"]["received"] -= 1000
+        self.assertEqual(checks.evaluate(rec)["status"], checks.NOT_SUSTAINED)
+
+    def test_payload_lengths_are_checked_by_the_sink(self):
+        rec = _record("pub")
+        rec["peer"]["size_mismatch"] = 0
+        self.assertEqual(checks.evaluate(rec)["status"], checks.VALID)
+        rec["peer"]["size_mismatch"] = 3
+        out = checks.evaluate(rec)
+        self.assertEqual(out["status"], checks.INVALID)
+        self.assertIn("payloads_intact", [c["name"] for c in out["checks"] if not c["passed"]])
+
+    def test_filter_points_need_every_message_in_a_callback(self):
+        rec = _record("sub", point_kw={"topics": 1000, "filters": 100})
+        self.assertEqual(checks.evaluate(rec)["status"], checks.VALID)
+        rec["worker"]["final"]["unmatched"] = 1
+        out = checks.evaluate(rec)
+        self.assertIn("callbacks_matched", [c["name"] for c in out["checks"] if not c["passed"]])
+
+    def test_properties_must_reach_the_sink(self):
+        rec = _record("pub", point_kw={"protocol": "MQTTv5", "properties": "realistic"})
+        rec["peer"]["props_seen"] = rec["peer"]["received_total"]
+        self.assertEqual(checks.evaluate(rec)["status"], checks.VALID)
+        rec["peer"]["props_seen"] = 0
+        self.assertEqual(checks.evaluate(rec)["status"], checks.INVALID)
+
+    def test_topic_alias_is_confirmed_by_broker_bytes(self):
+        rec = _record("pub", point_kw={"protocol": "MQTTv5", "topic_alias": True}, data_topic_bytes=200)
+        sent = rec["worker"]["final"]["sent"]
+        acks = 4 * rec["peer"]["received_total"]
+        rec["broker"]["sys"]["bytes_received"] = acks + sent * (256 + 12)
+        self.assertEqual(checks.evaluate(rec)["status"], checks.VALID)
+        rec["broker"]["sys"]["bytes_received"] = acks + sent * (256 + 200 + 9)
+        out = checks.evaluate(rec)
+        self.assertIn("topic_alias_used", [c["name"] for c in out["checks"] if not c["passed"]])
 
     def test_tolerance(self):
         self.assertEqual(checks.tolerance(0), 5)
@@ -311,6 +379,32 @@ class DriveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             drive.fixed_payload_maker(4, drive.Run())
 
+    def test_cycling_payload_follows_the_index(self):
+        run = drive.Run(send_capacity=8)
+        make = drive.cycling_payload_maker([10, 200, 30], run)
+        self.assertEqual([len(make(i)) for i in range(6)], [10, 200, 30, 10, 200, 30])
+        self.assertTrue(all(t != drive.UNSENT for t in run.sends[:6]))
+
+    def test_routed_publish(self):
+        calls = []
+
+        def publish(topic, payload, qos, properties=None):
+            calls.append((topic, properties))
+            return len(calls)
+
+        spread = drive.routed_publish(publish, ["a", "b", "c"], None, alias=False)
+        for _ in range(4):
+            spread("ignored", b"x", 1)
+        self.assertEqual([t for t, _ in calls], ["a", "b", "c", "a"])
+        calls.clear()
+        alias = drive.routed_publish(publish, ["long/topic"], "P", alias=True)
+        for _ in range(3):
+            alias("long/topic", b"x", 1)
+        self.assertEqual(calls, [("long/topic", "P"), ("", "P"), ("", "P")])
+        calls.clear()
+        drive.routed_publish(publish, ["t"], "P", alias=False)("t", b"x", 1)
+        self.assertEqual(calls, [("t", "P")])
+
 
 class NullClientTests(unittest.TestCase):
     """The harness's share of a message, against a client that does nothing.
@@ -358,6 +452,75 @@ class CatalogTests(unittest.TestCase):
             base = core[p.name[: -len("_v5")]]
             self.assertEqual((p.kind, p.qos, p.rate, p.payload), (base.kind, base.qos, base.rate, base.payload))
             self.assertEqual(p.protocol, "MQTTv5")
+
+    def test_full_campaign_fits_the_budget(self):
+        profile = catalog.PROFILES["standard"]
+        order = campaign.plan(catalog.resolve(suites=list(catalog.SUITES)), list(CLIENT_NAMES), profile.runs)
+        budget = catalog.FULL_CAMPAIGN_BUDGET_S * catalog.FULL_CAMPAIGN_MARGIN
+        self.assertLessEqual(campaign.estimate_s(order, profile), budget)
+
+    def test_extended_knobs_stay_out_of_plain_records(self):
+        self.assertEqual(
+            set(catalog.ALL_POINTS["pub_qos1_fixed"].as_dict()),
+            {"name", "kind", "question", "qos", "payload", "rate", "window", "protocol", "suite"},
+        )
+        rl = catalog.ALL_POINTS["pub_rl_boundaries"].as_dict()
+        self.assertEqual(rl["remaining_lengths"], list(catalog.RL_BOUNDARIES))
+
+    def test_extended_points_are_well_formed(self):
+        for p in catalog.EXTENDED:
+            with self.subTest(point=p.name):
+                self.assertIn(p.kind, catalog.KINDS)
+                self.assertIn(p.properties, catalog.PROPERTY_SETS)
+                if p.properties != "none" or p.topic_alias or p.receive_maximum:
+                    self.assertEqual(p.protocol, "MQTTv5")
+                # gmqtt sizes its outbound packet ids from receive_maximum.
+                if p.receive_maximum:
+                    self.assertEqual(p.kind, "sub")
+                if p.filters:
+                    self.assertGreater(p.topics, 1)
+                if p.remaining_lengths:
+                    self.assertGreater(p.rate, 0)
+
+    def test_refusals_follow_capabilities(self):
+        refused = {
+            ("gmqtt", "pub_qos2_fixed"): "not_implemented:qos2",
+            ("aiomqtt", "sub_filters_fixed"): "not_implemented:native_message_callback_add",
+            ("zmqtt", "pub_qos1_fixed_v5_alias"): "not_implemented:v5_topic_alias",
+            ("awscrt", "sub_qos1_max_v5_rm16"): "not_implemented:v5_receive_maximum",
+            ("aiomqtt3", "pub_qos1_fixed_v5_props"): "not_implemented:v5_publish_properties",
+        }
+        for (client, point), reason in refused.items():
+            with self.subTest(client=client, point=point):
+                self.assertIn(reason, runner.refusals(client, catalog.ALL_POINTS[point]))
+        for client in ("paho", "mqttium"):
+            for p in catalog.EXTENDED:
+                if p.protocol == "MQTTv5" or client == "paho":
+                    self.assertEqual(runner.refusals(client, p), [], (client, p.name))
+
+
+class RunnerTests(unittest.TestCase):
+    def test_remaining_lengths_become_payload_sizes(self):
+        point = catalog.ALL_POINTS["pub_rl_boundaries"]
+        topic = runner.run_topics(point, "0123456789ab")["data"]
+        sizes = runner.payload_sizes(point, topic)
+        overhead = 2 + len(topic) + 2
+        self.assertEqual([s + overhead for s in sizes], list(catalog.RL_BOUNDARIES))
+        self.assertEqual(runner.payload_sizes(catalog.ALL_POINTS["pub_qos1_fixed"], topic), [256])
+
+    def test_alias_point_publishes_on_a_long_topic(self):
+        topics = runner.run_topics(catalog.ALL_POINTS["pub_qos1_fixed_v5_alias"], "0123456789ab")
+        self.assertEqual(len(topics["data"]), runner.ALIAS_TOPIC_BYTES)
+
+    @unittest.skipUnless(shutil.which("cc") or shutil.which("gcc"), "no C compiler")
+    def test_fanout_topics_match_the_c_peer(self):
+        self.assertEqual(runner.fanout_topics("b", 12)[9:], ["b/0/9", "b/1/0", "b/1/1"])
+        argv = peer.command("source", host="h", port=1, topic="b", qos=2, protocol="MQTTv5", client_id="c",
+                            topics=1000, properties=True)
+        self.assertEqual(argv[argv.index("--topics") + 1], "1000")
+        self.assertIn("--props", argv)
+        argv = peer.command("sink", host="h", port=1, topic="b", qos=1, protocol="MQTTv311", client_id="c", sizes=[1, 2])
+        self.assertEqual(argv[argv.index("--sizes") + 1], "1,2")
 
 
 class CampaignTests(unittest.TestCase):

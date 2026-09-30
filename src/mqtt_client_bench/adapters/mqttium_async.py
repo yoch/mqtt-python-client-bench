@@ -83,6 +83,7 @@ class MqttiumAsyncAdapter:
         max_queued: int = 200,
         max_queued_bytes: Optional[int] = None,
         tls_ca_certs: Optional[str] = None,
+        receive_maximum: Optional[int] = None,
     ) -> "MqttiumAsyncAdapter":
         adapter = cls()
         adapter._client_id = client_id
@@ -92,6 +93,7 @@ class MqttiumAsyncAdapter:
         adapter._max_queued = max_queued
         adapter._max_queued_bytes = max_queued_bytes
         adapter._tls_ca_certs = tls_ca_certs
+        adapter._receive_maximum = receive_maximum
         return adapter
 
     def _alloc_mid(self) -> int:
@@ -112,6 +114,7 @@ class MqttiumAsyncAdapter:
             clean_start=self._clean_session,
             keepalive=keepalive,
             message_delivery="callback",
+            **({"max_inbound_inflight": int(self._receive_maximum)} if self._receive_maximum else {}),
             **outbound_bound_kwargs(
                 AsyncClient,
                 max_inflight=self._max_inflight,

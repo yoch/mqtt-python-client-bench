@@ -9,6 +9,9 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PACKAGE_DIR.parent.parent
 COMPOSE_FILE = PROJECT_ROOT / "docker-compose.yml"
 MOSQUITTO_CONF = PROJECT_ROOT / "mosquitto" / "mosquitto.conf"
+# Generated on first use and mounted into the broker container.
+CERTS_DIR = PROJECT_ROOT / "build" / "certs"
+CA_CERT = CERTS_DIR / "ca.crt"
 
 
 def portable_path(path: str) -> str:

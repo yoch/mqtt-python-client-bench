@@ -67,6 +67,8 @@ METRICS: Dict[str, Metric] = {
         "harness's pacing tick, identical for every client.",
     ),
     "lag_max": Metric("lag max", "lower", _micros, "Latest publish against the fixed schedule."),
+    "rx_p50": Metric("receive p50", "lower", _micros, "Duplex: median latency of the messages the client received."),
+    "rx_p99": Metric("receive p99", "lower", _micros, "Duplex: 99th percentile latency of the messages the client received."),
 }
 
 
@@ -180,6 +182,98 @@ QUESTIONS: List[Question] = [
             Column("rtt_qos1_fixed_v5", "p99", "round trip p99"),
         ),
     ),
+    # The extended suite. A question whose points were not run is skipped.
+    Question(
+        "load-curve",
+        "How does the cost change with the load?",
+        "Client CPU per message at 500, 2,000 and 5,000 QoS 1 msgs/s, the same absolute offers for every client. A client that cannot hold 5,000/s shows as not sustained there.",
+        (
+            Column("pub_qos1_fixed_500", "cpu_us_per_msg", "publish 500/s"),
+            Column("pub_qos1_fixed", "cpu_us_per_msg", "publish 2k/s"),
+            Column("pub_qos1_fixed_5k", "cpu_us_per_msg", "publish 5k/s"),
+            Column("sub_qos1_fixed_500", "cpu_us_per_msg", "receive 500/s"),
+            Column("sub_qos1_fixed", "cpu_us_per_msg", "receive 2k/s"),
+            Column("sub_qos1_fixed_5k", "cpu_us_per_msg", "receive 5k/s"),
+        ),
+    ),
+    Question(
+        "load-curve-latency",
+        "Does latency hold as the load grows?",
+        "Publish-to-delivery p99 at the same three offers.",
+        (
+            Column("pub_qos1_fixed_500", "p99", "publish 500/s"),
+            Column("pub_qos1_fixed", "p99", "publish 2k/s"),
+            Column("pub_qos1_fixed_5k", "p99", "publish 5k/s"),
+            Column("sub_qos1_fixed_5k", "p99", "receive 5k/s"),
+        ),
+    ),
+    Question(
+        "qos2",
+        "What does exactly-once (QoS 2) cost?",
+        "Four packets per message instead of two. Capacity counts a message once its PUBCOMP is back, 64 in flight. Clients whose QoS 2 does not complete the exchange are refused.",
+        (
+            Column("pub_qos2_max", "msgs_per_s", "publish capacity"),
+            Column("pub_qos2_fixed", "cpu_us_per_msg", "publish 2k/s CPU"),
+            Column("pub_qos2_fixed", "p99", "publish 2k/s p99"),
+            Column("sub_qos2_fixed", "cpu_us_per_msg", "receive 2k/s CPU"),
+        ),
+    ),
+    Question(
+        "dispatch",
+        "What do many topics cost?",
+        "2,000 QoS 1 msgs/s spread over 1,000 topics: published round-robin, received through one wildcard, or dispatched to 100 per-filter callbacks (only libraries that match filters natively).",
+        (
+            Column("pub_fanout_fixed", "cpu_us_per_msg", "publish, 1,000 topics"),
+            Column("sub_fanin_fixed", "cpu_us_per_msg", "receive, wildcard"),
+            Column("sub_filters_fixed", "cpu_us_per_msg", "receive, 100 callbacks"),
+            Column("sub_filters_fixed", "p99", "callbacks p99"),
+        ),
+    ),
+    Question(
+        "duplex",
+        "Can one client publish and receive at once?",
+        "The client publishes 1,000 QoS 1 msgs/s to a C sink while a C source sends it 1,000 msgs/s. CPU is per message handled in either direction.",
+        (
+            Column("duplex_qos1_fixed", "cpu_us_per_msg", "CPU / msg"),
+            Column("duplex_qos1_fixed", "p99", "publish p99"),
+            Column("duplex_qos1_fixed", "rx_p99", "receive p99"),
+        ),
+    ),
+    Question(
+        "tls",
+        "What does TLS cost?",
+        "The same 2,000 QoS 1 msgs/s over a TLS listener (the C peer stays on plain TCP), and the connect including the handshake.",
+        (
+            Column("pub_qos1_fixed_tls", "cpu_us_per_msg", "publish CPU / msg"),
+            Column("sub_qos1_fixed_tls", "cpu_us_per_msg", "receive CPU / msg"),
+            Column("pub_qos1_fixed_tls", "p99", "publish p99"),
+            Column("idle_connect_tls", "connect_ms", "connect"),
+        ),
+    ),
+    Question(
+        "mqtt5-features",
+        "What do MQTT 5 features cost?",
+        "Five PUBLISH properties on every message, a 200-byte topic replaced by a topic alias (broker byte counters confirm it), and receive capacity when the client allows only 16 unacknowledged deliveries.",
+        (
+            Column("pub_qos1_fixed_v5_props", "cpu_us_per_msg", "publish, properties"),
+            Column("sub_qos1_fixed_v5_props", "cpu_us_per_msg", "receive, properties"),
+            Column("pub_qos1_fixed_v5_alias", "cpu_us_per_msg", "publish, alias"),
+            Column("sub_qos1_max_v5", "msgs_per_s", "receive capacity"),
+            Column("sub_qos1_max_v5_rm16", "msgs_per_s", "receive, Receive Maximum 16"),
+        ),
+    ),
+    Question(
+        "payloads",
+        "How do large payloads behave?",
+        "QoS 1 at 500 msgs/s of 64 KiB and 50 msgs/s of 1 MiB, and packets on both sides of each remaining-length step up to 2 MiB, every length checked by the C sink.",
+        (
+            Column("pub_64k_fixed", "cpu_us_per_msg", "64 KiB CPU / msg"),
+            Column("pub_64k_fixed", "p99", "64 KiB p99"),
+            Column("pub_1m_fixed", "cpu_us_per_msg", "1 MiB CPU / msg"),
+            Column("pub_1m_fixed", "p99", "1 MiB p99"),
+            Column("pub_rl_boundaries", "p99", "RL boundaries p99"),
+        ),
+    ),
 ]
 
 
@@ -190,6 +284,8 @@ def point_columns(point: dict) -> List[str]:
         return ["connect_ms", "cpu_cores", "rss_peak_kb", "threads"]
     # The user / sys split and thread count unfold with each run's counts.
     resources = ["cpu_us_per_msg", "rss_peak_kb", "ctx_switches_per_1k_msgs"]
+    if fixed and kind == "duplex":
+        return ["p50", "p99", "rx_p50", "rx_p99", "lag_p99", *resources]
     if fixed and kind in ("pub", "rtt"):
         return ["p50", "p99", "p999", "max", "lag_p99", *resources]
     if fixed:
@@ -209,9 +305,36 @@ def rate_label(point: dict) -> str:
         return "idle"
     if not point["rate"]:
         return "capacity" + (f", {point['window']} in flight" if point["kind"] == "pub" and point["qos"] else "")
-    unit = "requests/s" if point["kind"] == "rtt" else "msgs/s"
+    unit = {"rtt": "requests/s", "duplex": "msgs/s each way"}.get(point["kind"], "msgs/s")
     return f"{point['rate']:,} {unit}"
 
 
 def payload_label(n: int) -> str:
+    if n >= 1 << 20 and n % (1 << 20) == 0:
+        return f"{n >> 20} MiB"
     return f"{n // 1024} KiB" if n >= 1024 and n % 1024 == 0 else f"{n} B"
+
+
+def point_payload(point: dict) -> str:
+    lengths = point.get("remaining_lengths")
+    if lengths:
+        return "packets of " + ", ".join(payload_label(n) for n in lengths)
+    return payload_label(point["payload"])
+
+
+def point_features(point: dict) -> List[str]:
+    """The extended knobs a point sets, for its spec line."""
+    out = []
+    if point.get("topics", 1) > 1:
+        out.append(f"{point['topics']:,} topics")
+    if point.get("filters"):
+        out.append(f"{point['filters']} filter callbacks")
+    if point.get("tls"):
+        out.append("TLS")
+    if point.get("properties", "none") != "none":
+        out.append(f"{point['properties']} properties")
+    if point.get("topic_alias"):
+        out.append("topic alias")
+    if point.get("receive_maximum"):
+        out.append(f"Receive Maximum {point['receive_maximum']}")
+    return out

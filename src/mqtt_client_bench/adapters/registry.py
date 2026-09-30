@@ -78,16 +78,26 @@ def list_clients() -> List[dict]:
                 "max_inflight": caps.max_inflight,
                 "message_callback_add": caps.message_callback_add,
                 "native_message_callback_add": caps.native_message_callback_add,
+                "v5_topic_alias": caps.v5_topic_alias,
+                "v5_receive_maximum": caps.v5_receive_maximum,
                 "stability": caps.stability,
                 "io_model": caps.io_model,
                 "implementation_language": caps.implementation_language,
                 "completion_mechanism": caps.completion_mechanism,
-            "synthetic_mids": caps.synthetic_mids,
+                "synthetic_mids": caps.synthetic_mids,
                 "unimplemented": list(caps.unimplemented),
                 "notes": caps.notes,
             }
         )
     return rows
+
+
+def _receive_maximum(cls, value: Optional[int]) -> dict:
+    if not value:
+        return {}
+    if not cls.capabilities().v5_receive_maximum:
+        raise ValueError(f"{cls.__name__} cannot set a CONNECT Receive Maximum")
+    return {"receive_maximum": int(value)}
 
 
 def get_adapter_class(name: str) -> Type:
@@ -139,6 +149,7 @@ def create_adapter(
     max_queued: int = 200,
     max_queued_bytes: Optional[int] = None,
     tls_ca_certs: Optional[str] = None,
+    receive_maximum: Optional[int] = None,
 ) -> MqttClientAdapter:
     configure_client_path(client, client_path)
     cls = get_adapter_class(client)
@@ -147,6 +158,7 @@ def create_adapter(
     # adapter never receives a knob it would silently fail to honour.
     if max_queued_bytes is not None and cls.capabilities().max_queued_bytes:
         extra["max_queued_bytes"] = int(max_queued_bytes)
+    extra.update(_receive_maximum(cls, receive_maximum))
     return cls.create(
         client_id=client_id,
         protocol=protocol,
@@ -187,6 +199,7 @@ def create_async_adapter(
     max_queued: int = 200,
     max_queued_bytes: Optional[int] = None,
     tls_ca_certs: Optional[str] = None,
+    receive_maximum: Optional[int] = None,
 ):
     """Build the native async adapter; raises if the client has none."""
     configure_client_path(client, client_path)
@@ -196,6 +209,7 @@ def create_async_adapter(
     extra = {}
     if max_queued_bytes is not None and cls.capabilities().max_queued_bytes:
         extra["max_queued_bytes"] = int(max_queued_bytes)
+    extra.update(_receive_maximum(cls, receive_maximum))
     return cls.create(
         client_id=client_id,
         protocol=protocol,

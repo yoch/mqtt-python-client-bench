@@ -64,10 +64,15 @@ and skips itself when the client libraries are not installed.
 - `bench/cli.py` holds argparse only; `run.py` is a shim kept for
   `python -m mqtt_client_bench.run`.
 - `bench/catalog.py` is the catalogue. A `Point` is one workload shape
-  (`kind` = pub | sub | rtt | idle, QoS, payload, `rate` where 0 means capacity,
-  `window`, protocol) with the one question it answers. Suites are `core`, `v5`
-  (fixed-rate points over MQTT 5) and `extended`. Profiles are `standard`
-  (comparable) and `smoke`.
+  (`kind` = pub | sub | rtt | duplex | idle, QoS 0–2, payload, `rate` where 0
+  means capacity, `window`, protocol) with the one question it answers. The
+  extended knobs (`topics`, `filters`, `tls`, `properties`, `topic_alias`,
+  `receive_maximum`, `remaining_lengths`) are left out of `as_dict()` at their
+  defaults. Suites are `core`, `v5` (fixed-rate points over MQTT 5) and
+  `extended` (load curve, QoS 2, dispatch, duplex, TLS, MQTT 5 features,
+  payload sizes). Profiles are `standard` (comparable) and `smoke`. A test
+  keeps a standard campaign over every suite and client under 95 % of 3 h.
+  What is not measured yet is in `TODO.md`.
 - `bench/session.py` runs once per campaign:
   - allocates one physical core per role (`bench/cpus.py`: broker, sut, peer,
     orch);
@@ -76,7 +81,8 @@ and skips itself when the client libraries are not installed.
   - records the harness floor and the broker's C→C ceiling. The receive offer
     is 90 % of that ceiling.
 - `bench/runner.py:run_once()` runs one point for one client:
-  - starts the peer and the worker, listener first;
+  - starts the C peers and the worker, listeners first (duplex runs a sink
+    and a source);
   - reads `$SYS`, sends one absolute `GO t_start t_measure t_end t_stop` to
     both;
   - reads `/proc` at `t_measure` and `t_end` and `$SYS` after `t_stop`;
@@ -85,8 +91,11 @@ and skips itself when the client libraries are not installed.
   (`.venvs/<extra>/bin/python`). It connects, prints `ready`, drives the
   adapter with one of the `bench/drive.py` shapes, and snapshots integer
   counters from a timer thread. It never samples resources itself.
-- `peer/mqtt_peer.c` is the neutral sink / source / echo. It histograms
-  latency with the same log-linear buckets as `bench/histogram.py`.
+- `peer/mqtt_peer.c` is the neutral sink / source / echo. It completes QoS 2,
+  spreads a source over N topics (`--topics`), attaches MQTT 5 properties
+  (`--props`), and a sink counts user properties and unexpected payload
+  lengths (`--sizes`). It histograms latency with the same log-linear buckets
+  as `bench/histogram.py`.
 - `bench/checks.py` decides what a run means (`valid` / `not_sustained` /
   `invalid`), its flags and its metrics. Its docstring is the contract.
 - `bench/campaign.py` plans runs, interleaving clients within every point and
@@ -115,8 +124,12 @@ adapters, plus the sync facade that older callers use).
 
 **Refusals.** Anything a library cannot do honestly is declared `False` in its
 capabilities, and the pair comes back `unsupported` with
-`not_implemented:<feature>`. Today that covers MQTT 5 for amqtt and MQTT 3.1.1
-for aiomqtt3. **Never approximate a capability to make a point run.**
+`not_implemented:<feature>`. `AdapterCapabilities.missing_for_point()` maps
+a point's fields to features: MQTT 5 (amqtt), MQTT 3.1.1 (aiomqtt3), `qos2`
+(gmqtt, aiomqtt3, awscrt), `native_message_callback_add` (all but paho and
+mqttium), `v5_publish_properties`, `v5_topic_alias` and `v5_receive_maximum`.
+`test_extended_feature_declarations` pins the table. **Never approximate a
+capability to make a point run.**
 
 **Private API.** Any dependency on a library's private API must be declared in
 the adapter's `_PRIVATE_API` dict and returned from `identity()`, which is
@@ -146,7 +159,8 @@ A change that breaks one of these invalidates published results.
   must not import anything that samples itself.
 - **Fixed offers are identical for every client.** Cost and latency compare
   only at fixed-rate points, where every client gets the same absolute rate
-  (2,000/s, or 1,000/s for RTT and 16 KiB). Never offer a client a fraction of
+  (2,000/s, or 1,000/s for RTT and 16 KiB; the extended load curve adds 500/s
+  and 5,000/s). Never offer a client a fraction of
   its own capacity: a faster client would sit further along its own
   latency-versus-load curve, and the ranking would penalise headroom.
 - **A backlog is not a latency.** A client that cannot hold a fixed offer is
@@ -164,7 +178,9 @@ A change that breaks one of these invalidates published results.
   shape against a null client against a **1 µs per message** budget (measured
   0.4–0.6 µs), and the floor is recorded in every campaign. Never add a
   per-message cross-thread round trip, allocation or clock read on one shape
-  that the others do not pay.
+  that the others do not pay. Extended points that change every publish
+  (topics, properties, alias) route it through one `drive.routed_publish`
+  call, the same for every client at that point.
 - **Each library is driven the fastest way its own API allows.** Fairness is
   equal harness cost, not the slowest common shape.
 - **Interleaving.** Campaigns rotate clients within every point and run.
@@ -192,9 +208,14 @@ A change that breaks one of these invalidates published results.
 - `aiomqtt` v2 and v3 share an import name. They have separate environments
   (declared as a uv conflict), and the adapter tests read aiomqtt3's
   capabilities without importing it.
-- The broker listens on 127.0.0.1:11883 with `network_mode: host`, so a
-  broker from another checkout can hold the port. `broker_up` fails loudly in
-  that case.
+- The broker listens on 127.0.0.1:11883 (plain) and 11884 (TLS) with
+  `network_mode: host`, so a broker from another checkout can hold the port.
+  `broker_up` fails loudly in that case. It generates the throwaway TLS
+  certificates into `build/certs` before `compose up`, because a missing
+  bind-mount source would be created empty.
+- A client's Receive Maximum cannot be read back by a third party. Like the
+  capacity window, it is an adapter setting pinned by the adapter tests, while
+  the delivered count stays broker-confirmed.
 - The i7-3770 development desktop runs `schedutil` with a noisy session, so
   it is not a reference host. Standard campaigns there fail `host_quiet`.
 - `build/`, `.venvs/`, `site/` and `results/v2/*-smoke/` are gitignored.

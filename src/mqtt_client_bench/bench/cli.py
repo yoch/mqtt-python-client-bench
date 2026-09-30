@@ -33,7 +33,8 @@ def cmd_list(args) -> int:
     points = catalog.resolve(_split(args.points), _split(args.suites) or None)
     for p in points:
         rate = f"{p.rate}/s" if p.rate else ("max" if p.kind != "idle" else "-")
-        print(f"{p.name:22s} {p.suite:9s} {p.kind:4s} qos{p.qos} {p.payload:>6d}B {rate:>9s} {p.protocol:9s} {p.question}")
+        payload = "RL" if p.remaining_lengths else f"{p.payload}B"
+        print(f"{p.name:24s} {p.suite:9s} {p.kind:6s} qos{p.qos} {payload:>8s} {rate:>9s} {p.protocol:9s} {p.question}")
     profile = catalog.PROFILES[args.profile]
     clients = _split(args.clients) or list(envs.CLIENT_EXTRAS)
     order = campaign.plan(points, clients, profile.runs)

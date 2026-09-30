@@ -213,7 +213,9 @@ class MqttiumAdapter(BridgedAdapterBase):
             message_callback_add=True,
             native_message_callback_add=True,
             v5_publish_properties=True,
-            stability="experimental",
+            v5_topic_alias=True,
+            v5_receive_maximum=True,
+            stability="stable",
             io_model="asyncio",
             implementation_language="python",
             completion_mechanism="callback",
@@ -501,15 +503,15 @@ class MqttiumAdapter(BridgedAdapterBase):
 
         if profile == "realistic":
             values: Dict[str, Any] = {
-                "payload_format_indicator": 1,
-                "content_type": "application/json",
+                "content_type": "application/octet-stream",
                 "message_expiry_interval": 60,
                 "user_property": [("schema", "telemetry.v1"), ("region", "eu-west-1")],
             }
+        elif profile == "alias":
+            values = {"topic_alias": 1}
         elif profile == "rich":
             values = {
-                "payload_format_indicator": 1,
-                "content_type": "application/json",
+                "content_type": "application/octet-stream",
                 "message_expiry_interval": 60,
                 "correlation_data": b"c" * 32,
                 "response_topic": "bench/response/" + ("r" * 48),

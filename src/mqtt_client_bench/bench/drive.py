@@ -29,6 +29,7 @@ Shapes, chosen once per run from the adapter's capabilities:
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 from array import array
 from collections import deque
@@ -56,6 +57,7 @@ class Run:
         "failed",
         "rejected",
         "received",
+        "unmatched",
         "skipped",
         "latencies",
         "latency_overflow",
@@ -72,6 +74,7 @@ class Run:
         self.failed = 0  # completions carrying a failure reason code
         self.rejected = 0  # publishes the library refused synchronously
         self.received = 0  # PUBLISH delivered to on_message
+        self.unmatched = 0  # filter points: PUBLISH no per-filter callback took
         self.skipped = 0  # fixed-rate offer the client fell too far behind to send
         # Receiver-side one-way / round-trip ns, indexed by ``received``.
         # Allocated and touched up front so it is part of the baseline RSS and
@@ -95,6 +98,7 @@ class Run:
             "failed": self.failed,
             "rejected": self.rejected,
             "received": self.received,
+            "unmatched": self.unmatched,
             "skipped": self.skipped,
             "at_ns": monotonic_ns(),
         }
@@ -148,6 +152,57 @@ def fixed_payload_maker(size: int, run: Run):
     return make
 
 
+def cycling_payload_maker(sizes, run: Run):
+    """``fixed_payload_maker`` where message ``index`` is ``sizes[index % len(sizes)]`` long."""
+    if min(sizes) < 8:
+        raise ValueError("a fixed offer needs 8 payload bytes for the send stamp")
+    sends = run.sends
+    tails = [b"A" * (size - 8) for size in sizes]
+    n = len(tails)
+
+    def make(index: int) -> bytes:
+        now = monotonic_ns()
+        try:
+            sends[index] = now
+        except IndexError:
+            run.send_overflow += 1
+        return now.to_bytes(8, "little") + tails[index % n]
+
+    return make
+
+
+def routed_publish(publish, topics, properties, *, alias: bool):
+    """``publish(topic, payload, qos)`` spread over ``topics`` and carrying ``properties``.
+
+    Every client at a point pays this same extra call. With ``alias`` the first
+    message carries ``topics[0]`` and every later one the empty topic, the
+    properties then holding the topic alias.
+    """
+    if alias:
+        first = [True]
+
+        def publish_alias(topic, payload, qos):
+            if first[0]:
+                first[0] = False
+                return publish(topics[0], payload, qos, properties=properties)
+            return publish("", payload, qos, properties=properties)
+
+        return publish_alias
+    n = len(topics)
+    if n > 1:
+        nxt = itertools.count().__next__
+
+        def publish_spread(topic, payload, qos):
+            return publish(topics[nxt() % n], payload, qos, properties=properties)
+
+        return publish_spread
+
+    def publish_with_properties(topic, payload, qos):
+        return publish(topic, payload, qos, properties=properties)
+
+    return publish_with_properties
+
+
 def _is_failure(reason_code) -> bool:
     if reason_code is None or reason_code == 0:
         return False
@@ -177,6 +232,15 @@ def completion_callback(run: Run, on_complete=None):
         on_complete()
 
     return on_publish_notify
+
+
+def unmatched_callback(run: Run):
+    """``on_message`` on filter points, where every message belongs to a filter callback."""
+
+    def on_unmatched(client, userdata, msg):
+        run.unmatched += 1
+
+    return on_unmatched
 
 
 def message_callback(run: Run, *, stamped: bool):

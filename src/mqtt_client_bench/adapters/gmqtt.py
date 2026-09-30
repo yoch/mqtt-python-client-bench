@@ -10,6 +10,15 @@ from mqtt_client_bench.adapters.async_bridge import BridgedAdapterBase, Incoming
 from mqtt_client_bench.adapters.base import AdapterCapabilities, PublishResult, SubscribeResult
 
 
+def receive_maximum_kwargs(receive_maximum: Optional[int]) -> dict:
+    """gmqtt sends its constructor kwargs as CONNECT properties.
+
+    It also sizes its own outbound packet-id pool from ``receive_maximum``, so
+    the knob is only set on points where the client does not publish.
+    """
+    return {"receive_maximum": int(receive_maximum)} if receive_maximum else {}
+
+
 class GmqttAdapter(BridgedAdapterBase):
     _NAME = "gmqtt"
     _NOTES = (
@@ -55,6 +64,8 @@ class GmqttAdapter(BridgedAdapterBase):
             message_callback_add=True,
             native_message_callback_add=False,
             v5_publish_properties=True,
+            v5_topic_alias=True,
+            v5_receive_maximum=True,
             stability="stable",
             io_model="asyncio",
             implementation_language="python",
@@ -96,6 +107,7 @@ class GmqttAdapter(BridgedAdapterBase):
         max_inflight: int = 20,
         max_queued: int = 200,
         tls_ca_certs: Optional[str] = None,
+        receive_maximum: Optional[int] = None,
     ) -> "GmqttAdapter":
         try:
             from gmqtt import Client as MQTTClient
@@ -109,7 +121,7 @@ class GmqttAdapter(BridgedAdapterBase):
         adapter._protocol = protocol
         adapter._clean_session = clean_session
         adapter._tls_ca_certs = tls_ca_certs
-        adapter._client = MQTTClient(client_id, clean_session=clean_session)
+        adapter._client = MQTTClient(client_id, clean_session=clean_session, **receive_maximum_kwargs(receive_maximum))
         if tls_ca_certs:
             ctx = ssl.create_default_context(cafile=tls_ca_certs)
             adapter._ssl_context = ctx
@@ -256,23 +268,23 @@ class GmqttAdapter(BridgedAdapterBase):
         return SubscribeResult(rc=0, mid=int(mid) if mid is not None else None)
 
     def build_publish_properties(self, profile: str) -> Any:
-        # Align field set with Paho/aiomqtt (incl. payload_format_indicator).
+        # Same field set as Paho/aiomqtt.
         if profile in (None, "none"):
             return None
         if profile == "realistic":
             return {
-                "payload_format_indicator": 1,
-                "content_type": "application/json",
+                "content_type": "application/octet-stream",
                 "message_expiry_interval": 60,
                 "user_property": [("schema", "telemetry.v1"), ("region", "eu-west-1")],
             }
         if profile == "rich":
             return {
-                "payload_format_indicator": 1,
-                "content_type": "application/json",
+                "content_type": "application/octet-stream",
                 "message_expiry_interval": 60,
                 "correlation_data": b"c" * 32,
                 "response_topic": "bench/response/" + ("r" * 48),
                 "user_property": [(f"k{i:02d}", "v" * 64) for i in range(16)],
             }
+        if profile == "alias":
+            return {"topic_alias": 1}
         return None

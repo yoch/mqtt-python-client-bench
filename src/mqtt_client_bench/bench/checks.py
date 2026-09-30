@@ -47,10 +47,11 @@ STATUS_DOCS = {
 CHECK_DOCS = {
     "worker_completed": "The client worker connected, followed the schedule and reported its counters.",
     "peer_completed": "The C peer connected, followed the schedule and reported its counters.",
+    "source_completed": "Duplex: the C source feeding the client connected, followed the schedule and reported.",
     "broker_counters_read": "A fresh $SYS reading was taken before and after the run.",
     "broker_confirms_client_publishes": (
         "Publishes the broker received from the client lie between the client's completions and "
-        "its sends (round trips subtract the echo's republishes)."
+        "its sends (round trips subtract the echo's republishes, duplex the C source's publishes)."
     ),
     "broker_confirms_peer_publishes": "Publishes the broker received equal what the C source wrote.",
     "broker_confirms_deliveries": (
@@ -59,12 +60,21 @@ CHECK_DOCS = {
         "buffers when the run stops."
     ),
     "no_loss": (
-        "QoS 1: every acknowledged publish reached its subscriber. A client that fell behind "
+        "QoS 1 and 2: every acknowledged publish reached its subscriber. A client that fell behind "
         "until the broker's queue overflowed is not_sustained; a loss without drops is invalid."
+    ),
+    "no_loss_inbound": "Duplex, QoS 1 and 2: every publish the broker acknowledged to the C source reached the client.",
+    "payloads_intact": "Every payload the C sink received had one of the lengths the client published.",
+    "callbacks_matched": "Filter points: every message reached a per-filter callback, none the catch-all on_message.",
+    "properties_delivered": "MQTT 5 properties: every message the C sink received still carried its user properties.",
+    "topic_alias_used": (
+        "Topic alias: the bytes the broker received per client publish, net of the sink's acknowledgements, "
+        "are below the payload plus half the topic, so the long topic was not sent each time."
     ),
     "offered_rate_held": f"At least {RATE_HELD:.0%} of the fixed offer was produced in the window.",
     "responses_kept_up": f"Round trips: at least {RATE_HELD:.0%} of the requests were answered in the window.",
-    "client_kept_up": f"Receive: the client took at least {RATE_HELD:.0%} of the offer in the window.",
+    "client_kept_up": f"Receive and duplex: the client took at least {RATE_HELD:.0%} of the offer in the window.",
+    "source_rate_held": f"Duplex: the C source wrote at least {RATE_HELD:.0%} of its fixed offer in the window.",
     "broker_headroom": f"Fixed-rate and idle points: the broker used less than {BROKER_CPU_LIMIT:.0%} of its core.",
     "host_quiet": (
         f"At most {HOST_NOISE_CORES} cores were busy outside the client, the peer and the broker. "
@@ -78,7 +88,7 @@ FLAG_DOCS = {
         "rate is partly the broker's."
     ),
     "offer_bound": "The client received the whole receive offer; its capacity is at least this rate.",
-    "broker_queue_overflow": "The broker discarded QoS 1 messages a slower client could not drain.",
+    "broker_queue_overflow": "The broker discarded QoS 1 or 2 messages a slower client could not drain.",
     "host_noisy": "The rest of the host was busy (only tolerated on non-comparable profiles).",
     "non_comparable": "Development profile: never published or compared.",
 }
@@ -140,21 +150,26 @@ def evaluate(record: dict, *, strict: bool = True) -> dict:
         worker.get("error") or "worker reported its counts",
     )
     if kind != "idle":
-        checks.add(
-            "peer_completed",
-            peer is not None and peer.get("error") is None,
-            "peer reported its counts" if peer and peer.get("error") is None else f"peer error: {(peer or {}).get('error', 'no result')}",
-        )
+        checks.add("peer_completed", *_completed(peer, "peer"))
+    source = record.get("peer_source") if kind == "duplex" else None
+    if kind == "duplex":
+        checks.add("source_completed", *_completed(source, "source"))
     checks.add("broker_counters_read", sysd is not None, "fresh $SYS reading before and after the run")
     if checks.status() == INVALID:
         return {"status": INVALID, "checks": checks.items, "metrics": {}, "flags": flags}
 
     final = worker["final"]
     window_s = (worker.get("window_ns") or 0) / 1e9 or record["schedule"]["measure_s"]
+    dropped = int(sysd.get("dropped", 0))
 
     # -- publish side confirmed by the broker
-    if kind in ("pub", "rtt"):
-        published_by_others = int(peer.get("echoed_total", 0)) if kind == "rtt" else 0
+    if kind in ("pub", "rtt", "duplex"):
+        if kind == "rtt":
+            published_by_others = int(peer.get("echoed_total", 0))
+        elif kind == "duplex":
+            published_by_others = int(source.get("sent_total", 0))
+        else:
+            published_by_others = 0
         got = int(sysd["received"]) - published_by_others
         low = int(final["done"]) - tolerance(final["done"])
         high = int(final["sent"]) + tolerance(final["sent"])
@@ -197,39 +212,39 @@ def evaluate(record: dict, *, strict: bool = True) -> dict:
             delivered <= int(sysd["sent"]) + tolerance(delivered),
             f"broker sent {sysd['sent']}; client received {delivered} by t_stop",
         )
-    elif kind == "rtt":
+    elif kind in ("rtt", "duplex"):
         delivered = int(final["received"]) + int(peer["received_total"])
+        other = "echo" if kind == "rtt" else "sink"
         checks.add(
             "broker_confirms_deliveries",
             abs(int(sysd["sent"]) - delivered) <= tolerance(delivered),
-            f"broker sent {sysd['sent']}; client received {final['received']}, echo received {peer['received_total']}",
+            f"broker sent {sysd['sent']}; client received {final['received']}, {other} received {peer['received_total']}",
         )
 
-    # -- QoS 1: every acknowledged publish reached its subscriber
-    if qos == 1 and kind == "pub":
+    # -- QoS 1 and 2: every acknowledged publish reached its subscriber
+    if qos >= 1 and kind in ("pub", "duplex"):
         delivered = int(peer["received_total"])
         acked = int(final["done"])
         checks.add(
             "no_loss",
             delivered >= acked - tolerance(acked),
-            f"client saw {acked} PUBACKs; peer received {delivered}",
+            f"client saw {acked} completions; peer received {delivered}",
         )
-    elif qos == 1 and kind == "sub" and not rate:
+    elif qos >= 1 and kind == "sub" and not rate:
         # A capacity offer exceeds what a slow client drains; the broker's
         # queue limit then discards the excess, which is the measurement.
-        if int(sysd.get("dropped", 0)):
+        if dropped:
             flags.append("broker_queue_overflow")
-    elif qos == 1 and kind == "sub":
+    elif qos >= 1 and kind == "sub":
         acked = int(peer["acked_total"])
         delivered = int(final["received"])
-        dropped = int(sysd.get("dropped", 0))
         checks.add(
             "no_loss",
             delivered >= acked - tolerance(acked),
             f"broker acknowledged {acked} from the peer; client received {delivered}; broker dropped {dropped}",
             severity=NOT_SUSTAINED if dropped else INVALID,
         )
-    elif qos == 1 and kind == "rtt":
+    elif qos >= 1 and kind == "rtt":
         replies = int(final["received"])
         echoed = int(peer["echoed_total"])
         checks.add(
@@ -238,9 +253,18 @@ def evaluate(record: dict, *, strict: bool = True) -> dict:
             f"echo sent {echoed} replies; client received {replies}",
             severity=NOT_SUSTAINED,
         )
+    if qos >= 1 and kind == "duplex":
+        acked = int(source["acked_total"])
+        delivered = int(final["received"])
+        checks.add(
+            "no_loss_inbound",
+            delivered >= acked - tolerance(acked),
+            f"broker acknowledged {acked} from the source; client received {delivered}; broker dropped {dropped}",
+            severity=NOT_SUSTAINED if dropped else INVALID,
+        )
 
     # -- the fixed offer was actually offered and absorbed
-    if rate and kind in ("pub", "rtt"):
+    if rate and kind in ("pub", "rtt", "duplex"):
         offered = rate * window_s
         sent = _window_delta(worker, "sent")
         checks.add(
@@ -257,14 +281,22 @@ def evaluate(record: dict, *, strict: bool = True) -> dict:
                 f"client received {replies} replies to {sent} requests in the window",
                 severity=NOT_SUSTAINED,
             )
-    if rate and kind == "sub":
+    if rate and kind in ("sub", "duplex"):
         offered = rate * window_s
-        peer_sent = int(peer["sent_window"])
-        checks.add(
-            "offered_rate_held",
-            peer_sent >= RATE_HELD * offered,
-            f"peer wrote {peer_sent} of {offered:.0f} offered in the window",
-        )
+        if kind == "sub":
+            peer_sent = int(peer["sent_window"])
+            checks.add(
+                "offered_rate_held",
+                peer_sent >= RATE_HELD * offered,
+                f"peer wrote {peer_sent} of {offered:.0f} offered in the window",
+            )
+        else:
+            peer_sent = int(source["sent_window"])
+            checks.add(
+                "source_rate_held",
+                peer_sent >= RATE_HELD * offered,
+                f"source wrote {peer_sent} of {offered:.0f} offered in the window",
+            )
         got = _window_delta(worker, "received")
         checks.add(
             "client_kept_up",
@@ -272,6 +304,8 @@ def evaluate(record: dict, *, strict: bool = True) -> dict:
             f"client received {got} of {peer_sent} in the window",
             severity=NOT_SUSTAINED,
         )
+
+    _feature_checks(checks, record, final)
 
     # -- the broker and the host were not the constraint
     broker_cpu = (record.get("broker") or {}).get("cpu_cores")
@@ -296,6 +330,48 @@ def evaluate(record: dict, *, strict: bool = True) -> dict:
 
     metrics = _metrics(record, window_s)
     return {"status": checks.status(), "checks": checks.items, "metrics": metrics, "flags": flags}
+
+
+def _completed(party: Optional[dict], label: str) -> tuple:
+    ok = party is not None and party.get("error") is None
+    return ok, f"{label} reported its counts" if ok else f"{label} error: {(party or {}).get('error', 'no result')}"
+
+
+def _feature_checks(checks: _Checks, record: dict, final: dict) -> None:
+    """What the extended points add on top of the counts: that the feature happened."""
+    point = record["point"]
+    kind = point["kind"]
+    peer = record.get("peer") or {}
+    if kind in ("pub", "duplex") and "size_mismatch" in peer:
+        bad = int(peer["size_mismatch"])
+        checks.add("payloads_intact", bad == 0, f"{bad} of {peer['received_total']} payloads had an unexpected length")
+    if int(point.get("filters", 0)):
+        unmatched = int(final.get("unmatched", 0))
+        checks.add(
+            "callbacks_matched",
+            unmatched == 0 and int(final["received"]) > 0,
+            f"{final['received']} messages reached a filter callback, {unmatched} the catch-all",
+        )
+    if kind == "pub" and point.get("properties", "none") != "none":
+        received = int(peer["received_total"])
+        seen = int(peer.get("props_seen", 0))
+        checks.add(
+            "properties_delivered",
+            seen >= received - tolerance(received),
+            f"{seen} of {received} messages carried user properties",
+        )
+    if kind == "pub" and point.get("topic_alias"):
+        sysd = record["broker"]["sys"]
+        received = int(peer["received_total"])
+        ack_bytes = received * (4 if point["qos"] == 1 else 8 if point["qos"] == 2 else 0)
+        sent = max(1, int(final["sent"]))
+        per_publish = (int(sysd.get("bytes_received") or 0) - ack_bytes) / sent
+        limit = int(point["payload"]) + int(record.get("data_topic_bytes", 0)) // 2
+        checks.add(
+            "topic_alias_used",
+            0 < per_publish < limit,
+            f"broker received {per_publish:.0f} bytes per client publish; the full topic would exceed {limit}",
+        )
 
 
 def _per_msg_us(value_s: Optional[float], msgs: int) -> Optional[float]:
@@ -333,6 +409,16 @@ def _metrics(record: dict, window_s: float) -> dict:
         m["replies"] = _window_delta(worker, "received")
         m["msgs_per_s"] = m["replies"] / window_s
         msgs = m["requests"]
+    elif kind == "duplex":
+        source = record.get("peer_source") or {}
+        m["client_sent"] = _window_delta(worker, "sent")
+        m["client_completed"] = _window_delta(worker, "done")
+        m["delivered"] = int(peer.get("received_window", 0))
+        m["offered"] = int(source.get("sent_window", 0))
+        m["received"] = _window_delta(worker, "received")
+        # Both directions: the cost per message is per message handled.
+        msgs = m["client_sent"] + m["received"]
+        m["msgs_per_s"] = msgs / window_s
     else:
         msgs = 0
         m["connect_ms"] = worker.get("connect_ns", 0) / 1e6
@@ -349,13 +435,16 @@ def _metrics(record: dict, window_s: float) -> dict:
     if client.get("ctx_involuntary") is not None and msgs:
         m["ctx_switches_per_1k_msgs"] = (client["ctx_voluntary"] + client["ctx_involuntary"]) * 1000 / msgs
 
-    if rate and kind == "pub" and peer.get("latency"):
+    if rate and kind in ("pub", "duplex") and peer.get("latency"):
         m["latency"] = peer["latency"]
     elif rate and kind in ("sub", "rtt") and worker.get("latency"):
         m["latency"] = worker["latency"]
     if m.get("latency"):
         m["latency_summary"] = histogram.summary(m["latency"])
-    if rate and kind in ("pub", "rtt") and worker.get("lag"):
+    if rate and kind == "duplex" and worker.get("latency"):
+        m["latency_rx"] = worker["latency"]
+        m["latency_rx_summary"] = histogram.summary(m["latency_rx"])
+    if rate and kind in ("pub", "rtt", "duplex") and worker.get("lag"):
         m["lag"] = worker["lag"]
         m["lag_summary"] = histogram.summary(m["lag"])
         m["lag_summary"]["unsent"] = int(m["lag"].get("unsent", 0))

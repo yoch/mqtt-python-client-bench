@@ -6,6 +6,9 @@ fresh value *before* anything is published and again *after* everything has
 drained, so the deltas cover the whole run and compare exactly with the whole-
 run totals of the peer and the client.
 
+``bytes/received`` counts every byte any connection sent to the broker; it
+only serves the topic-alias check, where the client's publishes dwarf the rest.
+
 ``publish/messages/sent`` also counts the ``$SYS`` messages sent to this probe.
 The probe counts every PUBLISH it receives, so that share is subtracted
 exactly rather than estimated.
@@ -23,6 +26,7 @@ TOPICS = {
     "$SYS/broker/publish/messages/received": "received",
     "$SYS/broker/publish/messages/sent": "sent",
     "$SYS/broker/publish/messages/dropped": "dropped",
+    "$SYS/broker/bytes/received": "bytes_received",
 }
 # Mosquitto sends a burst of topics per interval; wait this long after the
 # freshness marker so the rest of the burst has landed.
@@ -176,6 +180,7 @@ class SysProbe:
                 "received": self._values.get("received"),
                 "sent": self._values.get("sent"),
                 "dropped": self._values.get("dropped", 0),
+                "bytes_received": self._values.get("bytes_received"),
                 "probe_msgs": self._probe_msgs,
                 "at": time.monotonic(),
             }
@@ -200,4 +205,5 @@ def delta(before: dict, after: dict) -> dict:
         "sent_raw": sent,
         "probe_msgs": probe,
         "dropped": (after.get("dropped") or 0) - (before.get("dropped") or 0),
+        "bytes_received": (after.get("bytes_received") or 0) - (before.get("bytes_received") or 0),
     }

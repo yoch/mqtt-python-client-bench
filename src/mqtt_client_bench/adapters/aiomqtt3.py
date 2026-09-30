@@ -78,6 +78,7 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
             message_callback_add=True,
             native_message_callback_add=False,
             v5_publish_properties=False,
+            v5_receive_maximum=True,
             stability="experimental",
             io_model="asyncio",
             implementation_language="python",
@@ -115,6 +116,7 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
         max_inflight: int = 20,
         max_queued: int = 200,
         tls_ca_certs: Optional[str] = None,
+        receive_maximum: Optional[int] = None,
     ) -> "Aiomqtt3Adapter":
         try:
             _require_aiomqtt_v3()
@@ -127,6 +129,7 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
         adapter._protocol = protocol
         adapter._clean_session = clean_session
         adapter._tls_ca_certs = tls_ca_certs
+        adapter._receive_maximum = receive_maximum
         return adapter
 
     def connect(self, host: str, port: int, keepalive: int = 60) -> None:
@@ -151,6 +154,8 @@ class Aiomqtt3Adapter(BridgedAdapterBase):
             "keep_alive": keepalive,
             "clean_start": self._clean_session,
         }
+        if self._receive_maximum:
+            kwargs["receive_max"] = int(self._receive_maximum)
         if self._tls_ca_certs:
             import ssl
 

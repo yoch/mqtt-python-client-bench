@@ -85,14 +85,18 @@ class Timer(threading.Thread):
             self.run_state.request_stop()
 
 
+RECEIVES = ("sub", "rtt", "duplex")
+PUBLISHES = ("pub", "rtt", "duplex")
+
+
 def latency_capacity(point: dict, go_s: float) -> int:
-    if point["kind"] not in ("sub", "rtt") or not point["rate"]:
+    if point["kind"] not in RECEIVES or not point["rate"]:
         return 0
     return int(point["rate"] * go_s * 1.25) + 1024
 
 
 def send_capacity(point: dict, go_s: float) -> int:
-    if point["kind"] not in ("pub", "rtt") or not point["rate"]:
+    if point["kind"] not in PUBLISHES or not point["rate"]:
         return 0
     return int(point["rate"] * go_s) + 1024
 
@@ -101,9 +105,53 @@ def _run_state(point: dict, go_s: float) -> drive.Run:
     return drive.Run(latency_capacity(point, go_s), send_capacity(point, go_s))
 
 
-def _maker(point: dict, run: drive.Run):
-    size = int(point["payload"])
+def _maker(point: dict, sizes: list, run: drive.Run):
+    if len(sizes) > 1:
+        return drive.cycling_payload_maker(sizes, run)
+    size = int(sizes[0])
     return drive.fixed_payload_maker(size, run) if point["rate"] else drive.payload_maker(size)
+
+
+def _adapter_options(cfg: dict) -> dict:
+    point = cfg["point"]
+    return {
+        "client_id": cfg["client_id"],
+        "protocol": point["protocol"],
+        "max_inflight": int(point["window"]) if not point["rate"] else FIXED_RATE_INFLIGHT,
+        "max_queued": MAX_QUEUED,
+        "tls_ca_certs": cfg.get("tls_ca_certs"),
+        "receive_maximum": int(point.get("receive_maximum", 0)) or None,
+    }
+
+
+def _wire_receive(adapter, cfg: dict, run: drive.Run) -> None:
+    """Before connect: some adapters hand callbacks to the library there."""
+    point = cfg["point"]
+    if point["kind"] not in RECEIVES:
+        return
+    on_message = drive.message_callback(run, stamped=bool(point["rate"]))
+    filters = int(point.get("filters", 0))
+    if not filters:
+        adapter.on_message = on_message
+        return
+    adapter.on_message = drive.unmatched_callback(run)
+    for d in range(filters):
+        adapter.message_callback_add(f"{cfg['topic']}/{d}/+", on_message)
+
+
+def _route_publishes(adapter, cfg: dict, shape: str) -> None:
+    """Spread publishes over the point's topics, or attach its properties or alias."""
+    point = cfg["point"]
+    topics = cfg["publish_topics"]
+    alias = bool(point.get("topic_alias"))
+    profile = "alias" if alias else point.get("properties", "none")
+    if len(topics) == 1 and profile == "none":
+        return
+    properties = adapter.build_publish_properties(profile) if profile != "none" else None
+    if profile != "none" and properties is None:
+        raise RuntimeError(f"adapter built no PUBLISH properties for {profile!r}")
+    attr = "publish_nowait" if shape == "nowait" else "publish"
+    setattr(adapter, attr, drive.routed_publish(getattr(adapter, attr), topics, properties, alias=alias))
 
 
 def _outstanding(run: drive.Run) -> int:
@@ -120,13 +168,7 @@ def run_sync(cfg: dict, identity: dict) -> dict:
     acked: dict = {}
     ack_event = threading.Event()
 
-    adapter = create_adapter(
-        cfg["client"],
-        client_id=cfg["client_id"],
-        protocol=point["protocol"],
-        max_inflight=int(point["window"]) if not rate else FIXED_RATE_INFLIGHT,
-        max_queued=MAX_QUEUED,
-    )
+    adapter = create_adapter(cfg["client"], **_adapter_options(cfg))
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
         if _rc_ok(reason_code):
@@ -139,10 +181,8 @@ def run_sync(cfg: dict, identity: dict) -> dict:
 
     adapter.on_connect = on_connect
     adapter.on_subscribe = on_subscribe
-    # Some adapters wire callbacks into the library at connect time.
     run = _run_state(point, cfg["schedule_s"])
-    if kind in ("sub", "rtt"):
-        adapter.on_message = drive.message_callback(run, stamped=bool(rate))
+    _wire_receive(adapter, cfg, run)
 
     t0 = time.monotonic_ns()
     adapter.connect(cfg["host"], int(cfg["port"]), keepalive=KEEPALIVE_S)
@@ -151,7 +191,7 @@ def run_sync(cfg: dict, identity: dict) -> dict:
         raise RuntimeError("connect_timeout")
     connect_ns = time.monotonic_ns() - t0
 
-    if kind in ("sub", "rtt"):
+    if kind in RECEIVES:
         result = adapter.subscribe(cfg["listen_topic"], qos=qos)
         mid = getattr(result, "mid", None)
         if mid is not None:
@@ -168,11 +208,12 @@ def run_sync(cfg: dict, identity: dict) -> dict:
     timer = Timer(run, go, stop_at_end=(kind == "pub" and not rate))
     timer.start()
 
-    make = _maker(point, run)
+    make = _maker(point, cfg["payload_sizes"], run)
     topic = cfg["topic"]
+    _route_publishes(adapter, cfg, "sync")
     if kind == "pub" and not rate:
         drive.pub_capacity_sync(adapter, run, topic=topic, qos=qos, make=make, window=int(point["window"]), t_start=go["t_start"])
-    elif kind in ("pub", "rtt"):
+    elif kind in PUBLISHES:
         drive.pub_fixed_sync(adapter, run, topic=topic, qos=qos, make=make, rate=rate, t_start=go["t_start"], t_end=go["t_end"])
     timer.join()
     drive.wait_until_sync(lambda: _outstanding(run) <= 0, go["t_stop"])
@@ -193,25 +234,17 @@ async def run_async(cfg: dict, identity: dict, shape: str) -> dict:
     point = cfg["point"]
     kind, qos, rate = point["kind"], int(point["qos"]), int(point["rate"])
     loop = asyncio.get_running_loop()
-    adapter = create_async_adapter(
-        cfg["client"],
-        client_id=cfg["client_id"],
-        protocol=point["protocol"],
-        max_inflight=int(point["window"]) if not rate else FIXED_RATE_INFLIGHT,
-        max_queued=MAX_QUEUED,
-    )
+    adapter = create_async_adapter(cfg["client"], **_adapter_options(cfg))
     adapter.on_connect = None
     adapter.on_publish = None
-    # Some adapters wire callbacks into the library at connect time.
     run = _run_state(point, cfg["schedule_s"])
-    if kind in ("sub", "rtt"):
-        adapter.on_message = drive.message_callback(run, stamped=bool(rate))
+    _wire_receive(adapter, cfg, run)
 
     t0 = time.monotonic_ns()
     await asyncio.wait_for(adapter.connect(cfg["host"], int(cfg["port"]), keepalive=KEEPALIVE_S), CONNECT_TIMEOUT_S)
     connect_ns = time.monotonic_ns() - t0
 
-    if kind in ("sub", "rtt"):
+    if kind in RECEIVES:
         result = await asyncio.wait_for(adapter.subscribe(cfg["listen_topic"], qos=qos), CONNECT_TIMEOUT_S)
         if not _rc_ok(getattr(result, "rc", 0)):
             raise RuntimeError("subscribe_refused")
@@ -221,13 +254,14 @@ async def run_async(cfg: dict, identity: dict, shape: str) -> dict:
     timer = Timer(run, go, stop_at_end=(kind == "pub" and not rate))
     timer.start()
 
-    make = _maker(point, run)
+    make = _maker(point, cfg["payload_sizes"], run)
     topic = cfg["topic"]
+    _route_publishes(adapter, cfg, shape)
     common = {"topic": topic, "qos": qos, "make": make, "t_start": go["t_start"]}
     if kind == "pub" and not rate:
         fn = drive.pub_capacity_nowait if shape == "nowait" else drive.pub_capacity_awaited
         coro = fn(adapter, run, window=int(point["window"]), **common)
-    elif kind in ("pub", "rtt"):
+    elif kind in PUBLISHES:
         fn = drive.pub_fixed_nowait if shape == "nowait" else drive.pub_fixed_awaited
         coro = fn(adapter, run, rate=rate, t_end=go["t_end"], **common)
     else:

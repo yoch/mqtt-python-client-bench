@@ -56,6 +56,12 @@ class AdapterCapabilities:
     # inter-client rankings for sub_callback_matching.
     native_message_callback_add: bool = False
     v5_publish_properties: bool = False
+    # Outbound topic alias set by the caller: a PUBLISH that carries the full
+    # topic and alias 1, then the alias alone with an empty topic.
+    v5_topic_alias: bool = False
+    # create(receive_maximum=N) puts N in CONNECT, so the broker keeps at most N
+    # QoS>0 deliveries unacknowledged towards this client.
+    v5_receive_maximum: bool = False
     # Whether connect() may be called again on the same adapter instance after a
     # disconnect, resuming a persistent session. Required by the session-resume
     # scenarios; an adapter that cannot do it is refused rather than measured
@@ -99,35 +105,26 @@ class AdapterCapabilities:
     unimplemented: List[str] = field(default_factory=list)
 
     def missing_for_point(self, point: dict) -> List[str]:
+        """The features a catalogue point (``Point.as_dict()``) needs and this library lacks."""
         missing: List[str] = []
         protocol = point.get("protocol", "MQTTv311")
         if protocol == "MQTTv5" and not self.mqtt_v5:
             missing.append("mqtt_v5")
         if protocol == "MQTTv311" and not self.mqtt_v311:
             missing.append("mqtt_v311")
-        qos_pub = int(point.get("qos_publish", 0) or 0)
-        qos_sub = int(point.get("qos_subscribe", 0) or 0)
-        if max(qos_pub, qos_sub) >= 2 and not self.qos2:
+        if int(point.get("qos", 0)) >= 2 and not self.qos2:
             missing.append("qos2")
         if point.get("tls") and not self.tls:
             missing.append("tls")
-        if point.get("require_max_inflight") and not self.max_inflight:
-            missing.append("max_inflight")
-        if point.get("require_max_queued") and not self.max_queued:
-            missing.append("max_queued")
-        if point.get("outage_s") is not None and not self.reconnect:
-            missing.append("reconnect")
-        if int(point.get("callback_filters", 0) or 0) > 0 and not self.native_message_callback_add:
+        if int(point.get("filters", 0)) > 0 and not self.native_message_callback_add:
             missing.append("native_message_callback_add")
-        if point.get("topology") == "fleet" and self.async_bridged:
-            missing.append("fleet_async_bridged")
-        if point.get("topology") == "application_rtt" and not self.tcp_nodelay:
-            # Ping-pong traffic without TCP_NODELAY measures the TCP stack's
-            # Nagle/delayed-ACK plateau, not the client library.
-            missing.append("tcp_nodelay")
-        profile = point.get("properties_profile", "none")
-        if protocol == "MQTTv5" and profile not in (None, "none") and not self.v5_publish_properties:
-            missing.append(f"properties_profile:{profile}")
+        sends_properties = point.get("properties", "none") != "none" and point.get("kind") in ("pub", "rtt", "duplex")
+        if sends_properties and not self.v5_publish_properties:
+            missing.append("v5_publish_properties")
+        if point.get("topic_alias") and not self.v5_topic_alias:
+            missing.append("v5_topic_alias")
+        if int(point.get("receive_maximum", 0)) > 0 and not self.v5_receive_maximum:
+            missing.append("v5_receive_maximum")
         for item in self.unimplemented:
             missing.append(f"adapter:{item}")
         return missing

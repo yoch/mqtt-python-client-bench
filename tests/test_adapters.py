@@ -48,10 +48,8 @@ class AdapterRegistryTests(unittest.TestCase):
     def test_list_clients(self):
         names = {row["name"] for row in list_clients()}
         self.assertEqual(names, {"paho", "gmqtt", "aiomqtt", "aiomqtt3", "amqtt", "awscrt", "zmqtt", "mqttium"})
-        self.assertIn("paho", STABLE_CLIENTS)
-        self.assertIn("awscrt", STABLE_CLIENTS)
-        for name in ("zmqtt", "aiomqtt3", "mqttium"):
-            self.assertIn(name, EXPERIMENTAL_CLIENTS)
+        self.assertEqual(set(STABLE_CLIENTS), {"paho", "gmqtt", "aiomqtt", "amqtt", "awscrt", "mqttium"})
+        self.assertEqual(set(EXPERIMENTAL_CLIENTS), {"zmqtt", "aiomqtt3"})
 
     def test_protocol_declarations(self):
         self.assertFalse(get_adapter_class("amqtt").capabilities().mqtt_v5)
@@ -61,6 +59,36 @@ class AdapterRegistryTests(unittest.TestCase):
         for name in ("paho", "gmqtt", "aiomqtt", "awscrt", "zmqtt", "mqttium"):
             caps = get_adapter_class(name).capabilities()
             self.assertTrue(caps.mqtt_v5 and caps.mqtt_v311, name)
+
+    def test_extended_feature_declarations(self):
+        """Who runs the extended feature points; everyone else is refused."""
+        expected = {
+            # qos2, native filters, publish properties, topic alias, receive maximum
+            "paho": (True, True, True, True, True),
+            "gmqtt": (False, False, True, True, True),
+            "aiomqtt": (True, False, True, True, True),
+            "aiomqtt3": (False, False, False, False, True),
+            "amqtt": (True, False, False, False, False),
+            "awscrt": (False, False, True, False, False),
+            "zmqtt": (True, False, True, False, True),
+            "mqttium": (True, True, True, True, True),
+        }
+        self.assertEqual(set(expected), set(_ADAPTERS))
+        for name, flags in expected.items():
+            caps = get_adapter_class(name).capabilities()
+            got = (caps.qos2, caps.native_message_callback_add, caps.v5_publish_properties, caps.v5_topic_alias, caps.v5_receive_maximum)
+            self.assertEqual(got, flags, name)
+            self.assertTrue(caps.tls, name)
+
+    def test_alias_properties_carry_alias_one(self):
+        self.assertEqual(build_paho_publish_properties("alias").TopicAlias, 1)
+        self.assertEqual(GmqttAdapter().build_publish_properties("alias"), {"topic_alias": 1})
+
+    def test_receive_maximum_reaches_the_library(self):
+        paho = create_adapter("paho", client_id="rm", protocol="MQTTv5", receive_maximum=16)
+        self.assertEqual(paho._connect_properties.ReceiveMaximum, 16)
+        with self.assertRaises(ValueError):
+            create_adapter("awscrt", client_id="rm", protocol="MQTTv5", receive_maximum=16)
 
     def test_drive_shapes(self):
         """Which drive loop a client gets is decided by its capabilities, once.
@@ -196,11 +224,13 @@ class AdapterRegistryTests(unittest.TestCase):
         self.assertEqual(len(adapter._pending_filters), 1)
         self.assertIsNone(adapter._client)
 
-    def test_gmqtt_v5_properties_align_payload_format(self):
+    def test_realistic_properties_do_not_claim_utf8(self):
         g = GmqttAdapter().build_publish_properties("realistic")
-        self.assertEqual(g["payload_format_indicator"], 1)
+        self.assertNotIn("payload_format_indicator", g)
+        self.assertEqual(g["content_type"], "application/octet-stream")
         p = build_paho_publish_properties("realistic")
-        self.assertEqual(getattr(p, "PayloadFormatIndicator"), 1)
+        self.assertFalse(hasattr(p, "PayloadFormatIndicator"))
+        self.assertEqual(p.ContentType, "application/octet-stream")
 
 
 class BridgedAdapterTests(unittest.TestCase):

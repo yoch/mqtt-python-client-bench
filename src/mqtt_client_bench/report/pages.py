@@ -33,8 +33,9 @@ from mqtt_client_bench.report.views import (
     METRICS,
     QUESTIONS,
     Column,
-    payload_label,
     point_columns,
+    point_features,
+    point_payload,
     rate_label,
     sort_key,
 )
@@ -183,7 +184,16 @@ def point_page(campaign: Campaign, point: dict) -> str:
         if hists:
             chart = "<h2>Latency by percentile</h2>" + latency_chart(hists, client_colors(campaign.clients))
     spec = (
-        f"{point['kind']} · QoS {point['qos']} · {payload_label(point['payload'])} · {rate_label(point)} · {point['protocol']}"
+        " · ".join(
+            [
+                point["kind"],
+                f"QoS {point['qos']}",
+                point_payload(point),
+                rate_label(point),
+                point["protocol"],
+                *point_features(point),
+            ]
+        )
     )
     body = f"""<p class="crumb"><a href="../index.html">Results</a> / {e(point["name"])}</p>
 <h1>{e(point["name"])}</h1>
@@ -281,7 +291,7 @@ def _dl(items) -> str:
 def methodology_page(campaign: Campaign, data_files: List[str]) -> str:
     slack = (tolerance(1_000_000) - tolerance(0)) / 1_000_000
     points = "".join(
-        f"<tr><th>{point_link(p, 0)}</th><td>{e(p['kind'])}</td><td>{p['qos']}</td><td>{e(payload_label(p['payload']))}</td>"
+        f"<tr><th>{point_link(p, 0)}</th><td>{e(p['kind'])}</td><td>{p['qos']}</td><td>{e(point_payload(p))}</td>"
         f"<td>{e(rate_label(p))}</td><td>{e(p['protocol'])}</td><td>{e(p['question'])}</td></tr>"
         for p in campaign.points
     )

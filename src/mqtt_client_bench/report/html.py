@@ -129,6 +129,17 @@ def _counts(record: dict) -> List[tuple]:
             ("broker sent ($SYS)", s.get("sent")),
             ("client replies", w.get("received")),
         ]
+    elif kind == "duplex":
+        src = record.get("peer_source") or {}
+        rows = [
+            ("client sent", w.get("sent")),
+            ("client completed", w.get("done")),
+            ("C sink received", p.get("received_total")),
+            ("C source sent", src.get("sent_total")),
+            ("client received", w.get("received")),
+            ("broker received ($SYS)", s.get("received")),
+            ("broker sent ($SYS)", s.get("sent")),
+        ]
     else:
         rows = [("connect", f"{m.get('connect_ms', 0):.1f} ms")]
     lag = m.get("lag_summary") or {}

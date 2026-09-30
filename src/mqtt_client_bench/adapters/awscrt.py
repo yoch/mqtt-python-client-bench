@@ -290,7 +290,7 @@ class AwscrtAdapter:
                     mqtt5.UserProperty(name=k, value=v) for k, v in properties["user_property"]
                 ]
             if properties.get("payload_format_indicator"):
-                kwargs["payload_format_indicator"] = mqtt5.PayloadFormatIndicator.UTF8
+                kwargs["payload_format_indicator"] = mqtt5.PayloadFormatIndicator.AWS_MQTT5_PFI_UTF8
         packet = mqtt5.PublishPacket(**kwargs)
         # The mqtt5 client does not expose packet ids up front; correlate the
         # completion with a unique synthetic mid allocated before publish.
@@ -364,15 +364,13 @@ class AwscrtAdapter:
             return None
         if profile == "realistic":
             return {
-                "payload_format_indicator": 1,
-                "content_type": "application/json",
+                "content_type": "application/octet-stream",
                 "message_expiry_interval": 60,
                 "user_property": [("schema", "telemetry.v1"), ("region", "eu-west-1")],
             }
         if profile == "rich":
             return {
-                "payload_format_indicator": 1,
-                "content_type": "application/json",
+                "content_type": "application/octet-stream",
                 "message_expiry_interval": 60,
                 "correlation_data": b"c" * 32,
                 "response_topic": "bench/response/" + ("r" * 48),

@@ -22,17 +22,17 @@ def build_paho_publish_properties(profile: str) -> Any:
 
     props = Properties(PacketTypes.PUBLISH)
     if profile == "realistic":
-        props.PayloadFormatIndicator = 1
-        props.ContentType = "application/json"
+        props.ContentType = "application/octet-stream"
         props.MessageExpiryInterval = 60
         props.UserProperty = [("schema", "telemetry.v1"), ("region", "eu-west-1")]
     elif profile == "rich":
-        props.PayloadFormatIndicator = 1
-        props.ContentType = "application/json"
+        props.ContentType = "application/octet-stream"
         props.MessageExpiryInterval = 60
         props.CorrelationData = b"c" * 32
         props.ResponseTopic = "bench/response/" + ("r" * 48)
         props.UserProperty = [(f"k{i:02d}", "v" * 64) for i in range(16)]
+    elif profile == "alias":
+        props.TopicAlias = 1
     else:
         return None
     return props
@@ -51,6 +51,7 @@ class PahoAdapter:
     def __init__(self, client: Any, mqtt_mod: Any):
         self._client = client
         self._mqtt = mqtt_mod
+        self._connect_properties: Any = None
         self.MQTT_ERR_SUCCESS = int(getattr(mqtt_mod, "MQTT_ERR_SUCCESS", 0))
 
     @classmethod
@@ -68,6 +69,8 @@ class PahoAdapter:
             message_callback_add=True,
             native_message_callback_add=True,
             v5_publish_properties=True,
+            v5_topic_alias=True,
+            v5_receive_maximum=True,
             stability="stable",
             io_model="sync",
             completion_mechanism="sync",
@@ -113,6 +116,7 @@ class PahoAdapter:
         max_inflight: int = 20,
         max_queued: int = 200,
         tls_ca_certs: Optional[str] = None,
+        receive_maximum: Optional[int] = None,
     ) -> "PahoAdapter":
         import paho.mqtt.client as mqtt
 
@@ -134,13 +138,20 @@ class PahoAdapter:
         adapter = cls(client, mqtt)
         if tls_ca_certs:
             adapter.tls_set(ca_certs=tls_ca_certs)
+        if receive_maximum:
+            from paho.mqtt.packettypes import PacketTypes
+            from paho.mqtt.properties import Properties
+
+            props = Properties(PacketTypes.CONNECT)
+            props.ReceiveMaximum = int(receive_maximum)
+            adapter._connect_properties = props
         return adapter
 
     def tls_set(self, ca_certs: str) -> None:
         self._client.tls_set(ca_certs=ca_certs)
 
     def connect(self, host: str, port: int, keepalive: int = 60) -> None:
-        self._client.connect(host, port, keepalive=keepalive)
+        self._client.connect(host, port, keepalive=keepalive, properties=self._connect_properties)
 
     def disconnect(self) -> None:
         self._client.disconnect()

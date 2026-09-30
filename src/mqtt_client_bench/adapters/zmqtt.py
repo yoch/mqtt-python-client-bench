@@ -42,6 +42,7 @@ class ZmqttAdapter(BridgedAdapterBase):
             message_callback_add=True,
             native_message_callback_add=False,
             v5_publish_properties=True,
+            v5_receive_maximum=True,
             stability="experimental",
             io_model="asyncio",
             implementation_language="python",
@@ -87,6 +88,7 @@ class ZmqttAdapter(BridgedAdapterBase):
         max_inflight: int = 20,
         max_queued: int = 200,
         tls_ca_certs: Optional[str] = None,
+        receive_maximum: Optional[int] = None,
     ) -> "ZmqttAdapter":
         try:
             import zmqtt  # noqa: F401
@@ -99,6 +101,7 @@ class ZmqttAdapter(BridgedAdapterBase):
         adapter._protocol = protocol
         adapter._clean_session = clean_session
         adapter._tls_ca_certs = tls_ca_certs
+        adapter._receive_maximum = receive_maximum
         return adapter
 
     def connect(self, host: str, port: int, keepalive: int = 60) -> None:
@@ -125,6 +128,7 @@ class ZmqttAdapter(BridgedAdapterBase):
             clean_session=self._clean_session,
             tls=tls,
             version="5.0" if self._protocol == "MQTTv5" else "3.1.1",
+            receive_maximum=self._receive_maximum,
         )
         await self._client.connect()
         self._connected = True
@@ -283,15 +287,13 @@ class ZmqttAdapter(BridgedAdapterBase):
             return None
         if profile == "realistic":
             return {
-                "payload_format_indicator": 1,
-                "content_type": "application/json",
+                "content_type": "application/octet-stream",
                 "message_expiry_interval": 60,
                 "user_property": [("schema", "telemetry.v1"), ("region", "eu-west-1")],
             }
         if profile == "rich":
             return {
-                "payload_format_indicator": 1,
-                "content_type": "application/json",
+                "content_type": "application/octet-stream",
                 "message_expiry_interval": 60,
                 "correlation_data": b"c" * 32,
                 "response_topic": "bench/response/" + ("r" * 48),

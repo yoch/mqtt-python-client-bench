@@ -19,6 +19,8 @@ from mqtt_client_bench.bench.checks import INVALID, NOT_SUSTAINED, VALID
 
 LATENCY_QUANTILES = {"p50": 0.5, "p90": 0.9, "p99": 0.99, "p999": 0.999, "max": 1.0}
 LAG_QUANTILES = {"lag_p50": 0.5, "lag_p99": 0.99, "lag_max": 1.0}
+# Duplex: the client's own receive path, next to "latency" on its publish path.
+RX_QUANTILES = {"rx_p50": 0.5, "rx_p99": 0.99}
 # Only a development profile tolerates these, and it says so on every page.
 CAMPAIGN_FLAGS = {"non_comparable", "host_noisy"}
 
@@ -67,9 +69,16 @@ class Cell:
         """Schedule lag: how late the client published against the offer."""
         return self._merged("lag", runs)
 
+    def latency_rx(self, runs: Optional[List[dict]] = None) -> Optional[dict]:
+        return self._merged("latency_rx", runs)
+
     def value(self, key: str) -> Optional[float]:
         """A metric of the valid runs; latency and lag keys are in microseconds."""
-        for quantiles, h in ((LATENCY_QUANTILES, self.latency), (LAG_QUANTILES, self.lag)):
+        for quantiles, h in (
+            (LATENCY_QUANTILES, self.latency),
+            (LAG_QUANTILES, self.lag),
+            (RX_QUANTILES, self.latency_rx),
+        ):
             if key in quantiles:
                 hist = h()
                 ns = histogram.percentile(hist, quantiles[key]) if hist else None

@@ -13,7 +13,7 @@ from typing import Any, Dict, Optional
 
 from mqtt_client_bench.adapters.async_bridge import IncomingMessage
 from mqtt_client_bench.adapters.base import AdapterCapabilities, SubscribeResult
-from mqtt_client_bench.adapters.gmqtt import GmqttAdapter
+from mqtt_client_bench.adapters.gmqtt import GmqttAdapter, receive_maximum_kwargs
 
 
 class GmqttAsyncAdapter:
@@ -48,6 +48,7 @@ class GmqttAsyncAdapter:
         max_queued: int = 200,
         max_queued_bytes: Optional[int] = None,
         tls_ca_certs: Optional[str] = None,
+        receive_maximum: Optional[int] = None,
     ) -> "GmqttAsyncAdapter":
         from gmqtt import Client as MQTTClient
 
@@ -55,7 +56,7 @@ class GmqttAsyncAdapter:
         adapter._client_id = client_id
         adapter._protocol = protocol
         adapter._clean_session = clean_session
-        adapter._client = MQTTClient(client_id, clean_session=clean_session)
+        adapter._client = MQTTClient(client_id, clean_session=clean_session, **receive_maximum_kwargs(receive_maximum))
         if tls_ca_certs:
             adapter._ssl_context = ssl.create_default_context(cafile=tls_ca_certs)
         adapter._wire()

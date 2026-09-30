@@ -60,9 +60,21 @@ outside the worker, so the worker never samples itself.
 | `pub_16k_fixed` | fixed 1,000/s | cost of 16 KiB payloads |
 | `idle_connect` | idle | connect time and idle footprint |
 
-The `v5` suite repeats the three fixed-rate points over MQTT 5, and
-`extended` adds more capacity and QoS 0 variants. [SCENARIOS.md](SCENARIOS.md)
-describes the wiring of every point.
+The `v5` suite repeats the three fixed-rate points over MQTT 5. The
+`extended` suite adds 26 points that answer narrower questions:
+
+- a load curve at 500 and 5,000 msgs/s, the same absolute offers for everyone;
+- QoS 2, completed end to end by the C peer;
+- dispatch over 1,000 topics: round-robin publish, wildcard receive, and 100
+  `message_callback_add` filters;
+- one client publishing and receiving at once (duplex);
+- TLS at steady state and at connect;
+- MQTT 5 PUBLISH properties, topic alias and Receive Maximum;
+- 64 KiB and 1 MiB payloads, and packets on each side of the remaining-length
+  steps up to 2 MiB.
+
+[SCENARIOS.md](SCENARIOS.md) describes the wiring of every point, and
+[TODO.md](TODO.md) lists what is not measured yet.
 
 Capacity points rank throughput. **Fixed-rate points** give every client the
 identical absolute offer, so CPU µs per message, RSS and latency compare across
@@ -91,7 +103,10 @@ is the same for every client.
 The checks compare counts across parties with a tolerance of `5 + 0.05 %`:
 
 - the broker confirms what the client published and what was delivered;
-- QoS 1 loses nothing;
+- QoS 1 and 2 lose nothing;
+- on extended points, the feature itself happened: payload lengths intact,
+  every message dispatched to a filter callback, properties delivered, the
+  topic alias visible in the broker's byte counters;
 - the offer was actually produced and absorbed;
 - the broker kept headroom on fixed points;
 - the rest of the host stayed quiet.
@@ -101,7 +116,8 @@ Flags qualify a valid run without invalidating it:
 - `broker_bound`: Mosquitto was at its core limit on a capacity point;
 - `offer_bound`: the client received the whole receive offer, so its capacity
   is higher still;
-- `broker_queue_overflow`: `sub_qos1_max` exceeded the broker queue;
+- `broker_queue_overflow`: a QoS 1 or 2 capacity point exceeded the broker
+  queue;
 - `host_noisy`: only on non-comparable profiles.
 
 ### What makes the numbers trustworthy
@@ -138,8 +154,9 @@ PYTHONPATH=src python -m mqtt_client_bench.run report --input results/v2 --outpu
 PYTHONPATH=src python -m mqtt_client_bench.run harness-cost
 ```
 
-A standard campaign over `core,v5` for all eight clients takes about an hour
-(`list` prints the estimate from the real plan). `--resume` continues with the
+A standard campaign over `core,v5` for all eight clients takes about an hour,
+and `--suites core,v5,extended` about 2 h 50 min, which a test keeps under
+3 hours (`list` prints the estimate from the real plan). `--resume` continues with the
 profile, points, clients and run count recorded in the campaign's manifest,
 and refuses any option that would mix settings in one campaign. `report`
 only ever replaces an output directory it built itself. The `smoke` profile (0.5 s
@@ -154,7 +171,7 @@ host. Otherwise runs fail `host_quiet`.
 
 ```
 peer/mqtt_peer.c              neutral C sink / source / echo
-mosquitto/mosquitto.conf      one plaintext listener, $SYS every second
+mosquitto/mosquitto.conf      plaintext + TLS listeners, $SYS every second
 src/mqtt_client_bench/
   adapters/                   one module per library + registry + capabilities
   bench/
@@ -187,6 +204,11 @@ when a C compiler is available.
 
 - One host, loopback only: results describe CPU cost and latency without a
   network in the way, on the machine named in each campaign's manifest.
+- Feature coverage differs by library. QoS 2 is refused for gmqtt, aiomqtt3
+  and awscrt; the per-filter callback point runs only paho and mqttium, which
+  match filters natively; the topic alias runs only where the library's API
+  accepts an aliased empty topic. Refused pairs are listed in the coverage
+  section, never approximated.
 - `awscrt` cannot set `TCP_NODELAY` (aws-c-io hides the socket). Its ~25 ms
   round trip at 1,000 req/s is Nagle's algorithm meeting delayed ACKs. That is
   real behaviour of the library as shipped, reported as measured.

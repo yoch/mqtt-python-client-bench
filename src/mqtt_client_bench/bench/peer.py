@@ -6,7 +6,7 @@ import hashlib
 import shutil
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from mqtt_client_bench.paths import PROJECT_ROOT
 
@@ -53,6 +53,9 @@ def command(
     rate: int = 0,
     reply_topic: Optional[str] = None,
     reply_qos: int = 0,
+    topics: int = 1,
+    properties: bool = False,
+    sizes: Sequence[int] = (),
 ) -> List[str]:
     cmd = [
         str(ensure_built()),
@@ -65,8 +68,14 @@ def command(
     ]
     if protocol == "MQTTv5":
         cmd.append("--v5")
+    if topics > 1:
+        cmd += ["--topics", str(topics)]
     if mode == "source":
         cmd += ["--payload", str(payload), "--rate", str(rate)]
+        if properties:
+            cmd.append("--props")
+    if mode == "sink" and sizes:
+        cmd += ["--sizes", ",".join(str(s) for s in sizes)]
     if mode == "echo":
         cmd += ["--reply-topic", reply_topic or f"{topic}/reply", "--reply-qos", str(reply_qos)]
     return cmd

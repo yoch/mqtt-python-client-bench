@@ -5,12 +5,19 @@
  * another Python library, so the only Python in a run is the one being
  * ranked. Three modes, one MQTT 3.1.1 / 5 connection each:
  *
- *   sink    subscribe to --topic, count every PUBLISH, PUBACK QoS 1, and
- *           histogram the one-way latency of stamped payloads.
- *   source  publish to --topic at --rate msgs/s (QoS 0 or 1), stamping each
- *           payload; count PUBACKs.
+ *   sink    subscribe to --topic, count every PUBLISH, acknowledge QoS 1
+ *           (PUBACK) and QoS 2 (PUBREC, then PUBCOMP), and histogram the
+ *           one-way latency of stamped payloads.
+ *   source  publish to --topic at --rate msgs/s (QoS 0, 1 or 2), stamping
+ *           each payload; count completions (PUBACK, or PUBCOMP after PUBREL).
  *   echo    subscribe to --topic and republish every payload unchanged to
  *           --reply-topic, so the client measures its own round trip.
+ *
+ * With --topics N > 1 the source spreads its messages round-robin over
+ * <topic>/<i/10>/<i%10>, i < N, and a sink or echo subscribes to <topic>/#.
+ * With --props (MQTT 5) the source attaches a fixed set of PUBLISH
+ * properties; a sink always counts the messages that carry a user property.
+ * With --sizes a,b,... a sink counts payloads whose length is not listed.
  *
  * Schedule: after connecting (and subscribing) the peer prints
  * {"event":"ready"} on stdout, then reads one line from stdin:
@@ -59,10 +66,17 @@ static int g_v5 = 0;
 static int g_payload = 256;
 static uint64_t g_rate = 0;
 static int g_tick_us = 250;
+static int g_topics = 1;
+static int g_props = 0;
+#define MAX_SIZES 16
+static uint32_t g_sizes[MAX_SIZES];
+static int g_nsizes = 0;
 
 static uint64_t t_start, t_measure, t_end, t_stop;
 static int g_fd = -1;
 static char g_error[256];
+/* The source's reader thread answers PUBREC with PUBREL on the same socket. */
+static pthread_mutex_t g_write_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static uint64_t now_ns(void)
 {
@@ -164,18 +178,22 @@ static int tcp_connect(void)
 
 static int write_all(int fd, const uint8_t *p, size_t n)
 {
+	int rc = 0;
+	pthread_mutex_lock(&g_write_lock);
 	while (n > 0) {
 		ssize_t w = send(fd, p, n, MSG_NOSIGNAL);
 		if (w < 0) {
 			if (errno == EINTR || errno == EAGAIN) {
 				continue;
 			}
-			return -1;
+			rc = -1;
+			break;
 		}
 		p += w;
 		n -= (size_t)w;
 	}
-	return 0;
+	pthread_mutex_unlock(&g_write_lock);
+	return rc;
 }
 
 struct wbuf {
@@ -413,10 +431,44 @@ struct publish_template {
 	size_t stamp_off; /* 0 when the payload is shorter than a stamp */
 };
 
+/* The realistic telemetry set: expiry, content type and two user properties.
+ * No payload format indicator: the payload is a binary stamp, not UTF-8.
+ * Shorter than 128 bytes, so its length is one varint byte. */
+static size_t put_properties(uint8_t *p)
+{
+	size_t i = 0;
+	p[i++] = 0x02;
+	p[i++] = 0;
+	p[i++] = 0;
+	p[i++] = 0;
+	p[i++] = 60;
+	p[i++] = 0x03;
+	i += put_str(p + i, "application/octet-stream");
+	p[i++] = 0x26;
+	i += put_str(p + i, "schema");
+	i += put_str(p + i, "telemetry.v1");
+	p[i++] = 0x26;
+	i += put_str(p + i, "region");
+	i += put_str(p + i, "eu-west-1");
+	return i;
+}
+
+static void topic_name(char *out, size_t cap, int index)
+{
+	if (g_topics <= 1) {
+		snprintf(out, cap, "%s", g_topic);
+	} else {
+		snprintf(out, cap, "%s/%d/%d", g_topic, index / 10, index % 10);
+	}
+}
+
 static void build_publish(struct publish_template *t, const char *topic, int qos, size_t payload)
 {
+	uint8_t props[128];
+	size_t props_len = g_v5 && g_props ? put_properties(props) : 0;
 	size_t tlen = strlen(topic);
-	uint32_t remaining = (uint32_t)(2 + tlen + (qos ? 2 : 0) + (g_v5 ? 1 : 0) + payload);
+	uint32_t remaining =
+		(uint32_t)(2 + tlen + (qos ? 2 : 0) + (g_v5 ? 1 + props_len : 0) + payload);
 	t->pkt = malloc(5 + remaining);
 	size_t i = 0;
 	t->pkt[i++] = (uint8_t)(0x30 | (qos << 1));
@@ -429,7 +481,9 @@ static void build_publish(struct publish_template *t, const char *topic, int qos
 		t->pkt[i++] = 1;
 	}
 	if (g_v5) {
-		t->pkt[i++] = 0;
+		t->pkt[i++] = (uint8_t)props_len;
+		memcpy(t->pkt + i, props, props_len);
+		i += props_len;
 	}
 	t->stamp_off = payload >= 8 ? i : 0;
 	memset(t->pkt + i, 'A', payload);
@@ -440,10 +494,60 @@ static void build_publish(struct publish_template *t, const char *topic, int qos
 
 static atomic_uint_fast64_t c_sent_total, c_sent_window, c_acked_total;
 static uint64_t c_recv_total, c_recv_window, c_echoed_total, c_echo_acks;
+static uint64_t c_props_seen, c_size_mismatch;
 
 static inline bool in_window(uint64_t now)
 {
 	return now >= t_measure && now < t_end;
+}
+
+/* True when a PUBLISH property block holds a user property (0x26). */
+static bool has_user_property(const uint8_t *p, uint32_t n)
+{
+	uint32_t i = 0;
+	while (i < n) {
+		uint8_t id = p[i++];
+		uint32_t used, skip;
+		switch (id) {
+		case 0x01:
+			skip = 1;
+			break;
+		case 0x23:
+			skip = 2;
+			break;
+		case 0x02:
+			skip = 4;
+			break;
+		case 0x0B:
+			get_varint(p + i, n - i, &used);
+			skip = used;
+			break;
+		case 0x03:
+		case 0x08:
+		case 0x09:
+			if (i + 2 > n) {
+				return false;
+			}
+			skip = 2 + ((uint32_t)p[i] << 8 | p[i + 1]);
+			break;
+		case 0x26:
+			return true;
+		default:
+			return false;
+		}
+		i += skip;
+	}
+	return false;
+}
+
+static bool size_listed(uint32_t plen)
+{
+	for (int i = 0; i < g_nsizes; i++) {
+		if (g_sizes[i] == plen) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /* Parse one inbound PUBLISH; returns the payload and its packet id. */
@@ -466,7 +570,14 @@ static int parse_publish(uint8_t hdr, uint8_t *body, uint32_t len, uint8_t **pay
 	if (g_v5) {
 		uint32_t used;
 		uint32_t plen_props = get_varint(body + off, len - off, &used);
-		off += used + plen_props;
+		off += used;
+		if (off + plen_props > len) {
+			return -1;
+		}
+		if (plen_props && has_user_property(body + off, plen_props)) {
+			c_props_seen++;
+		}
+		off += plen_props;
 	}
 	if (off > len) {
 		return -1;
@@ -476,10 +587,22 @@ static int parse_publish(uint8_t hdr, uint8_t *body, uint32_t len, uint8_t **pay
 	return qos;
 }
 
-static void put_puback(struct wbuf *out, uint16_t pid)
+/* PUBACK 0x40, PUBREC 0x50, PUBREL 0x62, PUBCOMP 0x70: success, no properties. */
+static void put_ack(struct wbuf *out, uint8_t type, uint16_t pid)
 {
-	uint8_t ack[4] = {0x40, 0x02, (uint8_t)(pid >> 8), (uint8_t)pid};
+	uint8_t ack[4] = {type, 0x02, (uint8_t)(pid >> 8), (uint8_t)pid};
 	wbuf_put(out, ack, 4);
+}
+
+static uint16_t ack_pid(const uint8_t *body, uint32_t len)
+{
+	return len >= 2 ? (uint16_t)(body[0] << 8 | body[1]) : 0;
+}
+
+/* v5 PUBREC may carry a failure reason, after which no PUBREL is due. */
+static bool ack_failed(const uint8_t *body, uint32_t len)
+{
+	return g_v5 && len >= 3 && body[2] >= 0x80;
 }
 
 /* sink and echo share one single-threaded read loop. */
@@ -508,8 +631,18 @@ static void run_receiver(struct rbuf *rb)
 		int got;
 		while ((got = next_packet(rb, &hdr, &body, &len)) == 1) {
 			uint8_t type = hdr & 0xf0;
-			if (type == 0x40) {
+			if (type == 0x40 || type == 0x70) {
 				c_echo_acks++;
+				continue;
+			}
+			if (type == 0x50) {
+				if (!ack_failed(body, len)) {
+					put_ack(&out, 0x62, ack_pid(body, len));
+				}
+				continue;
+			}
+			if (type == 0x60) {
+				put_ack(&out, 0x70, ack_pid(body, len));
 				continue;
 			}
 			if (type != 0x30) {
@@ -526,9 +659,14 @@ static void run_receiver(struct rbuf *rb)
 			}
 			c_recv_total++;
 			if (qos == 1) {
-				put_puback(&out, pid);
+				put_ack(&out, 0x40, pid);
+			} else if (qos == 2) {
+				put_ack(&out, 0x50, pid);
 			}
 			if (g_mode == M_SINK) {
+				if (g_nsizes && !size_listed(plen)) {
+					c_size_mismatch++;
+				}
 				if (win) {
 					c_recv_window++;
 					if (plen >= 8) {
@@ -571,10 +709,11 @@ static void run_receiver(struct rbuf *rb)
 	free(out.p);
 }
 
-/* source: the reader thread only has PUBACKs to count. */
+/* source: the reader thread counts completions and answers PUBREC. */
 static void *source_reader(void *arg)
 {
 	struct rbuf *rb = arg;
+	struct wbuf out = {0};
 	while (now_ns() < t_stop) {
 		int rc = rbuf_fill(rb, 100);
 		if (rc < 0) {
@@ -583,11 +722,18 @@ static void *source_reader(void *arg)
 		uint8_t hdr, *body;
 		uint32_t len;
 		while (next_packet(rb, &hdr, &body, &len) == 1) {
-			if ((hdr & 0xf0) == 0x40) {
+			uint8_t type = hdr & 0xf0;
+			if (type == 0x40 || type == 0x70) {
 				atomic_fetch_add_explicit(&c_acked_total, 1, memory_order_relaxed);
+			} else if (type == 0x50 && !ack_failed(body, len)) {
+				put_ack(&out, 0x62, ack_pid(body, len));
 			}
 		}
+		if (wbuf_flush(&out, g_fd) < 0) {
+			break;
+		}
 	}
+	free(out.p);
 	return NULL;
 }
 
@@ -598,16 +744,23 @@ static void run_source(struct rbuf *rb)
 	pthread_t reader;
 	pthread_create(&reader, NULL, source_reader, rb);
 
-	struct publish_template t;
-	build_publish(&t, g_topic, g_qos, (size_t)g_payload);
-	size_t batch_max = MAX_BATCH_BYTES / t.len;
+	int ntpl = g_topics > 1 ? g_topics : 1;
+	struct publish_template *tpl = calloc((size_t)ntpl, sizeof(*tpl));
+	size_t max_len = 0;
+	for (int i = 0; i < ntpl; i++) {
+		char name[512];
+		topic_name(name, sizeof(name), i);
+		build_publish(&tpl[i], name, g_qos, (size_t)g_payload);
+		if (tpl[i].len > max_len) {
+			max_len = tpl[i].len;
+		}
+	}
+	size_t batch_max = MAX_BATCH_BYTES / max_len;
 	if (batch_max < 1) {
 		batch_max = 1;
 	}
-	uint8_t *batch = malloc(batch_max * t.len);
-	for (size_t i = 0; i < batch_max; i++) {
-		memcpy(batch + i * t.len, t.pkt, t.len);
-	}
+	uint8_t *batch = malloc(batch_max * max_len);
+	uint64_t seq = 0;
 	uint16_t pid = 0;
 	uint64_t tick_ns = (uint64_t)g_tick_us * 1000ull;
 	/* Credit pacing: owe rate*elapsed, but never more than 4 ticks at once,
@@ -635,18 +788,22 @@ static void run_source(struct rbuf *rb)
 		while (due > 0) {
 			size_t k = due > batch_max ? batch_max : (size_t)due;
 			uint64_t stamp = now_ns();
+			size_t off = 0;
 			for (size_t i = 0; i < k; i++) {
-				uint8_t *pkt = batch + i * t.len;
-				if (t.pid_off) {
+				const struct publish_template *t = &tpl[seq++ % (uint64_t)ntpl];
+				uint8_t *pkt = batch + off;
+				memcpy(pkt, t->pkt, t->len);
+				if (t->pid_off) {
 					pid = pid == 65535 ? 1 : pid + 1;
-					pkt[t.pid_off] = (uint8_t)(pid >> 8);
-					pkt[t.pid_off + 1] = (uint8_t)pid;
+					pkt[t->pid_off] = (uint8_t)(pid >> 8);
+					pkt[t->pid_off + 1] = (uint8_t)pid;
 				}
-				if (t.stamp_off) {
-					write_stamp(pkt + t.stamp_off, stamp);
+				if (t->stamp_off) {
+					write_stamp(pkt + t->stamp_off, stamp);
 				}
+				off += t->len;
 			}
-			if (write_all(g_fd, batch, k * t.len) < 0) {
+			if (write_all(g_fd, batch, off) < 0) {
 				fail("send");
 				goto out;
 			}
@@ -668,7 +825,10 @@ static void run_source(struct rbuf *rb)
 out:
 	pthread_join(reader, NULL);
 	free(batch);
-	free(t.pkt);
+	for (int i = 0; i < ntpl; i++) {
+		free(tpl[i].pkt);
+	}
+	free(tpl);
 }
 
 static void print_result(void)
@@ -687,6 +847,8 @@ static void print_result(void)
 	       (unsigned long long)atomic_load(&c_sent_window), (unsigned long long)atomic_load(&c_acked_total),
 	       (unsigned long long)c_recv_total, (unsigned long long)c_recv_window,
 	       (unsigned long long)c_echoed_total, (unsigned long long)c_echo_acks);
+	printf(",\"props_seen\":%llu,\"size_mismatch\":%llu", (unsigned long long)c_props_seen,
+	       (unsigned long long)c_size_mismatch);
 	printf(",\"latency\":{\"count\":%llu,\"min_ns\":%llu,\"max_ns\":%llu,\"sum_ns\":%llu,\"negative\":%llu,"
 	       "\"buckets\":[",
 	       (unsigned long long)g_lat.count, (unsigned long long)(g_lat.count ? g_lat.min : 0),
@@ -728,7 +890,19 @@ static void usage(void)
 	fprintf(stderr,
 		"usage: mqtt_peer sink|source|echo [--host H] [--port P] [--topic T] [--qos Q]\n"
 		"                 [--v5] [--client-id ID] [--payload B] [--rate R] [--tick-us U]\n"
-		"                 [--reply-topic T] [--reply-qos Q]\n");
+		"                 [--reply-topic T] [--reply-qos Q] [--topics N] [--props]\n"
+		"                 [--sizes B,B,...]\n");
+}
+
+static int parse_sizes(char *list)
+{
+	for (char *tok = strtok(list, ","); tok; tok = strtok(NULL, ",")) {
+		if (g_nsizes == MAX_SIZES) {
+			return -1;
+		}
+		g_sizes[g_nsizes++] = (uint32_t)strtoul(tok, NULL, 10);
+	}
+	return 0;
 }
 
 int main(int argc, char **argv)
@@ -761,7 +935,9 @@ int main(int argc, char **argv)
 		{"v5", no_argument, NULL, '5'},		      {"client-id", required_argument, NULL, 'i'},
 		{"payload", required_argument, NULL, 's'},    {"rate", required_argument, NULL, 'r'},
 		{"tick-us", required_argument, NULL, 'k'},    {"reply-topic", required_argument, NULL, 'R'},
-		{"reply-qos", required_argument, NULL, 'Q'},  {0, 0, 0, 0},
+		{"reply-qos", required_argument, NULL, 'Q'},  {"topics", required_argument, NULL, 'T'},
+		{"props", no_argument, NULL, 'P'},	      {"sizes", required_argument, NULL, 'S'},
+		{0, 0, 0, 0},
 	};
 	optind = 2;
 	int c;
@@ -778,11 +954,23 @@ int main(int argc, char **argv)
 		case 'k': g_tick_us = atoi(optarg) < 50 ? 50 : atoi(optarg); break;
 		case 'R': g_reply_topic = optarg; break;
 		case 'Q': g_reply_qos = atoi(optarg); break;
+		case 'T': g_topics = atoi(optarg); break;
+		case 'P': g_props = 1; break;
+		case 'S':
+			if (parse_sizes(optarg) < 0) {
+				fprintf(stderr, "at most %d sizes\n", MAX_SIZES);
+				return 2;
+			}
+			break;
 		default: usage(); return 2;
 		}
 	}
-	if (g_qos < 0 || g_qos > 1 || g_reply_qos < 0 || g_reply_qos > 1) {
-		fprintf(stderr, "only QoS 0 and 1 are supported\n");
+	if (g_qos < 0 || g_qos > 2 || g_reply_qos < 0 || g_reply_qos > 2) {
+		fprintf(stderr, "QoS must be 0, 1 or 2\n");
+		return 2;
+	}
+	if (g_topics < 1 || g_topics > 10000) {
+		fprintf(stderr, "--topics must be in 1..10000\n");
 		return 2;
 	}
 	char cid[64];
@@ -799,7 +987,9 @@ int main(int argc, char **argv)
 		print_result();
 		return 1;
 	}
-	if (g_mode != M_SOURCE && mqtt_subscribe(&rb, g_topic, g_qos) < 0) {
+	char filter[512];
+	snprintf(filter, sizeof(filter), g_topics > 1 ? "%s/#" : "%s", g_topic);
+	if (g_mode != M_SOURCE && mqtt_subscribe(&rb, filter, g_qos) < 0) {
 		fail("subscribe");
 		print_result();
 		return 1;

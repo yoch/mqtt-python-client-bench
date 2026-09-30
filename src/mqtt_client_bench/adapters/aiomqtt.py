@@ -49,6 +49,8 @@ class AiomqttAdapter(BridgedAdapterBase):
             message_callback_add=True,
             native_message_callback_add=False,
             v5_publish_properties=True,
+            v5_topic_alias=True,
+            v5_receive_maximum=True,
             stability="stable",
             io_model="asyncio",
             implementation_language="python",
@@ -88,6 +90,7 @@ class AiomqttAdapter(BridgedAdapterBase):
         max_inflight: int = 20,
         max_queued: int = 200,
         tls_ca_certs: Optional[str] = None,
+        receive_maximum: Optional[int] = None,
     ) -> "AiomqttAdapter":
         try:
             import aiomqtt  # noqa: F401
@@ -103,6 +106,7 @@ class AiomqttAdapter(BridgedAdapterBase):
         adapter._tls_ca_certs = tls_ca_certs
         adapter._max_inflight = max_inflight
         adapter._max_queued = max_queued
+        adapter._receive_maximum = receive_maximum
         return adapter
 
     def _protocol_enum(self):
@@ -152,6 +156,13 @@ class AiomqttAdapter(BridgedAdapterBase):
             "max_queued_outgoing_messages": self._max_queued,
             "logger": quiet_logger,
         }
+        if self._receive_maximum:
+            from paho.mqtt.packettypes import PacketTypes
+            from paho.mqtt.properties import Properties
+
+            props = Properties(PacketTypes.CONNECT)
+            props.ReceiveMaximum = int(self._receive_maximum)
+            kwargs["properties"] = props
         # Paho rejects clean_session for MQTT 5; use clean_start instead.
         if self._protocol == "MQTTv5":
             kwargs["clean_start"] = self._clean_session
