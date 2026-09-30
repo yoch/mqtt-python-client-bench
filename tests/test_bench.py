@@ -160,6 +160,16 @@ class CheckTests(unittest.TestCase):
         self.assertAlmostEqual(m["cpu_us_per_msg"], 100.0)
         self.assertEqual(m["latency_summary"]["count"], 10)
 
+    def test_schedule_lag_is_its_own_metric(self):
+        lag = histogram.from_values([50_000] * 9)
+        lag["unsent"] = 1
+        worker = dict(_record("pub")["worker"], lag=lag)
+        m = checks.evaluate(_record("pub", worker=worker))["metrics"]
+        self.assertEqual(m["lag_summary"]["count"], 9)
+        self.assertEqual(m["lag_summary"]["unsent"], 1)
+        self.assertAlmostEqual(m["lag_summary"]["p50_us"], 50, delta=50 / 16)
+        self.assertEqual(m["latency_summary"]["count"], 10)
+
     def test_tolerance(self):
         self.assertEqual(checks.tolerance(0), 5)
         self.assertEqual(checks.tolerance(100_000), 55)
@@ -194,20 +204,79 @@ class _FakeAsync:
         return self.published
 
 
+class _StalledAsync:
+    """Every publish takes 200 ms: 256 workers hold only ~1,280 msgs/s."""
+
+    async def publish(self, topic, payload, qos):
+        await asyncio.sleep(0.2)
+        return 1
+
+
+def _fixed(rate=5000, duration_ns=400_000_000):
+    run = drive.Run(send_capacity=rate * duration_ns // drive.NS + 16)
+    t0 = time.monotonic_ns() + 10_000_000
+    make = drive.fixed_payload_maker(16, run)
+    return run, {"topic": "t", "qos": 1, "make": make, "rate": rate, "t_start": t0, "t_end": t0 + duration_ns}
+
+
+def _published_lags(run, kw):
+    lags, _ = run.window_lags(kw["rate"], kw["t_start"], kw["t_start"], kw["t_end"])
+    return lags
+
+
 class DriveTests(unittest.TestCase):
     def test_fixed_rate_sync_holds_rate(self):
-        run = drive.Run()
-        t0 = time.monotonic_ns() + 10_000_000
-        drive.pub_fixed_sync(_FakeSync(), run, topic="t", qos=1, make=drive.payload_maker(16, True), rate=5000, t_start=t0, t_end=t0 + 400_000_000)
+        run, kw = _fixed()
+        drive.pub_fixed_sync(_FakeSync(), run, **kw)
         self.assertAlmostEqual(run.sent + run.skipped, 2000, delta=10)
         self.assertEqual(run.done, run.sent)
 
     def test_fixed_rate_awaited_holds_rate(self):
-        run = drive.Run()
-        t0 = time.monotonic_ns() + 10_000_000
-        asyncio.run(drive.pub_fixed_awaited(_FakeAsync(), run, topic="t", qos=1, make=drive.payload_maker(16, True), rate=5000, t_start=t0, t_end=t0 + 400_000_000))
+        run, kw = _fixed()
+        asyncio.run(drive.pub_fixed_awaited(_FakeAsync(), run, **kw))
         self.assertAlmostEqual(run.sent + run.skipped, 2000, delta=10)
         self.assertEqual(run.done, run.sent)
+
+    def test_every_fixed_shape_stores_one_send_time_per_publish(self):
+        shapes = {
+            "sync": lambda run, kw: drive.pub_fixed_sync(_FakeSync(), run, **kw),
+            "nowait": lambda run, kw: asyncio.run(drive.pub_fixed_nowait(_FakeAsync(), run, **kw)),
+            "awaited": lambda run, kw: asyncio.run(drive.pub_fixed_awaited(_FakeAsync(), run, **kw)),
+        }
+        for shape, drive_it in shapes.items():
+            with self.subTest(shape=shape):
+                run, kw = _fixed()
+                drive_it(run, kw)
+                lags = _published_lags(run, kw)
+                self.assertEqual(len(lags), run.sent)
+                self.assertEqual(run.send_overflow, 0)
+                # Never published before its due time; an idle fake keeps up.
+                self.assertGreaterEqual(min(lags), 0)
+                self.assertLess(sorted(lags)[len(lags) // 2], 5_000_000)
+
+    def test_lag_exposes_a_client_behind_its_schedule(self):
+        run, kw = _fixed(rate=5000, duration_ns=600_000_000)
+        asyncio.run(drive.pub_fixed_awaited(_StalledAsync(), run, **kw))
+        lags = _published_lags(run, kw)
+        # Credits pile up behind busy workers: publishes leave far past due.
+        self.assertGreater(max(lags), 100_000_000)
+        self.assertGreater(run.skipped, 0)
+
+    def test_window_lags_select_by_due_time(self):
+        run = drive.Run(send_capacity=100)
+        for i in range(100):
+            if i != 30:
+                run.sends[i] = drive.due_ns(i, 1000, 0) + i
+        lags, unsent = run.window_lags(1000, t_start=0, t_measure=20_000_000, t_end=50_000_000)
+        self.assertEqual(lags, [i for i in range(20, 50) if i != 30])
+        self.assertEqual(unsent, 1)
+
+    def test_due_time_matches_when_a_message_is_owed(self):
+        rate, t_start = 3000, 12_345
+        for index in (0, 1, 2, 999, 2999):
+            due = drive.due_ns(index, rate, t_start)
+            self.assertGreaterEqual(rate * (due - t_start) // drive.NS, index + 1)
+            self.assertLess(rate * (due - 1 - t_start) // drive.NS, index + 1)
 
     def test_capacity_nowait_respects_window_and_stops(self):
         run = drive.Run()
@@ -216,25 +285,31 @@ class DriveTests(unittest.TestCase):
         async def main():
             loop = asyncio.get_running_loop()
             loop.call_later(0.1, run.request_stop)
-            await drive.pub_capacity_nowait(adapter, run, topic="t", qos=1, make=drive.payload_maker(8, False), window=16, t_start=time.monotonic_ns())
+            await drive.pub_capacity_nowait(adapter, run, topic="t", qos=1, make=drive.payload_maker(8), window=16, t_start=time.monotonic_ns())
 
         asyncio.run(main())
         self.assertGreater(run.done, 100)
         self.assertLessEqual(run.sent - run.done, 16)
 
     def test_stamped_payload_roundtrip(self):
-        make = drive.payload_maker(64, True)
-        run = drive.Run(latency_capacity=4)
+        run = drive.Run(latency_capacity=4, send_capacity=4)
+        make = drive.fixed_payload_maker(64, run)
         on_message = drive.message_callback(run, stamped=True)
 
         class Msg:
-            payload = make()
+            payload = make(0)
 
         on_message(None, None, Msg)
         self.assertEqual(run.received, 1)
         self.assertGreaterEqual(run.latencies[0], 0)
         self.assertLess(run.latencies[0], 1_000_000_000)
         self.assertEqual(len(Msg.payload), 64)
+        self.assertEqual(run.sends[0], int.from_bytes(Msg.payload[:8], "little"))
+        self.assertEqual(run.sends[1], drive.UNSENT)
+
+    def test_fixed_payload_needs_room_for_the_stamp(self):
+        with self.assertRaises(ValueError):
+            drive.fixed_payload_maker(4, drive.Run())
 
 
 class NullClientTests(unittest.TestCase):
@@ -262,7 +337,7 @@ class NullClientTests(unittest.TestCase):
             return inner(topic, payload, qos)
 
         adapter.publish = publish
-        drive.pub_capacity_sync(adapter, run, topic="t", qos=1, make=drive.payload_maker(8, False), window=4, t_start=0)
+        drive.pub_capacity_sync(adapter, run, topic="t", qos=1, make=drive.payload_maker(8), window=4, t_start=0)
         self.assertEqual(run.sent, run.done)
         self.assertEqual(run.failed + run.rejected, 0)
 

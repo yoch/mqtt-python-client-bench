@@ -94,6 +94,9 @@ def describe(record: dict) -> str:
     s = m.get("latency_summary") or {}
     if s.get("count"):
         parts.append(f"p50 {s['p50_us']:.0f} p99 {s['p99_us']:.0f} us")
+    lag = m.get("lag_summary") or {}
+    if lag.get("count"):
+        parts.append(f"lag p99 {lag['p99_us']:.0f} us")
     if "connect_ms" in m:
         parts.append(f"connect {m['connect_ms']:.1f} ms")
     failed = [c for c in record.get("checks", []) if not c["passed"]]

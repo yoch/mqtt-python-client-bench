@@ -3,9 +3,16 @@
 Everything here is counting and pacing, written so that each message costs the
 harness the same few operations whatever the library: an attribute increment
 per publish and per completion, a token per publish on capacity points, one
-clock read and an 8-byte prefix on latency points. There is no per-message
-bookkeeping by message id, no reservoir and no lock; latency is measured by
-the neutral peer, or, when the client is the receiver, as one subtraction.
+clock read, an 8-byte prefix and one send-time store on fixed-rate points.
+There is no per-message bookkeeping by message id, no reservoir and no lock;
+latency is measured by the neutral peer, or, when the client is the receiver,
+as one subtraction.
+
+Fixed offers number their messages. The stamp is the actual publish time, so
+latency is transit only; how late the publish itself was against the message's
+due time is the schedule lag, computed from the stored send times after the
+run and reported next to latency, so a client that falls behind its schedule
+cannot hide it.
 
 Shapes, chosen once per run from the adapter's capabilities:
 
@@ -24,9 +31,12 @@ from __future__ import annotations
 import asyncio
 import time
 from array import array
+from collections import deque
 from queue import SimpleQueue
 
+NS = 1_000_000_000
 TICK_NS = 1_000_000
+UNSENT = -1
 # A late wake-up owes at most this many ticks; beyond that the offer is lost,
 # not repaid as a burst, and the run reports that it did not hold its rate.
 MAX_CATCHUP_TICKS = 4
@@ -49,9 +59,11 @@ class Run:
         "skipped",
         "latencies",
         "latency_overflow",
+        "sends",
+        "send_overflow",
     )
 
-    def __init__(self, latency_capacity: int = 0) -> None:
+    def __init__(self, latency_capacity: int = 0, send_capacity: int = 0) -> None:
         self.stop = False
         # Thread-safe callable that unparks the drive loop after ``stop`` is set.
         self.wake = None
@@ -66,6 +78,10 @@ class Run:
         # does not grow inside the window the client's memory is read over.
         self.latencies = array("q", bytes(8 * latency_capacity))
         self.latency_overflow = 0
+        # Publish time, indexed by the message's place in the fixed offer;
+        # UNSENT marks offered messages never published.
+        self.sends = array("q", [UNSENT]) * send_capacity
+        self.send_overflow = 0
 
     def request_stop(self) -> None:
         self.stop = True
@@ -88,22 +104,48 @@ class Run:
         hi = min(end["received"], len(self.latencies))
         return self.latencies[lo:hi]
 
+    def window_lags(self, rate: int, t_start: int, t_measure: int, t_end: int):
+        """``(lags, unsent)`` of the messages due inside the window.
 
-def payload_maker(size: int, stamped: bool):
-    """``make()`` -> payload bytes; stamped payloads start with send time."""
-    if not stamped or size < 8:
-        body = b"A" * size
+        Computed after the run, so a publish pays one store, not the arithmetic.
+        """
+        lo = min(rate * (t_measure - t_start) // NS, len(self.sends))
+        hi = min(rate * (t_end - t_start) // NS, len(self.sends))
+        lags = [sent - due_ns(i, rate, t_start) for i, sent in enumerate(self.sends[lo:hi], lo) if sent != UNSENT]
+        return lags, (hi - lo) - len(lags)
 
-        def make() -> bytes:
-            return body
 
-        return make
+def payload_maker(size: int):
+    """``make()`` -> the same unstamped payload, for capacity points."""
+    body = b"A" * size
+
+    def make() -> bytes:
+        return body
+
+    return make
+
+
+def due_ns(index: int, rate: int, t_start: int) -> int:
+    """When ``_owed`` first counts message ``index`` of a fixed offer."""
+    return t_start + ((index + 1) * NS + rate - 1) // rate
+
+
+def fixed_payload_maker(size: int, run: Run):
+    """``make(index)`` for fixed offers: stamps the payload, keeps the send time."""
+    if size < 8:
+        raise ValueError("a fixed offer needs 8 payload bytes for the send stamp")
+    sends = run.sends
     tail = b"A" * (size - 8)
 
-    def make_stamped() -> bytes:
-        return monotonic_ns().to_bytes(8, "little") + tail
+    def make(index: int) -> bytes:
+        now = monotonic_ns()
+        try:
+            sends[index] = now
+        except IndexError:
+            run.send_overflow += 1
+        return now.to_bytes(8, "little") + tail
 
-    return make_stamped
+    return make
 
 
 def _is_failure(reason_code) -> bool:
@@ -167,7 +209,7 @@ def sleep_until_ns(deadline: int) -> None:
 
 
 def _owed(rate: int, t_start: int, now: int, run: Run, max_due: int) -> int:
-    due = rate * (now - t_start) // 1_000_000_000 - run.sent - run.rejected - run.skipped
+    due = rate * (now - t_start) // NS - run.sent - run.rejected - run.skipped
     if due > max_due:
         run.skipped += due - max_due
         due = max_due
@@ -204,15 +246,17 @@ def pub_fixed_sync(adapter, run: Run, *, topic, qos, make, rate, t_start, t_end)
     """Open loop: ``rate`` publishes per second, in 1 ms ticks."""
     adapter.on_publish = completion_callback(run)
     publish = adapter.publish
-    max_due = rate * TICK_NS * MAX_CATCHUP_TICKS // 1_000_000_000 + 1
+    max_due = rate * TICK_NS * MAX_CATCHUP_TICKS // NS + 1
     next_tick = t_start
     sleep_until_ns(t_start)
     while True:
         now = monotonic_ns()
         if now >= t_end:
             break
-        for _ in range(_owed(rate, t_start, now, run, max_due)):
-            if publish(topic, make(), qos).rc == 0:
+        owed = _owed(rate, t_start, now, run, max_due)
+        first = run.sent + run.rejected + run.skipped
+        for index in range(first, first + owed):
+            if publish(topic, make(index), qos).rc == 0:
                 run.sent += 1
             else:
                 run.rejected += 1
@@ -295,16 +339,18 @@ async def pub_capacity_awaited(adapter, run: Run, *, topic, qos, make, window, t
 async def pub_fixed_nowait(adapter, run: Run, *, topic, qos, make, rate, t_start, t_end) -> None:
     adapter.on_publish = completion_callback(run)
     publish_nowait = adapter.publish_nowait
-    max_due = rate * TICK_NS * MAX_CATCHUP_TICKS // 1_000_000_000 + 1
+    max_due = rate * TICK_NS * MAX_CATCHUP_TICKS // NS + 1
     next_tick = t_start
     await asleep_until_ns(t_start)
     while True:
         now = monotonic_ns()
         if now >= t_end:
             break
-        for _ in range(_owed(rate, t_start, now, run, max_due)):
+        owed = _owed(rate, t_start, now, run, max_due)
+        first = run.sent + run.rejected + run.skipped
+        for index in range(first, first + owed):
             run.sent += 1
-            if publish_nowait(topic, make(), qos) is None:
+            if publish_nowait(topic, make(index), qos) is None:
                 run.sent -= 1
                 run.rejected += 1
         next_tick += TICK_NS
@@ -314,21 +360,30 @@ async def pub_fixed_nowait(adapter, run: Run, *, topic, qos, make, rate, t_start
 
 
 async def pub_fixed_awaited(adapter, run: Run, *, topic, qos, make, rate, t_start, t_end) -> None:
-    """A pacer hands out credits each tick; idle workers wait on one shared gate."""
+    """A pacer hands out credits each tick; idle workers wait on one shared gate.
+
+    Credits are ``[next, end)`` ranges of message indices, oldest first, so a
+    worker publishes the message it took the credit for.
+    """
     loop = asyncio.get_running_loop()
     publish = adapter.publish
-    gate = {"credits": 0, "future": loop.create_future(), "done": False}
+    credits: deque = deque()
+    gate = {"future": loop.create_future(), "done": False}
 
     async def worker() -> None:
         while True:
-            while gate["credits"] <= 0:
+            while not credits:
                 if gate["done"]:
                     return
                 await gate["future"]
-            gate["credits"] -= 1
+            span = credits[0]
+            index = span[0]
+            span[0] += 1
+            if span[0] == span[1]:
+                credits.popleft()
             run.sent += 1
             try:
-                await publish(topic, make(), qos)
+                await publish(topic, make(index), qos)
             except Exception:  # noqa: BLE001
                 run.failed += 1
                 continue
@@ -341,7 +396,7 @@ async def pub_fixed_awaited(adapter, run: Run, *, topic, qos, make, rate, t_star
             fut.set_result(None)
 
     async def pacer() -> None:
-        max_due = rate * TICK_NS * MAX_CATCHUP_TICKS // 1_000_000_000 + 1
+        max_due = rate * TICK_NS * MAX_CATCHUP_TICKS // NS + 1
         issued = 0
         next_tick = t_start
         await asleep_until_ns(t_start)
@@ -349,21 +404,25 @@ async def pub_fixed_awaited(adapter, run: Run, *, topic, qos, make, rate, t_star
             now = monotonic_ns()
             if now >= t_end:
                 break
-            due = rate * (now - t_start) // 1_000_000_000 - issued - run.skipped
+            total = rate * (now - t_start) // NS
+            due = total - issued - run.skipped
             if due > max_due:
                 run.skipped += due - max_due
                 due = max_due
             if due > 0:
                 issued += due
-                gate["credits"] += due
+                if credits and credits[-1][1] == total - due:
+                    credits[-1][1] = total
+                else:
+                    credits.append([total - due, total])
                 open_gate()
             next_tick += TICK_NS
             if next_tick < now:
                 next_tick = now + TICK_NS
             await asleep_until_ns(next_tick)
         # Credits still unspent at t_end were offered and never sent.
-        run.skipped += max(0, gate["credits"])
-        gate["credits"] = 0
+        run.skipped += sum(end - start for start, end in credits)
+        credits.clear()
         gate["done"] = True
         open_gate()
 

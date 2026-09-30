@@ -68,7 +68,7 @@ def _timed_sync(n: int) -> float:
 
     adapter.publish = publish
     t0 = time.perf_counter_ns()
-    drive.pub_capacity_sync(adapter, run, topic="t", qos=1, make=drive.payload_maker(256, False), window=64, t_start=0)
+    drive.pub_capacity_sync(adapter, run, topic="t", qos=1, make=drive.payload_maker(256), window=64, t_start=0)
     return (time.perf_counter_ns() - t0) / max(1, run.done)
 
 
@@ -86,7 +86,7 @@ def _timed_nowait(n: int) -> float:
 
     async def main() -> float:
         t0 = time.perf_counter_ns()
-        await drive.pub_capacity_nowait(adapter, run, topic="t", qos=1, make=drive.payload_maker(256, False), window=64, t_start=0)
+        await drive.pub_capacity_nowait(adapter, run, topic="t", qos=1, make=drive.payload_maker(256), window=64, t_start=0)
         return (time.perf_counter_ns() - t0) / max(1, run.done)
 
     return asyncio.run(main())
@@ -106,16 +106,20 @@ def _timed_awaited(n: int) -> float:
 
     async def main() -> float:
         t0 = time.perf_counter_ns()
-        await drive.pub_capacity_awaited(adapter, run, topic="t", qos=1, make=drive.payload_maker(256, False), window=64, t_start=0)
+        await drive.pub_capacity_awaited(adapter, run, topic="t", qos=1, make=drive.payload_maker(256), window=64, t_start=0)
         return (time.perf_counter_ns() - t0) / max(1, run.done)
 
     return asyncio.run(main())
 
 
+def _fixed_maker(n: int):
+    return drive.fixed_payload_maker(256, drive.Run(send_capacity=n))
+
+
 def _timed_receive(n: int) -> float:
     run = drive.Run(latency_capacity=n)
     on_message = drive.message_callback(run, stamped=True)
-    msg = _Msg(drive.payload_maker(256, True)())
+    msg = _Msg(_fixed_maker(1)(0))
     t0 = time.perf_counter_ns()
     for _ in range(n):
         on_message(None, None, msg)
@@ -123,10 +127,11 @@ def _timed_receive(n: int) -> float:
 
 
 def _timed_stamp(n: int) -> float:
-    make = drive.payload_maker(256, True)
+    """Send stamp plus send-time store: what a fixed offer adds per publish."""
+    make = _fixed_maker(n)
     t0 = time.perf_counter_ns()
-    for _ in range(n):
-        make()
+    for i in range(n):
+        make(i)
     return (time.perf_counter_ns() - t0) / n
 
 

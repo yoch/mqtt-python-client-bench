@@ -324,13 +324,14 @@ def run_once(client: str, point: Point, profile: Profile, ctx: Context, *, run_i
     if "schedule" not in record:
         record["schedule"] = {"measure_s": profile.measure_s}
     record.update(checks.evaluate(record, strict=profile.comparable))
-    # One copy of the histogram that the metrics were computed from.
-    latency = record["metrics"].pop("latency", None)
-    for side in ("peer", "worker"):
-        if isinstance(record.get(side), dict):
-            record[side].pop("latency", None)
-    if latency:
-        record["latency"] = latency
+    # One copy of each histogram that the metrics were computed from.
+    for key in ("latency", "lag"):
+        hist = record["metrics"].pop(key, None)
+        for side in ("peer", "worker"):
+            if isinstance(record.get(side), dict):
+                record[side].pop(key, None)
+        if hist:
+            record[key] = hist
     if not profile.comparable:
         record["flags"] = sorted(set(record.get("flags", [])) | {"non_comparable"})
     return record

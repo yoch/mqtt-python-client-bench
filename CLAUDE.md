@@ -159,7 +159,8 @@ A change that breaks one of these invalidates published results.
   client absorbed the whole offer carries `offer_bound`: neither is a library
   ranking by itself.
 - **The harness tax is small and equal.** The worker does integer increments
-  and one histogram store per message. `harness-cost` measures each drive
+  and one histogram store per message, plus one send-time store per publish
+  on fixed-rate points. `harness-cost` measures each drive
   shape against a null client against a **1 µs per message** budget (measured
   0.4–0.6 µs), and the floor is recorded in every campaign. Never add a
   per-message cross-thread round trip, allocation or clock read on one shape
@@ -173,6 +174,12 @@ A change that breaks one of these invalidates published results.
   `CLOCK_MONOTONIC` schedule. Latency stamps are the first 8 payload bytes on
   the same clock, and histograms are bucketed identically in C and Python
   (`HistogramTests` asserts parity).
+- **Latency is transit, and lag is reported beside it.** The stamp is the
+  actual publish time. On fixed-rate publish and round-trip points, message
+  `n` is due at `t_start + ceil((n + 1) / rate)`, and send minus due is the
+  schedule lag. It is computed after the run from stored send times, never
+  in the drive loop, and reported separately. Never fold lag into latency:
+  the 1 ms pacing tick would put the same floor under every client's median.
 - **Fail closed.** The standard profile requires a physical core per role, a
   quiet host (`host_quiet`: at most 0.5 cores busy outside client, peer and
   broker) and broker headroom (< 85 % of its core) on fixed points. `smoke` is

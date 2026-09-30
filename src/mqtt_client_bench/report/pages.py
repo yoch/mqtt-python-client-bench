@@ -319,6 +319,12 @@ Worker and peer follow one absolute <code>CLOCK_MONOTONIC</code> schedule: warm-
 window of {profile.get("measure_s")} s, then {profile.get("drain_s")} s of drain so totals reconcile. Latency is the time from a
 stamp in the first 8 payload bytes to arrival, binned the same way in C and Python (16 buckets per power of two, at most
 6.25 % wide); a cell's percentiles come from the merged histogram of its valid runs.</p>
+<p>The stamp is the actual publish time, so latency is transit only. On fixed-rate points the client's messages are
+numbered, and message <i>n</i> is due at <i>t</i><sub>start</sub> + (<i>n</i> + 1) / rate. The worker keeps each publish's send time
+and, after the run, reports the <b>schedule lag</b>: send time minus due time, over the messages due in the window, plus
+the count due there that were never published. A client that falls behind its schedule, or whose awaited publishes run
+out of in-flight slots, shows it there even while it still holds the rate. The harness paces in 1 ms ticks, so up to
+1 ms of lag is the pacer's, the same for every client; tails beyond that are the client's.</p>
 
 <h2>Statuses</h2>
 {_dl(STATUS_DOCS.items())}

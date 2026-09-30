@@ -72,6 +72,13 @@ the client callback on receive and round-trip points. It is recorded in the
 same log-linear histogram in C and Python (16 buckets per power of two, at
 most 6.25 % wide).
 
+The stamp is the actual publish time, so latency covers transit only. When
+the client publishes at a fixed rate, the report also shows its **schedule
+lag**: how late each publish left against its due time in the offer. A client
+that stalls, or runs out of in-flight slots, cannot hide it behind a clean
+transit latency. Up to 1 ms of lag is the harness's pacing tick, and that part
+is the same for every client.
+
 ### Statuses
 
 - **`valid`**: every check passed.

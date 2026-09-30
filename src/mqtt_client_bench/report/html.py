@@ -131,6 +131,15 @@ def _counts(record: dict) -> List[tuple]:
         ]
     else:
         rows = [("connect", f"{m.get('connect_ms', 0):.1f} ms")]
+    lag = m.get("lag_summary") or {}
+    if lag.get("count"):
+        rows.append(
+            (
+                "schedule lag p50 / p99 / max",
+                " / ".join(fmt("lag_p99", lag[k]) for k in ("p50_us", "p99_us", "max_us")),
+            )
+        )
+        rows.append(("due in window, never published", lag.get("unsent", 0)))
     if m.get("cpu_user_us_per_msg") is not None and m.get("cpu_sys_us_per_msg") is not None:
         rows.append(("CPU user / sys per msg", f"{fmt('cpu_user_us_per_msg', m['cpu_user_us_per_msg'])} / {fmt('cpu_sys_us_per_msg', m['cpu_sys_us_per_msg'])}"))
     if m.get("cpu_cores") is not None:

@@ -56,6 +56,15 @@ The reported rate is what the sink received in the window.
 **Fixed points** tick every millisecond and catch up at most 4 ticks late, so
 a stalled client shows as skipped sends instead of a burst.
 
+**Schedule lag** (fixed publish and round-trip points). Message `n` of the
+offer is due at `t_start + ceil((n + 1) / rate)`. The stamp is the actual
+publish time, so latency is transit only. The worker also keeps each send
+time, and after the run it reports send minus due over the messages due in
+the window, plus how many of them were never published. The awaited shape
+hands workers credits for specific message indices, so a publish that waited
+for a free worker counts its wait. Up to 1 ms of lag is the pacing tick, and
+that part is the same for every client.
+
 **Checks**
 
 - `broker_confirms_client_publishes`: `$SYS` received lies between the
@@ -112,7 +121,7 @@ The peer runs as an **echo**: it subscribes to `data` and republishes every
 payload unchanged to `reply`. The client publishes stamped requests at the
 fixed rate, subscribes to `reply`, and records `now − stamp` for each reply.
 That is the whole application round trip through two broker hops and the C
-echo.
+echo. Requests carry a schedule lag, as on publish points.
 
 | Point | QoS | Rate |
 |---|---|---|

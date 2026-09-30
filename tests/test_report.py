@@ -21,7 +21,7 @@ POINTS = [
 ]
 
 
-def _run(point, index, status="valid", *, rate=None, cpu=None, latencies=None, flags=(), attempt=0, failed=None):
+def _run(point, index, status="valid", *, rate=None, cpu=None, latencies=None, lags=None, flags=(), attempt=0, failed=None):
     checks = [{"name": "worker_completed", "passed": True, "detail": "ok", "severity": "invalid"}]
     if failed:
         checks.append({"name": failed, "passed": False, "detail": "short", "severity": status})
@@ -44,6 +44,9 @@ def _run(point, index, status="valid", *, rate=None, cpu=None, latencies=None, f
     }
     if latencies:
         record["latency"] = histogram.from_values(latencies)
+    if lags:
+        record["lag"] = dict(histogram.from_values(lags), unsent=0)
+        record["metrics"]["lag_summary"] = dict(histogram.summary(record["lag"]), unsent=0)
     return record
 
 
@@ -70,7 +73,10 @@ def _write(root: Path, name: str, docs: dict, *, comparable=True, clients=None) 
 def _campaign(root: Path, name="20260930T000000Z", comparable=True) -> Path:
     cap, fixed, v5 = POINTS
     fast = [_run(cap, i, rate=r) for i, r in enumerate((40_000, 41_000, 39_000))]
-    fast += [_run(fixed, i, cpu=c, latencies=[200_000] * 99 + [900_000]) for i, c in enumerate((50.0, 60.0, 55.0))]
+    fast += [
+        _run(fixed, i, cpu=c, latencies=[200_000] * 99 + [900_000], lags=[400_000] * 99 + [7_000_000])
+        for i, c in enumerate((50.0, 60.0, 55.0))
+    ]
     fast += [_run(v5, i, cpu=70.0) for i in range(3)]
     slow = [_run(cap, i, rate=r) for i, r in enumerate((9_000, 9_500, 9_200))]
     # One run not sustained: it must not pull the median, and must be shown.
@@ -113,6 +119,15 @@ class ReportDataTests(unittest.TestCase):
         self.assertEqual(cell.latency()["count"], 300)
         self.assertAlmostEqual(cell.value("p50"), 200.0, delta=200.0 * 0.0625)
         self.assertAlmostEqual(cell.value("max"), 900.0)
+
+    def test_schedule_lag_is_kept_apart_from_latency(self):
+        c = load_campaign(_campaign(self.root))
+        cell = c.cell("pub_qos1_fixed", "fast")
+        self.assertEqual(cell.lag()["count"], 300)
+        self.assertAlmostEqual(cell.value("lag_p50"), 400.0, delta=400.0 * 0.0625)
+        self.assertAlmostEqual(cell.value("lag_max"), 7_000.0)
+        self.assertAlmostEqual(cell.value("max"), 900.0)
+        self.assertIsNone(c.cell("pub_qos1_fixed", "slow").value("lag_p99"))
 
     def test_unsupported_is_its_own_state(self):
         c = load_campaign(_campaign(self.root))

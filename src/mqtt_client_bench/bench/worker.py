@@ -91,6 +91,21 @@ def latency_capacity(point: dict, go_s: float) -> int:
     return int(point["rate"] * go_s * 1.25) + 1024
 
 
+def send_capacity(point: dict, go_s: float) -> int:
+    if point["kind"] not in ("pub", "rtt") or not point["rate"]:
+        return 0
+    return int(point["rate"] * go_s) + 1024
+
+
+def _run_state(point: dict, go_s: float) -> drive.Run:
+    return drive.Run(latency_capacity(point, go_s), send_capacity(point, go_s))
+
+
+def _maker(point: dict, run: drive.Run):
+    size = int(point["payload"])
+    return drive.fixed_payload_maker(size, run) if point["rate"] else drive.payload_maker(size)
+
+
 def _outstanding(run: drive.Run) -> int:
     return run.sent - run.done - run.failed
 
@@ -125,7 +140,7 @@ def run_sync(cfg: dict, identity: dict) -> dict:
     adapter.on_connect = on_connect
     adapter.on_subscribe = on_subscribe
     # Some adapters wire callbacks into the library at connect time.
-    run = drive.Run(latency_capacity(point, cfg["schedule_s"]))
+    run = _run_state(point, cfg["schedule_s"])
     if kind in ("sub", "rtt"):
         adapter.on_message = drive.message_callback(run, stamped=bool(rate))
 
@@ -153,7 +168,7 @@ def run_sync(cfg: dict, identity: dict) -> dict:
     timer = Timer(run, go, stop_at_end=(kind == "pub" and not rate))
     timer.start()
 
-    make = drive.payload_maker(int(point["payload"]), stamped=bool(rate))
+    make = _maker(point, run)
     topic = cfg["topic"]
     if kind == "pub" and not rate:
         drive.pub_capacity_sync(adapter, run, topic=topic, qos=qos, make=make, window=int(point["window"]), t_start=go["t_start"])
@@ -168,7 +183,7 @@ def run_sync(cfg: dict, identity: dict) -> dict:
         adapter.loop_stop()
     except Exception:  # noqa: BLE001
         pass
-    return _result(run, timer.snaps, final, go, connect_ns, "sync")
+    return _result(run, point, timer.snaps, final, go, connect_ns, "sync")
 
 
 # ----------------------------------------------------------------- async
@@ -188,7 +203,7 @@ async def run_async(cfg: dict, identity: dict, shape: str) -> dict:
     adapter.on_connect = None
     adapter.on_publish = None
     # Some adapters wire callbacks into the library at connect time.
-    run = drive.Run(latency_capacity(point, cfg["schedule_s"]))
+    run = _run_state(point, cfg["schedule_s"])
     if kind in ("sub", "rtt"):
         adapter.on_message = drive.message_callback(run, stamped=bool(rate))
 
@@ -206,7 +221,7 @@ async def run_async(cfg: dict, identity: dict, shape: str) -> dict:
     timer = Timer(run, go, stop_at_end=(kind == "pub" and not rate))
     timer.start()
 
-    make = drive.payload_maker(int(point["payload"]), stamped=bool(rate))
+    make = _maker(point, run)
     topic = cfg["topic"]
     common = {"topic": topic, "qos": qos, "make": make, "t_start": go["t_start"]}
     if kind == "pub" and not rate:
@@ -234,13 +249,21 @@ async def run_async(cfg: dict, identity: dict, shape: str) -> dict:
         await asyncio.wait_for(adapter.disconnect(), 5.0)
     except Exception:  # noqa: BLE001
         pass
-    return _result(run, timer.snaps, final, go, connect_ns, shape)
+    return _result(run, point, timer.snaps, final, go, connect_ns, shape)
 
 
 # ---------------------------------------------------------------- result
 
 
-def _result(run: drive.Run, snaps: dict, final: dict, go: dict, connect_ns: int, shape: str) -> dict:
+def _lag_histogram(run: drive.Run, point: dict, go: dict) -> dict:
+    """Lags of the messages due in the window; the never-published are counted."""
+    lags, unsent = run.window_lags(int(point["rate"]), go["t_start"], go["t_measure"], go["t_end"])
+    h = histogram.from_values(lags)
+    h["unsent"] = unsent
+    return h
+
+
+def _result(run: drive.Run, point: dict, snaps: dict, final: dict, go: dict, connect_ns: int, shape: str) -> dict:
     start = snaps.get("measure")
     end = snaps.get("end")
     out = {
@@ -252,9 +275,12 @@ def _result(run: drive.Run, snaps: dict, final: dict, go: dict, connect_ns: int,
         "end": end,
         "final": final,
         "latency_overflow": run.latency_overflow,
+        "send_overflow": run.send_overflow,
     }
     if start and end and len(run.latencies):
         out["latency"] = histogram.from_values(run.window_latencies(start, end))
+    if len(run.sends):
+        out["lag"] = _lag_histogram(run, point, go)
     return out
 
 

@@ -18,6 +18,7 @@ from mqtt_client_bench.bench import histogram
 from mqtt_client_bench.bench.checks import INVALID, NOT_SUSTAINED, VALID
 
 LATENCY_QUANTILES = {"p50": 0.5, "p90": 0.9, "p99": 0.99, "p999": 0.999, "max": 1.0}
+LAG_QUANTILES = {"lag_p50": 0.5, "lag_p99": 0.99, "lag_max": 1.0}
 # Only a development profile tolerates these, and it says so on every page.
 CAMPAIGN_FLAGS = {"non_comparable", "host_noisy"}
 
@@ -54,17 +55,25 @@ class Cell:
         values = [r["metrics"][key] for r in (self.valid if runs is None else runs) if r["metrics"].get(key) is not None]
         return statistics.median(values) if values else None
 
-    def latency(self, runs: Optional[List[dict]] = None) -> Optional[dict]:
-        hists = [r["latency"] for r in (self.valid if runs is None else runs) if r.get("latency")]
+    def _merged(self, key: str, runs: Optional[List[dict]]) -> Optional[dict]:
+        hists = [r[key] for r in (self.valid if runs is None else runs) if r.get(key)]
         merged = histogram.merge(hists) if hists else None
         return merged if merged and merged["count"] else None
 
+    def latency(self, runs: Optional[List[dict]] = None) -> Optional[dict]:
+        return self._merged("latency", runs)
+
+    def lag(self, runs: Optional[List[dict]] = None) -> Optional[dict]:
+        """Schedule lag: how late the client published against the offer."""
+        return self._merged("lag", runs)
+
     def value(self, key: str) -> Optional[float]:
-        """A metric of the valid runs; latency keys are in microseconds."""
-        if key in LATENCY_QUANTILES:
-            h = self.latency()
-            ns = histogram.percentile(h, LATENCY_QUANTILES[key]) if h else None
-            return ns / 1e3 if ns is not None else None
+        """A metric of the valid runs; latency and lag keys are in microseconds."""
+        for quantiles, h in ((LATENCY_QUANTILES, self.latency), (LAG_QUANTILES, self.lag)):
+            if key in quantiles:
+                hist = h()
+                ns = histogram.percentile(hist, quantiles[key]) if hist else None
+                return ns / 1e3 if ns is not None else None
         return self.median(key)
 
     def flags(self) -> List[str]:

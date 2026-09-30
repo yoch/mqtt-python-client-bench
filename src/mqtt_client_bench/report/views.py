@@ -59,6 +59,14 @@ METRICS: Dict[str, Metric] = {
     "p99": Metric("p99", "lower", _micros, "99th percentile latency."),
     "p999": Metric("p99.9", "lower", _micros, "99.9th percentile latency."),
     "max": Metric("max", "lower", _micros, "Largest latency observed."),
+    "lag_p99": Metric(
+        "lag p99",
+        "lower",
+        _micros,
+        "99th percentile of how late the client published against the fixed schedule. Up to 1 ms of it is the "
+        "harness's pacing tick, identical for every client.",
+    ),
+    "lag_max": Metric("lag max", "lower", _micros, "Latest publish against the fixed schedule."),
 }
 
 
@@ -111,12 +119,23 @@ QUESTIONS: List[Question] = [
     Question(
         "latency-fixed",
         "How late do messages arrive?",
-        "From the stamp written just before publish to its arrival at the subscriber, same clock, 2,000 QoS 1 msgs/s. Publish: the client publishes, C receives. Receive: C publishes, the client's callback receives.",
+        "From the stamp written at the actual publish to its arrival at the subscriber, same clock, 2,000 QoS 1 msgs/s. Publish: the client publishes, C receives. Receive: C publishes, the client's callback receives. Time a client spent behind its schedule before publishing is the next question's.",
         (
             Column("pub_qos1_fixed", "p50", "publish p50"),
             Column("pub_qos1_fixed", "p99", "publish p99"),
             Column("sub_qos1_fixed", "p50", "receive p50"),
             Column("sub_qos1_fixed", "p99", "receive p99"),
+        ),
+    ),
+    Question(
+        "schedule-lag",
+        "Does each client publish on time?",
+        "How late each publish left against its due time in the fixed offer, on the same clock. Latency starts at the actual publish; this is the wait before it, which a client that stalls or runs out of in-flight slots cannot hide. Up to 1 ms is the harness's pacing tick, the same for every client.",
+        (
+            Column("pub_qos1_fixed", "lag_p99", "publish p99"),
+            Column("pub_qos1_fixed", "lag_max", "publish max"),
+            Column("rtt_qos1_fixed", "lag_p99", "round trip p99"),
+            Column("pub_16k_fixed", "lag_p99", "16 KiB p99"),
         ),
     ),
     Question(
@@ -171,6 +190,8 @@ def point_columns(point: dict) -> List[str]:
         return ["connect_ms", "cpu_cores", "rss_peak_kb", "threads"]
     # The user / sys split and thread count unfold with each run's counts.
     resources = ["cpu_us_per_msg", "rss_peak_kb", "ctx_switches_per_1k_msgs"]
+    if fixed and kind in ("pub", "rtt"):
+        return ["p50", "p99", "p999", "max", "lag_p99", *resources]
     if fixed:
         return ["p50", "p99", "p999", "max", *resources]
     extra = ["undelivered_at_stop"] if kind == "sub" else []

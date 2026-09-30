@@ -355,4 +355,8 @@ def _metrics(record: dict, window_s: float) -> dict:
         m["latency"] = worker["latency"]
     if m.get("latency"):
         m["latency_summary"] = histogram.summary(m["latency"])
+    if rate and kind in ("pub", "rtt") and worker.get("lag"):
+        m["lag"] = worker["lag"]
+        m["lag_summary"] = histogram.summary(m["lag"])
+        m["lag_summary"]["unsent"] = int(m["lag"].get("unsent", 0))
     return m
