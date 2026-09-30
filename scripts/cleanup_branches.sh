@@ -28,7 +28,16 @@ for b in "${remote_branches[@]}" "${local_branches[@]}"; do
   run git tag -f "archive/$b" "$ref"
 done
 
-run git push origin 'refs/tags/archive/*:refs/tags/archive/*'
+# GitHub rejects a push that updates too many refs at once, so one tag per push.
+for b in "${remote_branches[@]}"; do
+  run git push origin "refs/tags/archive/$b:refs/tags/archive/$b"
+done
+# A local-only branch may carry files over GitHub's 100 MB limit: its tag then
+# stays local, and rewrite_results_history.sh bundles it before the rewrite.
+for b in "${local_branches[@]}"; do
+  run git push origin "refs/tags/archive/$b:refs/tags/archive/$b" \
+    || echo "archive/$b kept local only" >&2
+done
 
 for b in "${remote_branches[@]}"; do
   run git push origin --delete "$b"
