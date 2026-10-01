@@ -16,6 +16,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from mqtt_client_bench.bench import envs
 from mqtt_client_bench.bench.catalog import ALL_POINTS, PROFILES, RUN_OVERHEAD_S, Point, Profile
+from mqtt_client_bench.bench.checks import KERNEL_STATE_FLOOR, KERNEL_STATES
 from mqtt_client_bench.bench.runner import refusals, run_once, unsupported_record
 from mqtt_client_bench.bench.session import open_session
 
@@ -141,6 +142,34 @@ def _mismatches(manifest: dict, profile: Profile, points: List[Point], clients: 
     if int(manifest["runs_per_point"]) != runs:
         out.append(f"runs per point {manifest['runs_per_point']} != {runs}")
     return out
+
+
+def noise_summary(docs: Dict[str, dict]) -> List[str]:
+    """Where the host noise came from in the runs that failed ``host_quiet``.
+
+    One line per consumer: its mean cores over the failed runs that recorded
+    it, and how many of them. Empty when no run failed the check.
+    """
+    runs = [r for doc in docs.values() for r in doc["runs"]]
+    noisy = [r for r in runs if any(c["name"] == "host_quiet" and not c["passed"] for c in r.get("checks", []))]
+    if not noisy:
+        return []
+    seen: Dict[str, List[float]] = {}
+    for r in noisy:
+        host = (r.get("resources") or {}).get("host") or {}
+        for top in host.get("top") or []:
+            seen.setdefault(top["comm"], []).append(top["cores"])
+        for state, cores in (host.get("states") or {}).items():
+            if state in KERNEL_STATES and cores >= KERNEL_STATE_FLOOR:
+                seen.setdefault(f"kernel {state}", []).append(cores)
+        if (host.get("unattributed_cores") or 0) >= KERNEL_STATE_FLOOR:
+            seen.setdefault("unattributed", []).append(host["unattributed_cores"])
+    lines = [f"host_quiet failed in {len(noisy)} of {len(runs)} runs; the other consumers in those runs:"]
+    if not seen:
+        return lines + ["  no attribution recorded"]
+    for name, cores in sorted(seen.items(), key=lambda kv: -sum(kv[1]))[:8]:
+        lines.append(f"  {name:24s} {sum(cores) / len(cores):.2f} cores on average, in {len(cores)} runs")
+    return lines
 
 
 def run_campaign(

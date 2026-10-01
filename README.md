@@ -165,7 +165,10 @@ warm-up, 2 s window, one run) is for development only. It is tagged
 
 The standard profile needs one physical core each for the broker, the client,
 the peer and the orchestrator, plus the `performance` CPU governor and a quiet
-host. Otherwise runs fail `host_quiet`.
+host. Otherwise runs fail `host_quiet`. Every run records where the other busy
+cores went (the busiest other processes, the kernel time no process is charged
+for, the load per logical CPU), the `host_quiet` detail names them, and a
+campaign ends by summarising the consumers behind its failed runs.
 
 ## Layout
 
@@ -210,9 +213,13 @@ when a C compiler is available.
   match filters natively; the topic alias runs only where the library's API
   accepts an aliased empty topic. Refused pairs are listed in the coverage
   section, never approximated.
-- `awscrt` cannot set `TCP_NODELAY` (aws-c-io hides the socket). Its ~25 ms
-  round trip at 1,000 req/s is Nagle's algorithm meeting delayed ACKs. That is
-  real behaviour of the library as shipped, reported as measured.
+- `awscrt` cannot set `TCP_NODELAY` (aws-c-io hides the socket, and an
+  `strace` of its connect shows it never sets the option). Its QoS 1 round
+  trip at 1,000 req/s takes tens of milliseconds against hundreds of
+  microseconds at QoS 0, which is the pattern of Nagle's algorithm waiting for
+  a delayed ACK. That is real behaviour of the library as shipped, reported as
+  measured, and the report says so next to the round-trip tables and on the
+  client's page.
 - `aiomqtt` v2 and v3 cannot share an environment. Each client has its own,
   so this only matters for the adapter tests, which skip aiomqtt3.
 - CPU per message at a fixed rate is higher than at capacity, because a

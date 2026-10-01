@@ -218,5 +218,10 @@ A change that breaks one of these invalidates published results.
   capacity window, it is an adapter setting pinned by the adapter tests, while
   the delivered count stays broker-confirmed.
 - The i7-3770 development desktop runs `schedutil` with a noisy session, so
-  it is not a reference host. Standard campaigns there fail `host_quiet`.
+  it is not a reference host. Standard campaigns there fail `host_quiet`;
+  each run's `resources.host` (`top`, `states`, `per_cpu`, `unattributed_cores`)
+  and the campaign's closing `noise_summary` say which process or kernel state
+  was behind it. That pass over `/proc` (~50 ms for 1,300 processes, at each window
+  boundary) runs on the orchestrator's core, counts as 0.006 cores of host
+  noise and is labelled `orchestrator` in the list.
 - `build/`, `.venvs/`, `site/` and `results/v2/*-smoke/` are gitignored.

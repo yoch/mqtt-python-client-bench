@@ -12,12 +12,16 @@ nothing and cannot be skewed by it.
 - Memory: ``VmRSS`` at each boundary, and ``VmHWM`` after it has been reset
   at the window start (``clear_refs`` = 5), so the peak is the window's own
   and not import time's.
+- The rest of the host: ``/proc/stat`` gives the busy time by state and by
+  CPU, and one pass over ``/proc/<pid>/stat`` at each boundary says which
+  other processes used it. This explains a ``host_quiet`` failure after the
+  fact; it never changes a count or a cost.
 """
 
 from __future__ import annotations
 
 import os
-from typing import Dict, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 
@@ -72,16 +76,117 @@ def reset_peak_rss(pid: int) -> bool:
         return False
 
 
+STATES = ("user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal")
+_IDLE_STATES = ("idle", "iowait")
+
+
+def _cpu_line(parts: List[str]) -> Dict[str, int]:
+    vals = [int(x) for x in parts[1:9]]
+    return dict(zip(STATES, vals + [0] * (len(STATES) - len(vals))))
+
+
+def parse_proc_stat(text: str) -> dict:
+    """The aggregate and per-CPU jiffies of ``/proc/stat``.
+
+    ``busy_ticks`` is everything but idle and iowait, softirq and irq included:
+    kernel time that no process is charged for still counts as the host's.
+    """
+    lines = [line.split() for line in text.splitlines() if line.startswith("cpu")]
+    total = _cpu_line(lines[0])
+    busy = sum(v for k, v in total.items() if k not in _IDLE_STATES)
+    per_cpu = []
+    for parts in lines[1:]:
+        cpu = _cpu_line(parts)
+        per_cpu.append(sum(v for k, v in cpu.items() if k not in _IDLE_STATES))
+    return {
+        "busy_ticks": busy,
+        "total_ticks": busy + total["idle"] + total["iowait"],
+        "states": total,
+        "per_cpu_busy_ticks": per_cpu,
+    }
+
+
 def host_cpu() -> Optional[dict]:
-    """Aggregate busy and total jiffies over every CPU."""
     text = _read("/proc/stat")
-    if not text:
-        return None
-    parts = text.splitlines()[0].split()[1:]
-    vals = [int(x) for x in parts]
-    idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
-    total = sum(vals[:8])
-    return {"busy_ticks": total - idle, "total_ticks": total}
+    return parse_proc_stat(text) if text else None
+
+
+def host_breakdown(a: dict, b: dict, wall_s: float) -> dict:
+    """Where the host's busy time went between two ``host_cpu`` readings, in cores."""
+    states = {
+        k: round((b["states"][k] - a["states"][k]) / CLK_TCK / wall_s, 4) for k in STATES if k not in _IDLE_STATES
+    }
+    per_cpu = [round((y - x) / CLK_TCK / wall_s, 3) for x, y in zip(a["per_cpu_busy_ticks"], b["per_cpu_busy_ticks"])]
+    return {"states": states, "per_cpu": per_cpu}
+
+
+def parse_process_stat(text: str) -> Tuple[str, int]:
+    """(command name, utime + stime ticks) of one ``/proc/<pid>/stat``.
+
+    The name sits between the first ``(`` and the last ``)`` and may contain
+    spaces and parentheses, so fields are counted from the last ``)``.
+    """
+    comm = text[text.find("(") + 1 : text.rfind(")")]
+    fields = text[text.rfind(")") + 2 :].split()
+    return comm, int(fields[11]) + int(fields[12])
+
+
+def host_processes() -> Dict[int, Tuple[str, int]]:
+    """CPU ticks of every process alive now, threads included."""
+    out: Dict[int, Tuple[str, int]] = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return out
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        text = _read(f"/proc/{entry}/stat")
+        if text:
+            try:
+                out[int(entry)] = parse_process_stat(text)
+            except (ValueError, IndexError):
+                continue
+    return out
+
+
+def cgroup_pids(cgroup_path: Optional[str]) -> List[int]:
+    if not cgroup_path:
+        return []
+    return [int(x) for x in (_read(os.path.join(cgroup_path, "cgroup.procs")) or "").split() if x.isdigit()]
+
+
+def attribute(
+    a: Dict[int, Tuple[str, int]],
+    b: Dict[int, Tuple[str, int]],
+    exclude: Iterable[int],
+    wall_s: float,
+    *,
+    labels: Optional[Dict[int, str]] = None,
+    limit: int = 5,
+    floor: float = 0.01,
+) -> dict:
+    """Who used the CPU between two ``host_processes`` readings, apart from ``exclude``.
+
+    Processes are grouped by command name. Only processes alive at both
+    readings are seen, so a process that started and ended inside the window
+    is part of the host's busy time but not of this list.
+    """
+    skip = set(exclude)
+    labels = labels or {}
+    by_name: Dict[str, float] = {}
+    for pid, (comm, ticks) in b.items():
+        if pid in skip or pid not in a:
+            continue
+        used = (ticks - a[pid][1]) / CLK_TCK / wall_s
+        if used > 0:
+            name = labels.get(pid, comm)
+            by_name[name] = by_name.get(name, 0.0) + used
+    ranked = sorted(by_name.items(), key=lambda kv: -kv[1])
+    return {
+        "top": [{"comm": name, "cores": round(cores, 3)} for name, cores in ranked[:limit] if cores >= floor],
+        "processes_cores": sum(by_name.values()),
+    }
 
 
 def cgroup_cpu_ns(cgroup_path: Optional[str]) -> Optional[int]:

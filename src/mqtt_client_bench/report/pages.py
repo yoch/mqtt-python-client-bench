@@ -33,7 +33,11 @@ from mqtt_client_bench.report.views import (
     METRICS,
     QUESTIONS,
     Column,
+    Limitation,
+    client_limitations,
+    column_limitations,
     point_columns,
+    point_limitations,
     point_features,
     point_payload,
     rate_label,
@@ -133,6 +137,12 @@ def _question_table(campaign: Campaign, columns: List[Column]) -> str:
     return table(head, rows, "results")
 
 
+def _limitations_html(items: List[Limitation], *, named: bool = True) -> str:
+    return "".join(
+        f'<p class="limitation">{"<strong>" + e(x.client) + "</strong> · " if named else ""}{e(x.text)}</p>' for x in items
+    )
+
+
 def index_page(campaign: Campaign, skipped: List[str]) -> str:
     points = _points_by_name(campaign)
     sections, toc, used = [], [], set()
@@ -144,7 +154,7 @@ def index_page(campaign: Campaign, skipped: List[str]) -> str:
         toc.append(f'<li><a href="#{q.slug}">{e(q.title)}</a></li>')
         sections.append(
             f'<section id="{q.slug}"><h2>{e(q.title)}</h2><p class="lede">{e(q.lede)}</p>'
-            f"{_question_table(campaign, columns)}</section>"
+            f"{_question_table(campaign, columns)}{_limitations_html(column_limitations(columns, campaign.clients))}</section>"
         )
     others = [p for p in campaign.points if p["name"] not in used]
     if others:
@@ -199,6 +209,7 @@ def point_page(campaign: Campaign, point: dict) -> str:
 <h1>{e(point["name"])}</h1>
 <p class="lede">{e(point["question"])}</p>
 <p class="spec">{e(spec)} · <a href="../methodology.html#points">how it is wired</a></p>
+{_limitations_html(point_limitations(point["name"], campaign.clients))}
 {table(head, rows, "results")}
 {chart}"""
     return page(point["name"], body, depth=1, campaign=campaign)
@@ -229,6 +240,14 @@ def client_page(campaign: Campaign, client: str) -> str:
     if refused:
         items = "".join(f"<li>{e(u['point'])}: {e(', '.join(u['reasons']))}</li>" for u in refused)
         refused_html = f"<h2>Refused</h2><p>Declared unsupported by the adapter, never approximated.</p><ul>{items}</ul>"
+    limits = client_limitations(client)
+    limitations_html = (
+        "<h2>Known limitations</h2>"
+        + _limitations_html(limits, named=False)
+        + f"<p class=\"note\">Affects: {e(', '.join(sorted({n for x in limits for n in x.points})))}.</p>"
+        if limits
+        else ""
+    )
     point_rows = []
     for point in campaign.points:
         cell = campaign.cell(point["name"], client)
@@ -246,6 +265,7 @@ def client_page(campaign: Campaign, client: str) -> str:
 <table class="kv">{rows}</table>
 {private_html}
 {refused_html}
+{limitations_html}
 <h2>Every point</h2>
 {table(["point", "headline", "value", "CPU / msg", "peak RSS", "flags"], point_rows, "results")}"""
     return page(client, body, depth=1, campaign=campaign)

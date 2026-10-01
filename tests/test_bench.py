@@ -16,7 +16,7 @@ from pathlib import Path
 
 from mqtt_client_bench.adapters.base import PublishResult
 from mqtt_client_bench.adapters.registry import CLIENT_NAMES
-from mqtt_client_bench.bench import campaign, catalog, checks, drive, harness_cost, histogram, peer, runner, sysprobe
+from mqtt_client_bench.bench import campaign, catalog, checks, drive, harness_cost, histogram, peer, procstat, runner, sysprobe
 
 
 class HistogramTests(unittest.TestCase):
@@ -606,3 +606,99 @@ class SysProbeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+PROC_STAT = """cpu  1000 10 400 8000 100 20 80 5 0 0
+cpu0 600 5 200 4000 50 10 50 2 0 0
+cpu1 400 5 200 4000 50 10 30 3 0 0
+intr 12345
+"""
+
+
+class HostNoiseTests(unittest.TestCase):
+    def test_proc_stat_splits_busy_time_by_state_and_cpu(self):
+        out = procstat.parse_proc_stat(PROC_STAT)
+        self.assertEqual(out["states"]["softirq"], 80)
+        self.assertEqual(out["busy_ticks"], 1000 + 10 + 400 + 20 + 80 + 5)
+        self.assertEqual(out["total_ticks"], out["busy_ticks"] + 8000 + 100)
+        self.assertEqual(out["per_cpu_busy_ticks"], [600 + 5 + 200 + 10 + 50 + 2, 400 + 5 + 200 + 10 + 30 + 3])
+
+    def test_breakdown_is_in_cores(self):
+        a = procstat.parse_proc_stat(PROC_STAT)
+        b = procstat.parse_proc_stat(PROC_STAT.replace("cpu  1000 10 400 8000 100 20 80 5", "cpu  1000 10 400 8000 100 20 80 5".replace("80 5", "880 5")))
+        out = procstat.host_breakdown(a, b, wall_s=8.0)
+        self.assertAlmostEqual(out["states"]["softirq"], 800 / procstat.CLK_TCK / 8.0, places=3)
+        self.assertNotIn("idle", out["states"])
+        self.assertEqual(len(out["per_cpu"]), 2)
+
+    def test_process_stat_survives_awkward_names(self):
+        fields = " ".join(["S"] + ["0"] * 10 + ["7", "5"] + ["0"] * 10)
+        self.assertEqual(procstat.parse_process_stat(f"42 (Web Content (x) y) {fields}"), ("Web Content (x) y", 12))
+
+    def test_attribution_groups_by_name_and_skips_the_measured(self):
+        a = {1: ("python", 0), 2: ("chrome", 0), 3: ("chrome", 100), 4: ("mosquitto", 0), 5: ("gone", 0)}
+        b = {1: ("python", 400), 2: ("chrome", 100), 3: ("chrome", 300), 4: ("mosquitto", 800), 6: ("new", 900)}
+        who = procstat.attribute(a, b, exclude={4}, wall_s=8.0, labels={1: "orchestrator"})
+        tick = procstat.CLK_TCK
+        self.assertEqual([t["comm"] for t in who["top"]], ["orchestrator", "chrome"])
+        self.assertAlmostEqual(who["top"][1]["cores"], 300 / tick / 8.0, places=3)
+        self.assertAlmostEqual(who["processes_cores"], 700 / tick / 8.0, places=6)
+
+    def test_attribution_drops_negligible_consumers(self):
+        a, b = {1: ("tiny", 0)}, {1: ("tiny", 1)}
+        self.assertEqual(procstat.attribute(a, b, exclude=(), wall_s=8.0)["top"], [])
+
+    def test_resources_record_where_the_noise_was(self):
+        def reading(at_ns, busy, softirq, procs):
+            host = procstat.parse_proc_stat(f"cpu  {busy} 0 0 1000 0 0 {softirq} 0\ncpu0 {busy} 0 0 1000 0 0 {softirq} 0\n")
+            return {"at_ns": at_ns, "client": None, "peers": {}, "broker_cpu_ns": None, "host": host, "known_pids": {9}, "procs": procs}
+
+        tick = procstat.CLK_TCK
+        a = reading(0, 0, 0, {1: ("chrome", 0), 9: ("python", 0)})
+        b = reading(int(8e9), 4 * tick, 2 * tick, {1: ("chrome", 2 * tick), 9: ("python", 50 * tick)})
+        host = runner._resources(a, b)["host"]
+        self.assertAlmostEqual(host["other_cores"], 6 / 8)
+        self.assertEqual(host["top"], [{"comm": "chrome", "cores": 0.25}])
+        self.assertAlmostEqual(host["states"]["softirq"], 0.25)
+        self.assertAlmostEqual(host["unattributed_cores"], 0.5)
+
+    def test_host_quiet_detail_names_the_causes(self):
+        rec = _record("pub")
+        rec["resources"]["host"].update(
+            other_cores=0.9,
+            top=[{"comm": "chrome", "cores": 0.4}, {"comm": "orchestrator", "cores": 0.1}],
+            states={"user": 0.5, "softirq": 0.2, "iowait": 0.01},
+            unattributed_cores=0.3,
+        )
+        detail = next(c["detail"] for c in checks.evaluate(rec)["checks"] if c["name"] == "host_quiet")
+        self.assertIn("chrome 0.40", detail)
+        self.assertIn("softirq 0.20", detail)
+        self.assertIn("unattributed 0.30", detail)
+        self.assertNotIn("iowait", detail)
+
+    def test_host_quiet_detail_without_attribution_is_unchanged(self):
+        rec = _record("pub")
+        detail = next(c["detail"] for c in checks.evaluate(rec)["checks"] if c["name"] == "host_quiet")
+        self.assertTrue(detail.endswith("outside the client, peer and broker"))
+
+    def test_campaign_summary_ranks_the_consumers_of_failed_runs(self):
+        def run(failed, top):
+            return {
+                "checks": [{"name": "host_quiet", "passed": not failed, "detail": ""}],
+                "resources": {"host": {"top": top, "states": {"softirq": 0.2}, "unattributed_cores": 0.0}},
+            }
+
+        docs = {
+            "paho": {"runs": [run(True, [{"comm": "chrome", "cores": 0.6}]), run(True, [{"comm": "chrome", "cores": 0.2}]), run(False, [])]},
+            "gmqtt": {"runs": [run(True, [{"comm": "cron", "cores": 0.1}])]},
+        }
+        lines = campaign.noise_summary(docs)
+        self.assertIn("failed in 3 of 4 runs", lines[0])
+        self.assertTrue(lines[1].lstrip().startswith("chrome"))
+        self.assertIn("0.40 cores on average, in 2 runs", lines[1])
+        self.assertTrue(any("kernel softirq" in line for line in lines))
+
+    def test_campaign_summary_is_silent_on_a_quiet_campaign(self):
+        docs = {"paho": {"runs": [{"checks": [{"name": "host_quiet", "passed": True, "detail": ""}]}]}}
+        self.assertEqual(campaign.noise_summary(docs), [])
+

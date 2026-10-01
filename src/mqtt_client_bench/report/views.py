@@ -253,7 +253,7 @@ QUESTIONS: List[Question] = [
     Question(
         "mqtt5-features",
         "What do MQTT 5 features cost?",
-        "Five PUBLISH properties on every message, a 200-byte topic replaced by a topic alias (broker byte counters confirm it), and receive capacity when the client allows only 16 unacknowledged deliveries.",
+        "Four PUBLISH properties on every message, a 200-byte topic replaced by a topic alias (broker byte counters confirm it), and receive capacity when the client allows only 16 unacknowledged deliveries.",
         (
             Column("pub_qos1_fixed_v5_props", "cpu_us_per_msg", "publish, properties"),
             Column("sub_qos1_fixed_v5_props", "cpu_us_per_msg", "receive, properties"),
@@ -275,6 +275,48 @@ QUESTIONS: List[Question] = [
         ),
     ),
 ]
+
+
+LATENCY_METRICS = ("p50", "p99", "p999", "max", "rx_p50", "rx_p99")
+
+
+@dataclass(frozen=True)
+class Limitation:
+    """A property of one library that changes how some of its numbers read."""
+
+    client: str
+    points: Tuple[str, ...]
+    text: str
+
+
+LIMITATIONS: Tuple[Limitation, ...] = (
+    Limitation(
+        "awscrt",
+        ("rtt_qos1_fixed", "rtt_qos1_fixed_v5"),
+        "aws-c-io does not expose TCP_NODELAY, and a trace of the library's connect shows it never sets it, "
+        "so Nagle's algorithm stays on. A QoS 1 round trip then waits tens of milliseconds, against hundreds "
+        "of microseconds at QoS 0, where no acknowledgement is pending: the pattern of Nagle's algorithm "
+        "waiting for a delayed ACK. This is the library as shipped, reported as measured. It says nothing "
+        "about the library's publish or receive cost, which the other points show.",
+    ),
+)
+
+
+def point_limitations(point: str, clients: List[str]) -> List[Limitation]:
+    return [x for x in LIMITATIONS if x.client in clients and point in x.points]
+
+
+def column_limitations(columns: List[Column], clients: List[str]) -> List[Limitation]:
+    """The limitations behind a latency column of a question, each once."""
+    found: List[Limitation] = []
+    for c in columns:
+        if c.metric in LATENCY_METRICS:
+            found += [x for x in point_limitations(c.point, clients) if x not in found]
+    return found
+
+
+def client_limitations(client: str) -> List[Limitation]:
+    return [x for x in LIMITATIONS if x.client == client]
 
 
 def point_columns(point: dict) -> List[str]:

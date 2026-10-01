@@ -74,6 +74,8 @@ def cmd_campaign(args) -> int:
         for r in doc["runs"]:
             statuses[r["status"]] = statuses.get(r["status"], 0) + 1
     print(f"done: {statuses}")
+    for line in campaign.noise_summary(store.docs):
+        print(line)
     return 0
 
 

@@ -12,7 +12,10 @@ from mqtt_client_bench import report
 from mqtt_client_bench.bench import histogram
 from mqtt_client_bench.bench.checks import CHECK_DOCS
 from mqtt_client_bench.report.chart import latency_chart
+from mqtt_client_bench.adapters.registry import CLIENT_NAMES
+from mqtt_client_bench.bench.catalog import ALL_POINTS
 from mqtt_client_bench.report.data import load_campaign, select_campaign
+from mqtt_client_bench.report.views import LIMITATIONS, QUESTIONS, column_limitations, point_limitations
 
 POINTS = [
     {"name": "pub_qos0_max", "kind": "pub", "question": "Publish capacity?", "qos": 0, "payload": 256, "rate": 0, "window": 64, "protocol": "MQTTv311", "suite": "core"},
@@ -282,3 +285,33 @@ class ChartTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LimitationTests(unittest.TestCase):
+    def test_every_limitation_names_a_real_client_and_point(self):
+        for x in LIMITATIONS:
+            self.assertIn(x.client, CLIENT_NAMES)
+            for name in x.points:
+                self.assertIn(name, ALL_POINTS)
+
+    def test_awscrt_round_trip_note_follows_the_latency_columns(self):
+        self.assertTrue(point_limitations("rtt_qos1_fixed", ["paho", "awscrt"]))
+        self.assertFalse(point_limitations("rtt_qos1_fixed", ["paho"]))
+        self.assertFalse(point_limitations("pub_qos1_fixed", ["awscrt"]))
+        rtt = next(q for q in QUESTIONS if any(c.point == "rtt_qos1_fixed" and c.metric == "p50" for c in q.columns))
+        self.assertEqual(len(column_limitations(list(rtt.columns), ["awscrt"])), 1)
+        cost = next(q for q in QUESTIONS if q.slug == "cpu-fixed")
+        self.assertEqual(column_limitations(list(cost.columns), ["awscrt"]), [])
+
+    def test_site_shows_the_note_on_the_index_point_and_client_pages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rtt = dict(POINTS[1], name="rtt_qos1_fixed", kind="rtt", question="Round trip?")
+            path = _write(root / "results", "20260930T000000Z", {"awscrt": ([_run(rtt, i, cpu=50.0, latencies=[20_000_000] * 10) for i in range(3)], [])})
+            manifest = json.loads((path / "manifest.json").read_text())
+            manifest["points"] = [rtt]
+            (path / "manifest.json").write_text(json.dumps(manifest))
+            report.build(root / "results", root / "site")
+            for rel in ("index.html", "point/rtt_qos1_fixed.html", "client/awscrt.html"):
+                self.assertIn("TCP_NODELAY", (root / "site" / rel).read_text(encoding="utf-8"), rel)
+

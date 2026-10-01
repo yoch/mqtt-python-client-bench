@@ -72,8 +72,9 @@ class AwscrtAdapter:
             # mqtt3 QoS0 and all mqtt5 publishes use counter-allocated mids.
             completion_mechanism="callback",
             synthetic_mids=True,
-            # aws-c-io exposes no TCP_NODELAY knob and hides the fd; RTT
-            # ping-pong would measure an ~84 ms Nagle plateau, so refuse it.
+            # aws-c-io exposes no TCP_NODELAY knob and hides the fd, so Nagle
+            # stays on. The QoS 1 round-trip points still run and report the
+            # resulting delay; the report carries the note (views.LIMITATIONS).
             tcp_nodelay=False,
             notes=(
                 "AWS Common Runtime mqtt/mqtt5 clients (aws-c-mqtt). "

@@ -208,6 +208,9 @@ def _reading(pid: int, peers: Dict[str, "ChildProcess"], ctx: Context) -> dict:
         "peers": {key: procstat.process(proc.pid) for key, proc in peers.items()},
         "broker_cpu_ns": procstat.cgroup_cpu_ns(ctx.broker_cgroup),
         "host": procstat.host_cpu(),
+        # Last, so the pass over /proc does not delay the readings that matter.
+        "known_pids": {pid, *(proc.pid for proc in peers.values()), *procstat.cgroup_pids(ctx.broker_cgroup)},
+        "procs": procstat.host_processes(),
     }
 
 
@@ -231,9 +234,22 @@ def _resources(a: dict, b: dict) -> dict:
             if d:
                 known += d["cpu_ns"] / 1e9
         known += (broker_cores or 0.0) * wall_s
+        other_cores = max(0.0, (busy_s - known) / wall_s)
+        who = procstat.attribute(
+            a["procs"],
+            b["procs"],
+            a["known_pids"] | b["known_pids"],
+            wall_s,
+            labels={os.getpid(): "orchestrator"},
+        )
         out["host"] = {
             "busy_cores": busy_s / wall_s,
-            "other_cores": max(0.0, (busy_s - known) / wall_s),
+            "other_cores": other_cores,
+            **procstat.host_breakdown(a["host"], b["host"], wall_s),
+            "top": who["top"],
+            # Kernel time no process is charged for (softirq, irq) and processes
+            # that started and ended inside the window.
+            "unattributed_cores": max(0.0, other_cores - who["processes_cores"]),
         }
     return out
 

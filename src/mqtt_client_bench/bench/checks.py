@@ -24,6 +24,8 @@ from mqtt_client_bench.bench import histogram
 RATE_HELD = 0.98
 BROKER_CPU_LIMIT = 0.85
 HOST_NOISE_CORES = 0.5
+KERNEL_STATES = ("irq", "softirq", "iowait", "steal")
+KERNEL_STATE_FLOOR = 0.05
 
 INVALID = "invalid"
 NOT_SUSTAINED = "not_sustained"
@@ -78,7 +80,8 @@ CHECK_DOCS = {
     "broker_headroom": f"Fixed-rate and idle points: the broker used less than {BROKER_CPU_LIMIT:.0%} of its core.",
     "host_quiet": (
         f"At most {HOST_NOISE_CORES} cores were busy outside the client, the peer and the broker. "
-        "Enforced on comparable profiles only."
+        "Enforced on comparable profiles only. The detail names the busiest other processes and the "
+        "kernel time no process is charged for (softirq, irq, iowait, steal)."
     ),
 }
 
@@ -322,7 +325,11 @@ def evaluate(record: dict, *, strict: bool = True) -> dict:
     if noise is not None:
         quiet = noise <= HOST_NOISE_CORES
         if strict:
-            checks.add("host_quiet", quiet, f"{noise:.2f} cores busy outside the client, peer and broker")
+            checks.add(
+                "host_quiet",
+                quiet,
+                f"{noise:.2f} cores busy outside the client, peer and broker{noise_causes(res['host'])}",
+            )
         elif not quiet:
             flags.append("host_noisy")
     if kind == "sub" and not rate and rate_offer_reached(record, window_s):
@@ -330,6 +337,22 @@ def evaluate(record: dict, *, strict: bool = True) -> dict:
 
     metrics = _metrics(record, window_s)
     return {"status": checks.status(), "checks": checks.items, "metrics": metrics, "flags": flags}
+
+
+def noise_causes(host: dict) -> str:
+    """What the other busy cores were, in one line; empty when nothing was recorded.
+
+    Kernel states come first when they stand out: softirq, irq, iowait and
+    steal are charged to no process, so they never show in the process list.
+    """
+    parts = [f"{t['comm']} {t['cores']:.2f}" for t in (host.get("top") or [])[:3]]
+    for state, cores in sorted((host.get("states") or {}).items(), key=lambda kv: -kv[1]):
+        if state in KERNEL_STATES and cores >= KERNEL_STATE_FLOOR:
+            parts.append(f"{state} {cores:.2f}")
+    unattributed = host.get("unattributed_cores")
+    if unattributed is not None and unattributed >= KERNEL_STATE_FLOOR:
+        parts.append(f"unattributed {unattributed:.2f}")
+    return f" (top: {', '.join(parts)})" if parts else ""
 
 
 def _completed(party: Optional[dict], label: str) -> tuple:
