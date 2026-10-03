@@ -124,6 +124,7 @@ class Window:
         self.marks[name] = {
             "cpu": common.process_cpu_ns(),
             "ctx": common.ctx_switches(),
+            "ru": common.rusage(),
             "sent": sent,
             "loop": self.counters.snapshot() if self.counters else None,
         }
@@ -134,6 +135,7 @@ class Window:
         a, b = self.marks["measure"], self.marks["end"]
         n = b["sent"] - a["sent"]
         out = {"msgs": n, "cpu_us": (b["cpu"] - a["cpu"]) / 1000 / n, "ctx_per_msg": (b["ctx"] - a["ctx"]) / n}
+        out.update(common.rusage_per_msg(a["ru"], b["ru"], n))
         if a["loop"]:
             d = common.delta(a["loop"], b["loop"])
             out.update(loop_it=d["selects"] / n, nb_it=d["nonblocking"] / n, call_soon=d["call_soon"] / n)
@@ -271,7 +273,8 @@ def one(args) -> None:
     common.emit(out)
 
 
-COLUMNS = [("client", "%-8s"), ("variant", "%-9s"), ("rate", "%5.0f"), ("cpu_us", "%7.1f"), ("ctx_per_msg", "%5.2f"),
+COLUMNS = [("client", "%-8s"), ("variant", "%-9s"), ("rate", "%5.0f"), ("cpu_us", "%7.1f"), ("user_us", "%7.1f"), ("sys_us", "%6.1f"),
+           ("minflt", "%6.2f"), ("ctx_per_msg", "%5.2f"),
            ("loop_it", "%7.2f"), ("nb_it", "%6.2f"), ("call_soon", "%9.2f"), ("e2e_p50", "%7.0f"), ("e2e_p99", "%7.0f")]
 
 

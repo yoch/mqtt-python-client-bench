@@ -90,6 +90,7 @@ def mark(receiver: Receiver, counters) -> dict:
     return {
         "cpu": common.process_cpu_ns(),
         "ctx": common.ctx_switches(),
+        "ru": common.rusage(),
         "received": receiver.received,
         "loop": counters.snapshot() if counters else None,
     }
@@ -99,6 +100,7 @@ def result(a: dict, b: dict, receiver: Receiver, profiler=None) -> dict:
     n = b["received"] - a["received"]
     out = {"msgs": n, "cpu_us": (b["cpu"] - a["cpu"]) / 1000 / n, "ctx": (b["ctx"] - a["ctx"]) / n,
            "unmatched": receiver.unmatched}
+    out.update(common.rusage_per_msg(a["ru"], b["ru"], n))
     if profiler:
         out.update(profiler.report(n))
     if a["loop"]:
@@ -188,7 +190,8 @@ def one(args) -> None:
     common.emit(out)
 
 
-COLUMNS = [("case", "%-28s"), ("cpu_us", "%7.1f"), ("ctx", "%5.2f"), ("loop_it", "%7.2f"), ("nb_it", "%6.2f"),
+COLUMNS = [("case", "%-28s"), ("cpu_us", "%7.1f"), ("user_us", "%7.1f"), ("sys_us", "%6.1f"),
+           ("minflt", "%6.2f"), ("ctx", "%5.2f"), ("loop_it", "%7.2f"), ("nb_it", "%6.2f"),
            ("call_soon", "%9.2f"), ("lat_p50", "%7.0f"), ("transport", "%-20s")]
 
 

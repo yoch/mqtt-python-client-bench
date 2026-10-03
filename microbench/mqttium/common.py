@@ -20,6 +20,7 @@ import glob
 import json
 import os
 import pstats
+import resource
 import statistics
 import subprocess
 import sys
@@ -54,6 +55,20 @@ def process_cpu_ns() -> int:
         except (OSError, ValueError, IndexError):
             pass
     return total
+
+
+def rusage() -> Dict[str, float]:
+    """User and system CPU and minor page faults of the whole process, all threads."""
+    ru = resource.getrusage(resource.RUSAGE_SELF)
+    return {"user_s": ru.ru_utime, "sys_s": ru.ru_stime, "minflt": ru.ru_minflt}
+
+
+def rusage_per_msg(a: Dict[str, float], b: Dict[str, float], n: int) -> Dict[str, float]:
+    return {
+        "user_us": (b["user_s"] - a["user_s"]) * 1e6 / n,
+        "sys_us": (b["sys_s"] - a["sys_s"]) * 1e6 / n,
+        "minflt": (b["minflt"] - a["minflt"]) / n,
+    }
 
 
 def ctx_switches() -> int:
