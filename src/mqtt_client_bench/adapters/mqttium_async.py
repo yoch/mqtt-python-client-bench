@@ -10,7 +10,8 @@ queue-full), not to ``on_publish`` reason 128. The facade in ``mqttium.py`` stil
 returns a mid before the bridge call and cannot do that.
 
 Through 1.0.0rc14, QoS>=1 completion is the library ``on_publish`` callback.
-1.0.0rc15 removed it; those completions are one future on ``PublishReceipt``,
+From 1.2.0 it is ``PublishReceipt.add_done_callback``, and the outcome is
+``exception()``. Builds in between still register one future on the receipt,
 the same waiter ``wait()`` would register, without a Task per publish.
 ``FlowControlError`` below is re-exported for tests. Role workers may have
 imported it before ``client_path`` swapped the package, so the publish path
@@ -237,11 +238,11 @@ class MqttiumAsyncAdapter:
         retain: bool,
         properties: Any,
     ) -> Optional[int]:
-        """rc15: each PublishReceipt is the completion handle on_publish used to be.
+        """Each PublishReceipt is the completion handle on_publish used to be.
 
-        Admission stays inside ``publish_nowait``. Completion is one future on
-        the receipt — what ``PublishReceipt.wait`` registers — so the publish
-        loop does not allocate a Task per message.
+        Admission stays inside ``publish_nowait``. From 1.2.0 completion is
+        ``add_done_callback``; before that, one future on the receipt. Neither
+        allocates a Task per message.
         """
         try:
             receipt = self._client.publish_nowait(

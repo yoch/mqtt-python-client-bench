@@ -212,9 +212,9 @@ class AdapterRegistryTests(unittest.TestCase):
         ):
             self.assertIn(name, params)
         self.assertNotIn("on_publish", params)
-        declared = getattr(PublishReceipt, "__dataclass_fields__", None) or set(PublishReceipt.__slots__)
-        self.assertIn("_waiters", declared)
-        self.assertIn("_error", declared)
+        self.assertTrue(callable(getattr(PublishReceipt, "add_done_callback", None)))
+        self.assertTrue(callable(getattr(PublishReceipt, "exception", None)))
+        self.assertEqual(adapter_identity("mqttium").get("private_api") or {}, {})
         props = Properties({"content_type": "application/json"})
         self.assertEqual(props.get("content_type"), "application/json")
 
@@ -516,6 +516,62 @@ class MqttiumNativeNowaitTests(unittest.TestCase):
 
         mid = asyncio.run(drive())
         self.assertEqual(fired, [(mid, 0)])
+
+    def test_done_callback_relays_puback_and_failure(self):
+        adapter = MqttiumAsyncAdapter()
+        fired = []
+        adapter.on_publish = lambda *args: fired.append((args[2], args[3]))
+
+        class _Receipt:
+            def __init__(self):
+                self._settled = False
+                self._error = None
+                self._callbacks = []
+
+            def is_done(self):
+                return self._settled
+
+            def exception(self):
+                if not self._settled:
+                    raise asyncio.InvalidStateError("publication is not done yet")
+                return self._error
+
+            def add_done_callback(self, callback):
+                if self._settled:
+                    callback(self)
+                else:
+                    self._callbacks.append(callback)
+
+            def settle(self, error=None):
+                self._error = error
+                self._settled = True
+                callbacks = self._callbacks
+                self._callbacks = []
+                for callback in callbacks:
+                    callback(self)
+
+        receipt = _Receipt()
+
+        class _Client:
+            def publish_nowait(self, *args, **kwargs):
+                return receipt
+
+        adapter._client = _Client()
+
+        async def drive(error=None):
+            fired.clear()
+            receipt._settled = False
+            receipt._error = None
+            receipt._callbacks = []
+            mid = adapter.publish_nowait("t", b"x", qos=1)
+            self.assertEqual(fired, [])
+            receipt.settle(error)
+            return mid
+
+        mid = asyncio.run(drive())
+        self.assertEqual(fired, [(mid, 0)])
+        mid = asyncio.run(drive(RuntimeError("puback refused")))
+        self.assertEqual(fired, [(mid, 128)])
 
     def test_rc15_flow_control_returns_none(self):
         adapter = MqttiumAsyncAdapter()

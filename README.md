@@ -16,7 +16,7 @@ the client.
 | `paho` | [eclipse-paho/paho.mqtt.python](https://github.com/eclipse-paho/paho.mqtt.python) | sync | Reference; network thread + callbacks |
 | `awscrt` | [awslabs/aws-crt-python](https://github.com/awslabs/aws-crt-python) | sync | Native engine (`aws-c-mqtt`), not pure Python |
 | `gmqtt` | [wialon/gmqtt](https://github.com/wialon/gmqtt) | nowait | asyncio; publish admitted synchronously on the loop |
-| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) | nowait | asyncio; `publish_nowait` + public receipts (≥ 1.1.0) |
+| `mqttium` | [yoch/mqttium](https://github.com/yoch/mqttium) | nowait | asyncio; `publish_nowait` + `PublishReceipt.add_done_callback` (≥ 1.2.0) |
 | `aiomqtt` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) v2 | awaited | asyncio, paho backend |
 | `aiomqtt3` | [empicano/aiomqtt](https://github.com/empicano/aiomqtt) v3 alpha | awaited | MQTT 5 only; own environment (same import name as v2) |
 | `amqtt` | [Yakifo/amqtt](https://github.com/Yakifo/amqtt) | awaited | MQTT 3.1.1 only |
