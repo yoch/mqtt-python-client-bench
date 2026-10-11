@@ -335,6 +335,8 @@ def main(argv=None) -> int:
         result = {"ok": False, "error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()}
     result["identity"] = identity
     result["python"] = sys.version.split()[0]
+    from mqtt_client_bench.bench.runtime import local_identity
+    result["runtime"] = local_identity()
     with open(cfg["result_path"], "w", encoding="utf-8") as fh:
         json.dump(result, fh)
     emit("done", ok=result["ok"])

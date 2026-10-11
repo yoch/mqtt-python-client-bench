@@ -108,6 +108,7 @@ def _session_facts(campaign: Campaign) -> str:
     if len(sessions) > 1:
         runs += f"; {len(sessions)} sessions (see methodology)"
     facts = [
+        ("Python", ((campaign.manifest.get("runtime") or {}).get("identity") or {}).get("version_full", "not recorded in this historical campaign")),
         ("Machine", f"{host.get('cpu_model', '?')}, {host.get('physical_cores', '?')} cores, governor {host.get('governor', '?')}"),
         ("Broker", f"{image}, one core"),
         ("Broker C→C ceiling", _span([_ceiling(s) for s in sessions])),

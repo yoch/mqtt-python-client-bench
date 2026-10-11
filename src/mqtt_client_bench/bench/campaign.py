@@ -15,10 +15,17 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from mqtt_client_bench.bench import envs
-from mqtt_client_bench.bench.catalog import ALL_POINTS, PROFILES, RUN_OVERHEAD_S, Point, Profile
+from mqtt_client_bench.bench.runtime import Runtime, lock_digest, resolve
+from mqtt_client_bench.bench.catalog import (
+    ALL_POINTS,
+    PROFILES,
+    RUN_OVERHEAD_S,
+    Point,
+    Profile,
+)
 from mqtt_client_bench.bench.checks import KERNEL_STATE_FLOOR, KERNEL_STATES
 from mqtt_client_bench.bench.runner import refusals, run_once, unsupported_record
-from mqtt_client_bench.bench.session import open_session
+from mqtt_client_bench.bench.session import open_session, harness_revision
 
 RESULTS_DIR = Path("results") / "v2"
 SCHEMA = "mqtt-client-bench/2"
@@ -50,7 +57,8 @@ def estimate_s(order: List[Key], profile: Profile) -> float:
 class Store:
     """``<dir>/manifest.json`` plus one ``<client>.json`` holding its runs."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, runtime: Optional[Runtime] = None) -> None:
+        self.runtime = runtime
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         self.docs: Dict[str, dict] = {}
@@ -65,14 +73,16 @@ class Store:
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
     def write_manifest(self, manifest: dict) -> None:
-        (self.root / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
+        (self.root / "manifest.json").write_text(
+            json.dumps(manifest, indent=1) + "\n", encoding="utf-8"
+        )
 
     def doc(self, client: str) -> dict:
         if client not in self.docs:
             self.docs[client] = {
                 "schema": SCHEMA,
                 "client": client,
-                "version": envs.installed_version(client),
+                "version": envs.installed_version(client, self.runtime),
                 "identity": None,
                 "runs": [],
                 "unsupported": [],
@@ -84,11 +94,18 @@ class Store:
         doc = self.docs.get(client)
         if not doc:
             return []
-        return [r for r in doc["runs"] if r["point"]["name"] == point and r["run_index"] == i]
+        return [
+            r
+            for r in doc["runs"]
+            if r["point"]["name"] == point and r["run_index"] == i
+        ]
 
     def done(self, key: Key) -> bool:
         attempts = self.attempts(key)
-        return any(r["status"] != "invalid" for r in attempts) or len(attempts) >= MAX_ATTEMPTS
+        return (
+            any(r["status"] != "invalid" for r in attempts)
+            or len(attempts) >= MAX_ATTEMPTS
+        )
 
     def add(self, record: dict) -> None:
         doc = self.doc(record["client"])
@@ -126,9 +143,16 @@ def resume_settings(root: Path) -> Tuple[Profile, List[Point], List[str], int]:
     for recorded in manifest["points"]:
         current = ALL_POINTS.get(recorded["name"])
         if current is None or current.as_dict() != recorded:
-            raise ValueError(f"{root}: point {recorded['name']!r} changed in the catalogue since the campaign started")
+            raise ValueError(
+                f"{root}: point {recorded['name']!r} changed in the catalogue since the campaign started"
+            )
         points.append(current)
-    return PROFILES[name], points, list(manifest["clients"]), int(manifest["runs_per_point"])
+    return (
+        Profile(**manifest["profile"]),
+        points,
+        list(manifest["clients"]),
+        int(manifest["runs_per_point"]),
+    )
 
 
 def _mismatches(manifest: dict, profile: Profile, points: List[Point], clients: List[str], runs: int) -> List[str]:
@@ -181,42 +205,73 @@ def run_campaign(
     runs: Optional[int] = None,
     log: Callable[[str], None] = print,
     describe: Callable[[dict], str] = lambda r: r["status"],
+    runtime: Optional[Runtime] = None,
 ) -> Store:
     runs = runs or profile.runs
-    store = Store(root)
+    store = Store(root, runtime)
     existing = store.manifest()
     if existing is not None:
         mismatches = _mismatches(existing, profile, points, clients, runs)
         if mismatches:
-            raise ValueError(f"{root} was started with other settings: {'; '.join(mismatches)}")
+            raise ValueError(
+                f"{root} was started with other settings: {'; '.join(mismatches)}"
+            )
+    runtime = runtime or resolve()
+    store.runtime = runtime
+    frozen = {
+        "runtime": runtime.as_dict(),
+        "environments": envs.snapshot(clients, runtime),
+        "lock_digest": lock_digest(),
+        "harness": harness_revision(),
+    }
+    if existing is not None:
+        changed = [
+            k for k, v in frozen.items() if k not in existing or existing[k] != v
+        ]
+        if changed:
+            raise ValueError(
+                f"{root}: refusing to resume with changed or unrecorded {', '.join(changed)}; start a new campaign"
+            )
     by_name = {p.name: p for p in points}
     for point in points:
         for client in clients:
             reasons = refusals(client, point)
             if reasons:
-                store.add_unsupported(unsupported_record(client, point, profile, reasons))
+                store.add_unsupported(
+                    unsupported_record(client, point, profile, reasons)
+                )
 
     order = plan(points, clients, runs)
     if all(store.done(k) for k in order):
         return store
-    with open_session(profile) as (ctx, info):
+    with open_session(profile, runtime=runtime, clients=clients) as (
+        ctx,
+        info,
+    ):
         manifest = store.manifest() or {
             "schema": SCHEMA,
             "campaign": root.name,
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "profile": profile.__dict__,
             "points": [p.as_dict() for p in points],
-            "clients": {c: envs.installed_version(c) for c in clients},
+            "clients": {c: envs.installed_version(c, runtime) for c in clients},
             "runs_per_point": runs,
             "sessions": [],
+            **frozen,
         }
         manifest["sessions"].append(info)
         store.write_manifest(manifest)
         c = info.get("ceiling") or {}
-        log(f"broker ceiling (C->C): {c.get('msgs_per_s', 0):.0f} msg/s; receive offer {ctx.sub_offer}/s")
+        log(
+            f"broker ceiling (C->C): {c.get('msgs_per_s', 0):.0f} msg/s; receive offer {ctx.sub_offer}/s"
+        )
 
         for attempt in range(MAX_ATTEMPTS):
-            todo = [k for k in order if not store.done(k) and len(store.attempts(k)) == attempt]
+            todo = [
+                k
+                for k in order
+                if not store.done(k) and len(store.attempts(k)) == attempt
+            ]
             if not todo:
                 continue
             if attempt:
@@ -232,7 +287,9 @@ def run_campaign(
                 elapsed = time.monotonic() - started
                 per_run = elapsed / (n + 1)
                 left = (len(todo) - n - 1) * per_run
-                log(f"[{n + 1}/{len(todo)} eta {left / 60:4.1f} min] {describe(record)}")
+                log(
+                    f"[{n + 1}/{len(todo)} eta {left / 60:4.1f} min] {describe(record)}"
+                )
 
         manifest["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         store.write_manifest(manifest)

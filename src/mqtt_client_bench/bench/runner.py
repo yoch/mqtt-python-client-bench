@@ -23,6 +23,7 @@ from typing import Dict, List, Optional, Tuple
 from mqtt_client_bench import broker
 from mqtt_client_bench.adapters.registry import get_adapter_class
 from mqtt_client_bench.bench import checks, envs, peer, procstat
+from mqtt_client_bench.bench.runtime import Runtime
 from mqtt_client_bench.bench.catalog import Point, Profile
 from mqtt_client_bench.bench.sysprobe import SysProbe, delta
 from mqtt_client_bench.paths import CA_CERT, PROJECT_ROOT
@@ -46,6 +47,7 @@ class Context:
     broker_cgroup: Optional[str]
     sub_offer: int
     scratch: Path
+    runtime: Optional[Runtime] = None
 
 
 class ChildProcess:
@@ -273,14 +275,18 @@ def unsupported_record(client: str, point: Point, profile: Profile, reasons: Lis
     }
 
 
-def run_once(client: str, point: Point, profile: Profile, ctx: Context, *, run_index: int = 0) -> dict:
+def run_once(
+    client: str, point: Point, profile: Profile, ctx: Context, *, run_index: int = 0
+) -> dict:
     reasons = refusals(client, point)
     if reasons:
         return unsupported_record(client, point, profile, reasons)
     run_id = uuid.uuid4().hex[:12]
     topics = run_topics(point, run_id)
     schedule_s = profile.warmup_s + profile.measure_s + profile.drain_s
-    fd, result_path = tempfile.mkstemp(prefix=f"{client}-{point.name}-", suffix=".json", dir=ctx.scratch)
+    fd, result_path = tempfile.mkstemp(
+        prefix=f"{client}-{point.name}-", suffix=".json", dir=ctx.scratch
+    )
     os.close(fd)
     if point.kind in ("rtt", "duplex"):
         listen = topics["reply"]
@@ -296,7 +302,9 @@ def run_once(client: str, point: Point, profile: Profile, ctx: Context, *, run_i
         "tls_ca_certs": str(CA_CERT) if point.tls else None,
         "client_id": f"sut-{run_id}",
         "topic": topics["data"],
-        "publish_topics": fanout_topics(topics["data"], point.topics) if point.topics > 1 else [topics["data"]],
+        "publish_topics": fanout_topics(topics["data"], point.topics)
+        if point.topics > 1
+        else [topics["data"]],
         "payload_sizes": payload_sizes(point, topics["data"]),
         "listen_topic": listen,
         "schedule_s": schedule_s,
@@ -317,7 +325,13 @@ def run_once(client: str, point: Point, profile: Profile, ctx: Context, *, run_i
     env = dict(os.environ, PYTHONPATH=str(PROJECT_ROOT / "src"), PYTHONUNBUFFERED="1")
     worker_argv = pinned(
         ctx.cpusets.get("sut"),
-        [str(envs.env_python(client)), "-m", "mqtt_client_bench.bench.worker", "--config", cfg_path],
+        [
+            str(envs.env_python(client, ctx.runtime)),
+            "-m",
+            "mqtt_client_bench.bench.worker",
+            "--config",
+            cfg_path,
+        ],
     )
     peer_plan = _peer_plan(point, ctx, run_id, topics)
     peers: Dict[str, ChildProcess] = {}
@@ -338,7 +352,9 @@ def run_once(client: str, point: Point, profile: Profile, ctx: Context, *, run_i
         ready = worker.wait_ready(READY_TIMEOUT_S)
         if ready is None:
             worker.finish(5.0)
-            raise RuntimeError(f"worker not ready: {_worker_error(result_path, worker)}")
+            raise RuntimeError(
+                f"worker not ready: {_worker_error(result_path, worker)}"
+            )
         record["ready"] = ready
         start_peers(before_worker=False)
         record["client_at_ready"] = procstat.process(worker.pid)
@@ -379,7 +395,10 @@ def run_once(client: str, point: Point, profile: Profile, ctx: Context, *, run_i
             "sys": delta(sys_before, sys_after),
             "cpu_cores": record["resources"]["broker_cores"],
         }
-        record["worker"] = _load_json(result_path) or {"ok": False, "error": _worker_error(result_path, worker)}
+        record["worker"] = _load_json(result_path) or {
+            "ok": False,
+            "error": _worker_error(result_path, worker),
+        }
         if worker.stderr.strip():
             record["worker_stderr"] = worker.stderr.strip()[-2000:]
     except Exception as exc:  # noqa: BLE001

@@ -133,7 +133,11 @@ class Campaign:
     def expected_runs(self) -> int:
         n = 0
         for p in self.points:
-            n += sum(1 for c in self.clients if self.cells[(p["name"], c)].unsupported is None)
+            n += sum(
+                1
+                for c in self.clients
+                if self.cells[(p["name"], c)].unsupported is None
+            )
         return n * int(self.manifest.get("runs_per_point") or 1)
 
     def done_runs(self) -> int:
@@ -169,6 +173,31 @@ def load_campaign(path: Path) -> Campaign:
         if f.name != "manifest.json":
             doc = json.loads(f.read_text(encoding="utf-8"))
             docs[doc["client"]] = doc
+    # A cell cannot combine different runtimes, even in an explicitly selected report.
+    builds = set()
+    for doc in docs.values():
+        for run in doc.get("runs", []):
+            worker = run.get("worker") or {}
+            identity = worker.get("runtime")
+            if identity:
+                # GIL state can differ legitimately across native clients; build identity cannot.
+                identity = {k: v for k, v in identity.items() if k != "gil_enabled"}
+                builds.add(json.dumps(identity, sort_keys=True))
+            elif worker.get("python"):
+                builds.add(worker["python"])
+    if len(builds) > 1:
+        raise ValueError(
+            f"{path}: campaign mixes Python versions or builds; split the runs into separate campaigns"
+        )
+    recorded = (manifest.get("runtime") or {}).get("identity")
+    if recorded:
+        expected = json.dumps(
+            {k: v for k, v in recorded.items() if k != "gil_enabled"}, sort_keys=True
+        )
+        if builds and builds != {expected}:
+            raise ValueError(
+                f"{path}: worker runtime differs from the campaign manifest"
+            )
     points = list(manifest.get("points") or [])
     clients = list(manifest.get("clients") or [])
     # Runs the manifest does not announce are still shown, never dropped.
@@ -185,7 +214,14 @@ def load_campaign(path: Path) -> Campaign:
             doc = docs.get(client) or {}
             runs = [r for r in doc.get("runs", []) if r["point"]["name"] == p["name"]]
             final, retried = _final_attempts(runs)
-            refused = next((u["reasons"] for u in doc.get("unsupported", []) if u["point"] == p["name"]), None)
+            refused = next(
+                (
+                    u["reasons"]
+                    for u in doc.get("unsupported", [])
+                    if u["point"] == p["name"]
+                ),
+                None,
+            )
             cells[(p["name"], client)] = Cell(p, client, final, retried, refused)
     return Campaign(path, manifest, docs, cells, points, clients)
 
