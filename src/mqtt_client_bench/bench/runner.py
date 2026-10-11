@@ -24,6 +24,7 @@ from mqtt_client_bench import broker
 from mqtt_client_bench.adapters.registry import get_adapter_class
 from mqtt_client_bench.bench import checks, envs, peer, procstat
 from mqtt_client_bench.bench.runtime import Runtime
+from mqtt_client_bench.bench.sampling import Capture, Sampling
 from mqtt_client_bench.bench.catalog import Point, Profile
 from mqtt_client_bench.bench.sysprobe import SysProbe, delta
 from mqtt_client_bench.paths import CA_CERT, PROJECT_ROOT
@@ -48,6 +49,7 @@ class Context:
     sub_offer: int
     scratch: Path
     runtime: Optional[Runtime] = None
+    sampling: Optional[Sampling] = None
 
 
 class ChildProcess:
@@ -309,6 +311,7 @@ def run_once(
         "listen_topic": listen,
         "schedule_s": schedule_s,
         "result_path": result_path,
+        "sampling": ctx.sampling is not None,
     }
     cfg_path = result_path + ".cfg"
     Path(cfg_path).write_text(json.dumps(cfg), encoding="utf-8")
@@ -336,6 +339,7 @@ def run_once(
     peer_plan = _peer_plan(point, ctx, run_id, topics)
     peers: Dict[str, ChildProcess] = {}
     worker: Optional[ChildProcess] = None
+    capture: Optional[Capture] = None
 
     def start_peers(before_worker: bool) -> None:
         for key, argv, first in peer_plan:
@@ -381,6 +385,15 @@ def run_once(
         _sleep_until(t_measure)
         procstat.reset_peak_rss(worker.pid)
         at_measure = _reading(worker.pid, peers, ctx)
+        if ctx.sampling is not None:
+            capture = Capture(
+                envs.env_python(client, ctx.runtime),
+                worker.pid,
+                ctx.sampling,
+                run_id,
+                profile.measure_s,
+                ctx.cpusets.get("profiler"),
+            )
         _sleep_until(t_end)
         at_end = _reading(worker.pid, peers, ctx)
         record["resources"] = _resources(at_measure, at_end)
@@ -401,10 +414,14 @@ def run_once(
         }
         if worker.stderr.strip():
             record["worker_stderr"] = worker.stderr.strip()[-2000:]
+        if capture is not None:
+            record["sampling"] = capture.finish()
     except Exception as exc:  # noqa: BLE001
         record["error"] = f"{type(exc).__name__}: {exc}"
         record.setdefault("worker", {"ok": False, "error": record["error"]})
     finally:
+        if capture is not None:
+            capture.close()
         for proc in (worker, *peers.values()):
             if proc is not None:
                 proc.kill()
@@ -427,6 +444,15 @@ def run_once(
             record[key] = hist
     if not profile.comparable:
         record["flags"] = sorted(set(record.get("flags", [])) | {"non_comparable"})
+    if ctx.sampling is not None:
+        record["flags"] = sorted(
+            set(record.get("flags", [])) | {"non_comparable", "instrumented"}
+        )
+        if "sampling" not in record:
+            record["status"] = "invalid"
+            record["reasons"] = sorted(
+                set(record.get("reasons", [])) | {"sampling_failed"}
+            )
     return record
 
 

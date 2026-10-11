@@ -7,12 +7,14 @@ import json
 import shlex
 import sys
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
 from mqtt_client_bench import report
 from mqtt_client_bench.bench import campaign, catalog, envs
 from mqtt_client_bench.bench import runtime as runtimes
+from mqtt_client_bench.bench.sampling import MODES, Sampling, preflight
 from mqtt_client_bench.bench.runner import run_once
 from mqtt_client_bench.bench.session import open_session, harness_floor
 
@@ -46,6 +48,24 @@ def cmd_envs(args) -> int:
     return int(failed)
 
 
+def _sampling(args, runtime, profile, recorded=None):
+    mode = args.sampling or (recorded or {}).get("mode")
+    if not mode:
+        if args.sampling_rate is not None:
+            raise ValueError(
+                "--sampling-rate requires --sampling or an instrumented campaign to resume"
+            )
+        return profile, None
+    if runtime.identity["version"].split(".")[:2] != ["3", "15"]:
+        raise ValueError("Tachyon capture currently requires a Python 3.15 worker")
+    preflight(runtime.executable)
+    rate = (
+        args.sampling_rate
+        if args.sampling_rate is not None
+        else (recorded or {}).get("rate_hz", 1000)
+    )
+    settings = Sampling(mode, rate, Path(args.sampling_dir).absolute())
+    return replace(profile, comparable=False), settings
 
 
 def cmd_list(args) -> int:
@@ -88,11 +108,20 @@ def cmd_campaign(args) -> int:
         )
         clients = _split(args.clients) or list(envs.CLIENT_EXTRAS)
         runs = args.runs or profile.runs
-        name = campaign.campaign_id() + ("" if profile.comparable else f"-{profile.name}")
+        name = campaign.campaign_id() + (
+            f"-sampling-{args.sampling}"
+            if args.sampling
+            else ""
+            if profile.comparable
+            else f"-{profile.name}"
+        )
         root = Path(args.output_dir) / name
     recorded = campaign.Store(root).manifest() if args.resume else None
     selector = args.python or ((recorded or {}).get("runtime") or {}).get("selector")
     runtime = runtimes.resolve(selector)
+    profile, sampling = _sampling(
+        args, runtime, profile, (recorded or {}).get("sampling")
+    )
     missing = [c for c in clients if not envs.env_ready(c, runtime)]
     if missing:
         print(
@@ -112,6 +141,7 @@ def cmd_campaign(args) -> int:
         runs=runs,
         describe=describe,
         runtime=runtime,
+        sampling=sampling,
     )
     statuses: dict = {}
     for doc in store.docs.values():
@@ -160,6 +190,7 @@ def cmd_run(args) -> int:
     points = catalog.resolve(_split(args.points), _split(args.suites) or None)
     clients = _split(args.clients)
     runtime = runtimes.resolve(args.python)
+    profile, sampling = _sampling(args, runtime, profile)
     missing = [c for c in clients if not envs.env_ready(c, runtime)]
     if missing:
         print(
@@ -173,12 +204,14 @@ def cmd_run(args) -> int:
         profile,
         measure_ceiling=not args.no_ceiling,
         runtime=runtime,
+        sampling=sampling,
         clients=clients,
     ) as (ctx, info):
         info.update(
             runtime=runtime.as_dict(),
             environments=environments,
             lock_digest=runtimes.lock_digest(),
+            sampling=sampling.as_dict() if sampling else None,
         )
         if info.get("ceiling"):
             c = info["ceiling"]
@@ -298,6 +331,17 @@ def build_parser() -> argparse.ArgumentParser:
 def _runtime_options(parser) -> None:
     parser.add_argument(
         "--python", help="Python version/build or executable (default: .python-version)"
+    )
+    parser.add_argument(
+        "--sampling",
+        choices=MODES,
+        help="capture the worker with Tachyon; marks results non-comparable",
+    )
+    parser.add_argument("--sampling-rate", type=int, help="sampling Hz (default: 1000)")
+    parser.add_argument(
+        "--sampling-dir",
+        default="/tmp/mqtt-client-bench-profiles",
+        help="external directory for raw profiles and flamegraphs",
     )
 
 

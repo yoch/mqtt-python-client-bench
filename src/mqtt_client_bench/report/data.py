@@ -22,7 +22,7 @@ LAG_QUANTILES = {"lag_p50": 0.5, "lag_p99": 0.99, "lag_max": 1.0}
 # Duplex: the client's own receive path, next to "latency" on its publish path.
 RX_QUANTILES = {"rx_p50": 0.5, "rx_p99": 0.99}
 # Only a development profile tolerates these, and it says so on every page.
-CAMPAIGN_FLAGS = {"non_comparable", "host_noisy"}
+CAMPAIGN_FLAGS = {"non_comparable", "host_noisy", "instrumented"}
 
 
 @dataclass
@@ -121,7 +121,15 @@ class Campaign:
 
     @property
     def comparable(self) -> bool:
-        return bool((self.manifest.get("profile") or {}).get("comparable"))
+        return (
+            bool((self.manifest.get("profile") or {}).get("comparable"))
+            and not self.manifest.get("sampling")
+            and not any(
+                "instrumented" in r.get("flags", [])
+                for doc in self.docs.values()
+                for r in doc.get("runs", [])
+            )
+        )
 
     @property
     def sessions(self) -> List[dict]:

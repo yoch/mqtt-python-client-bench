@@ -35,13 +35,15 @@ library lacks (MQTT 5 for amqtt, MQTT 3.1.1 for aiomqtt3) is refused, never
 approximated; refused pairs appear as `unsupported` in the report's coverage
 section.
 
-## Python versions and reproducible campaigns
+## Python versions and profiling
 
 Select Python 3.12–3.15 with `envs --sync --python VERSION` and use the same
 `--python` for `run` or `campaign`. Environments are isolated by actual build
 and client. Campaign resumes freeze interpreter, dependencies, lockfile and
-harness identity. See [RUNTIMES.md](RUNTIMES.md) for migration, commands and
-JIT/free-threaded experiments.
+harness identity. Tachyon captures in 3.15 attach to the client worker and are
+marked non-comparable. See [PROFILING.md](PROFILING.md) for migration, commands,
+validation, JIT/free-threaded experiments and profile artifacts.
+[RUNTIMES.md](RUNTIMES.md) covers the interpreter/environment migration separately.
 
 ## What a run measures
 

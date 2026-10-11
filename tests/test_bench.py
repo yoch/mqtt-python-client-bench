@@ -114,7 +114,7 @@ class CheckTests(unittest.TestCase):
         # The methodology page is generated from CHECK_DOCS and FLAG_DOCS.
         source = inspect.getsource(checks) + inspect.getsource(runner)
         emitted_checks = set(re.findall(r'checks\.add\(\s*"(\w+)"', source))
-        emitted_flags = set(re.findall(r'flags\.append\("(\w+)"\)', source)) | {"non_comparable"}
+        emitted_flags = set(re.findall(r'flags\.append\("(\w+)"\)', source)) | {"non_comparable", "instrumented"}
         self.assertTrue(emitted_checks)
         self.assertEqual(emitted_checks, set(checks.CHECK_DOCS))
         self.assertEqual(emitted_flags, set(checks.FLAG_DOCS))
