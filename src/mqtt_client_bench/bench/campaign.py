@@ -16,6 +16,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from mqtt_client_bench.bench import envs
 from mqtt_client_bench.bench.runtime import Runtime, lock_digest, resolve
+from mqtt_client_bench.bench.sampling import Sampling
 from mqtt_client_bench.bench.catalog import (
     ALL_POINTS,
     PROFILES,
@@ -206,6 +207,7 @@ def run_campaign(
     log: Callable[[str], None] = print,
     describe: Callable[[dict], str] = lambda r: r["status"],
     runtime: Optional[Runtime] = None,
+    sampling: Optional[Sampling] = None,
 ) -> Store:
     runs = runs or profile.runs
     store = Store(root, runtime)
@@ -223,6 +225,7 @@ def run_campaign(
         "environments": envs.snapshot(clients, runtime),
         "lock_digest": lock_digest(),
         "harness": harness_revision(),
+        "sampling": sampling.as_dict() if sampling else None,
     }
     if existing is not None:
         changed = [
@@ -244,7 +247,7 @@ def run_campaign(
     order = plan(points, clients, runs)
     if all(store.done(k) for k in order):
         return store
-    with open_session(profile, runtime=runtime, clients=clients) as (
+    with open_session(profile, runtime=runtime, sampling=sampling, clients=clients) as (
         ctx,
         info,
     ):

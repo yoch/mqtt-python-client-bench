@@ -94,6 +94,7 @@ FLAG_DOCS = {
     "broker_queue_overflow": "The broker discarded QoS 1 or 2 messages a slower client could not drain.",
     "host_noisy": "The rest of the host was busy (only tolerated on non-comparable profiles).",
     "non_comparable": "Development profile: never published or compared.",
+    "instrumented": "Tachyon diagnostic capture: excluded from performance rankings.",
 }
 
 

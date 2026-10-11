@@ -1,4 +1,4 @@
-"""Protect interpreter isolation and campaign reproducibility."""
+"""Protect campaign reproducibility and keep diagnostic runs out of rankings."""
 
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from mqtt_client_bench.bench import campaign, catalog, cli, envs, runtime
+from mqtt_client_bench.bench import campaign, catalog, cli, envs, runtime, sampling
 from mqtt_client_bench.report import data
 
 
@@ -125,6 +125,7 @@ class ResumeTests(unittest.TestCase):
             "environments": {"paho": {"packages": [["paho-mqtt", "2.1.0"]]}},
             "lock_digest": "lock",
             "harness": {"commit": "head", "source_digest": "source"},
+            "sampling": None,
         }
         for field in frozen:
             with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
@@ -170,6 +171,99 @@ class ResumeTests(unittest.TestCase):
             self.assertFalse(resumed.comparable)
 
 
+class SamplingTests(unittest.TestCase):
+    def test_async_recipes_do_not_request_incompatible_cpu_or_thread_options(self):
+        for mode in ("async-running", "async-all"):
+            flags = sampling.Sampling(mode, 1000, Path("/tmp/profiles")).flags()
+            self.assertIn("--async-aware", flags)
+            self.assertNotIn("--mode", flags)
+            self.assertNotIn("--all-threads", flags)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(sampling.subprocess, "Popen") as launch,
+        ):
+            capture = sampling.Capture(
+                Path("/python"),
+                42,
+                sampling.Sampling("async-all", 1000, Path(tmp)),
+                "run",
+                2,
+            )
+            argv = launch.call_args.args[0]
+            self.assertIn("--flamegraph", argv)
+            self.assertNotIn("--binary", argv)
+            capture.log.close()
+
+    def test_zero_stack_flamegraph_is_rejected(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(sampling.subprocess, "Popen") as launch,
+        ):
+            launch.return_value.wait.return_value = 0
+            capture = sampling.Capture(
+                Path("/python"),
+                42,
+                sampling.Sampling("async-all", 1000, Path(tmp)),
+                "run",
+                2,
+            )
+            capture.profile.write_text('const EMBEDDED_DATA = {"value": 0};')
+            with self.assertRaisesRegex(RuntimeError, "no stacks"):
+                capture.finish()
+
+    def test_sampling_forces_standard_campaign_to_be_noncomparable(self):
+        args = cli.build_parser().parse_args(
+            ["run", "--clients", "paho", "--sampling", "cpu"]
+        )
+        with patch.object(cli, "preflight"):
+            profile, capture = cli._sampling(
+                args, build(), catalog.PROFILES["standard"]
+            )
+        self.assertFalse(profile.comparable)
+        self.assertEqual(capture.mode, "cpu")
+
+    def test_unavailable_profiler_or_invalid_rate_is_explicit_failure(self):
+        args = cli.build_parser().parse_args(
+            ["run", "--clients", "paho", "--sampling", "cpu", "--sampling-rate", "-1"]
+        )
+        with patch.object(cli, "preflight"):
+            with self.assertRaises(ValueError):
+                cli._sampling(args, build(), catalog.PROFILES["standard"])
+        with self.assertRaisesRegex(ValueError, "3.15"):
+            cli._sampling(args, build("3.14.8"), catalog.PROFILES["standard"])
+
+    def test_timeout_terminates_and_reaps_profiler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Mock()
+            proc.wait.side_effect = [subprocess.TimeoutExpired(["profiler"], 1), 0]
+            proc.poll.return_value = None
+            with patch.object(sampling.subprocess, "Popen", return_value=proc):
+                capture = sampling.Capture(
+                    Path("/python"),
+                    42,
+                    sampling.Sampling("cpu", 1000, Path(tmp)),
+                    "run",
+                    1,
+                )
+                with self.assertRaisesRegex(RuntimeError, "deadline"):
+                    capture.finish(timeout=1)
+            proc.terminate.assert_called_once()
+            self.assertTrue(capture.log.closed)
+
+    def test_empty_or_failed_capture_is_never_successful(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Mock()
+            proc.wait.return_value = 0
+            with patch.object(sampling.subprocess, "Popen", return_value=proc):
+                capture = sampling.Capture(
+                    Path("/python"),
+                    42,
+                    sampling.Sampling("cpu", 1000, Path(tmp)),
+                    "run",
+                    1,
+                )
+                with self.assertRaisesRegex(RuntimeError, "failed"):
+                    capture.finish()
 
 
 class ReportRuntimeTests(unittest.TestCase):
@@ -193,6 +287,14 @@ class ReportRuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "mixes Python"):
                 data.load_campaign(root)
 
+    def test_instrumentation_cannot_be_published_even_if_profile_says_comparable(self):
+        profile = catalog.PROFILES["standard"].__dict__
+        for manifest, docs in (
+            ({"profile": profile, "sampling": {"mode": "cpu"}}, {}),
+            ({"profile": profile}, {"paho": {"runs": [{"flags": ["instrumented"]}]}}),
+        ):
+            result = data.Campaign(Path("."), manifest, docs, {}, [], [])
+            self.assertFalse(result.comparable)
 
 
 if __name__ == "__main__":

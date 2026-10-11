@@ -18,6 +18,7 @@ from typing import Iterator, Optional
 from mqtt_client_bench import broker
 from mqtt_client_bench.bench import cpus, envs, peer, procstat
 from mqtt_client_bench.bench.runtime import Runtime
+from mqtt_client_bench.bench.sampling import Sampling
 from mqtt_client_bench.bench.catalog import Profile
 from mqtt_client_bench.bench.runner import (
     DEFAULT_SUB_OFFER,
@@ -95,9 +96,10 @@ def open_session(
     *,
     measure_ceiling: bool = True,
     runtime: Optional[Runtime] = None,
+    sampling: Optional[Sampling] = None,
     clients: Optional[list] = None,
 ) -> Iterator[tuple]:
-    roles = list(ROLES)
+    roles = [*ROLES, "profiler"] if sampling is not None else list(ROLES)
     cpusets = cpus.allocate_cpuset(roles, strict=profile.comparable)
     meta = broker.broker_up(cpuset=cpusets["broker"])
     cpus.pin_current_process(cpusets["orch"])
@@ -114,6 +116,7 @@ def open_session(
                 sub_offer=DEFAULT_SUB_OFFER,
                 scratch=Path(scratch),
                 runtime=runtime,
+                sampling=sampling,
             )
             info = {
                 "host": host_info(),

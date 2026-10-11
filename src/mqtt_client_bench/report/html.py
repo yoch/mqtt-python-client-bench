@@ -7,7 +7,13 @@ from html import escape
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
 
-from mqtt_client_bench.bench.checks import CHECK_DOCS, FLAG_DOCS, INVALID, NOT_SUSTAINED, VALID
+from mqtt_client_bench.bench.checks import (
+    CHECK_DOCS,
+    FLAG_DOCS,
+    INVALID,
+    NOT_SUSTAINED,
+    VALID,
+)
 from mqtt_client_bench.report.data import Campaign, Cell
 from mqtt_client_bench.report.views import METRICS
 
@@ -15,7 +21,11 @@ STYLE = Path(__file__).with_name("style.css")
 # Versioned so a browser or the Pages CDN never pairs new markup with an old sheet.
 STYLE_HREF = "style.css?v=" + hashlib.sha256(STYLE.read_bytes()).hexdigest()[:10]
 
-NAV = (("index.html", "Results"), ("coverage.html", "Coverage"), ("methodology.html", "Methodology"))
+NAV = (
+    ("index.html", "Results"),
+    ("coverage.html", "Coverage"),
+    ("methodology.html", "Methodology"),
+)
 
 STATE_TEXT = {
     NOT_SUSTAINED: "not sustained",
@@ -29,25 +39,41 @@ def e(value: object) -> str:
     return escape(str(value), quote=True)
 
 
-def page(title: str, body: str, *, depth: int, campaign: Optional[Campaign], current: str = "") -> str:
+def page(
+    title: str,
+    body: str,
+    *,
+    depth: int,
+    campaign: Optional[Campaign],
+    current: str = "",
+) -> str:
     up = "../" * depth
     nav = "".join(
         f'<a href="{up}{href}"{" aria-current=page" if href == current else ""}>{e(text)}</a>'
         for href, text in (NAV if campaign is not None else NAV[:1])
     )
     banner = ""
-    if campaign is not None and not campaign.comparable:
+    if campaign is not None and campaign.manifest.get("sampling"):
+        capture = campaign.manifest["sampling"]
+        banner += (
+            '<p class="banner">Instrumented diagnostic campaign: Tachyon '
+            + e(capture.get("mode", "?"))
+            + ". Not comparable, not for performance rankings.</p>"
+        )
+    elif campaign is not None and not campaign.comparable:
         banner += (
             '<p class="banner">Development campaign ('
             + e((campaign.manifest.get("profile") or {}).get("name", "?"))
             + " profile): short windows on an unqualified host. Not comparable, not for publication.</p>"
         )
     if campaign is not None and len(campaign.hosts()) > 1:
-        banner += '<p class="banner">This campaign spans several machines: ' + e(", ".join(campaign.hosts())) + ".</p>"
-    if campaign is not None and campaign.done_runs() < campaign.expected_runs():
         banner += (
-            f'<p class="banner">Incomplete campaign: {campaign.done_runs()} of {campaign.expected_runs()} runs.</p>'
+            '<p class="banner">This campaign spans several machines: '
+            + e(", ".join(campaign.hosts()))
+            + ".</p>"
         )
+    if campaign is not None and campaign.done_runs() < campaign.expected_runs():
+        banner += f'<p class="banner">Incomplete campaign: {campaign.done_runs()} of {campaign.expected_runs()} runs.</p>'
     foot = f"Campaign {e(campaign.name)}" if campaign else "No campaign"
     return f"""<!doctype html>
 <html lang="en">

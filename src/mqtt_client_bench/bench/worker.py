@@ -324,6 +324,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     with open(args.config, "r", encoding="utf-8") as fh:
         cfg = json.load(fh)
+    if cfg.get("sampling"):
+        from mqtt_client_bench.bench.sampling import authorize_parent
+        authorize_parent()
     identity = adapter_identity(cfg["client"])
     shape = drive_shape(cfg["client"])
     try:
