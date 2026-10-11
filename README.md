@@ -35,6 +35,14 @@ library lacks (MQTT 5 for amqtt, MQTT 3.1.1 for aiomqtt3) is refused, never
 approximated; refused pairs appear as `unsupported` in the report's coverage
 section.
 
+## Python versions and reproducible campaigns
+
+Select Python 3.12–3.15 with `envs --sync --python VERSION` and use the same
+`--python` for `run` or `campaign`. Environments are isolated by actual build
+and client. Campaign resumes freeze interpreter, dependencies, lockfile and
+harness identity. See [RUNTIMES.md](RUNTIMES.md) for migration, commands and
+JIT/free-threaded experiments.
+
 ## What a run measures
 
 Each run has three parties, each in its own process and pinned to its own
@@ -138,7 +146,7 @@ Flags qualify a valid run without invalidating it:
 ## Quick start
 
 ```bash
-# One lockfile, one environment per client under .venvs/<extra>
+# One lockfile, one environment per client under .venvs/<build-key>/<extra>
 uv sync --extra dev
 PYTHONPATH=src python -m mqtt_client_bench.run envs --sync
 

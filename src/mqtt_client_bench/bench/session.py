@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import platform
@@ -16,6 +17,7 @@ from typing import Iterator, Optional
 
 from mqtt_client_bench import broker
 from mqtt_client_bench.bench import cpus, envs, peer, procstat
+from mqtt_client_bench.bench.runtime import Runtime
 from mqtt_client_bench.bench.catalog import Profile
 from mqtt_client_bench.bench.runner import (
     DEFAULT_SUB_OFFER,
@@ -54,7 +56,13 @@ def host_info() -> dict:
 def harness_revision() -> dict:
     def git(*args: str) -> Optional[str]:
         try:
-            out = subprocess.run(["git", *args], cwd=PROJECT_ROOT, capture_output=True, text=True, check=False)
+            out = subprocess.run(
+                ["git", *args],
+                cwd=PROJECT_ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         except FileNotFoundError:
             return None
         return out.stdout.strip() if out.returncode == 0 else None
@@ -63,12 +71,34 @@ def harness_revision() -> dict:
         "commit": git("rev-parse", "HEAD"),
         "dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
         "peer_digest": peer.source_digest(),
+        "source_digest": source_digest(),
     }
 
 
+def source_digest() -> str:
+    digest = hashlib.sha256()
+    paths = [
+        *sorted((PROJECT_ROOT / "src").rglob("*.py")),
+        PROJECT_ROOT / "peer/mqtt_peer.c",
+        PROJECT_ROOT / "pyproject.toml",
+    ]
+    for path in paths:
+        digest.update(str(path.relative_to(PROJECT_ROOT)).encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
 @contextlib.contextmanager
-def open_session(profile: Profile, *, measure_ceiling: bool = True) -> Iterator[tuple]:
-    cpusets = cpus.allocate_cpuset(list(ROLES), strict=profile.comparable)
+def open_session(
+    profile: Profile,
+    *,
+    measure_ceiling: bool = True,
+    runtime: Optional[Runtime] = None,
+    clients: Optional[list] = None,
+) -> Iterator[tuple]:
+    roles = list(ROLES)
+    cpusets = cpus.allocate_cpuset(roles, strict=profile.comparable)
     meta = broker.broker_up(cpuset=cpusets["broker"])
     cpus.pin_current_process(cpusets["orch"])
     peer.ensure_built()
@@ -83,6 +113,7 @@ def open_session(profile: Profile, *, measure_ceiling: bool = True) -> Iterator[
                 broker_cgroup=cpus.container_cgroup_path(meta["container_name"]),
                 sub_offer=DEFAULT_SUB_OFFER,
                 scratch=Path(scratch),
+                runtime=runtime,
             )
             info = {
                 "host": host_info(),
@@ -95,7 +126,9 @@ def open_session(profile: Profile, *, measure_ceiling: bool = True) -> Iterator[
                 },
                 "cpusets": cpusets,
             }
-            info["harness_cost"] = harness_floor(cpusets.get("sut"))
+            info["harness_cost"] = harness_floor(
+                cpusets.get("sut"), runtime=runtime, clients=clients
+            )
             if measure_ceiling:
                 ceiling = peer_ceiling(ctx)
                 info["ceiling"] = ceiling
@@ -107,13 +140,25 @@ def open_session(profile: Profile, *, measure_ceiling: bool = True) -> Iterator[
         probe.close()
 
 
-def harness_floor(cpuset: Optional[str]) -> dict:
+def harness_floor(
+    cpuset: Optional[str],
+    *,
+    runtime: Optional[Runtime] = None,
+    clients: Optional[list] = None,
+) -> dict:
     """Harness ns/message per drive shape and the worker's RSS floor.
 
     Measured on the client cores with a client environment's interpreter, so
     it is the floor every client's figures stand on in this very session.
     """
-    python = next((str(envs.env_python(c)) for c in envs.CLIENT_EXTRAS if envs.env_ready(c)), sys.executable)
+    python = next(
+        (
+            str(envs.env_python(c, runtime))
+            for c in (clients or envs.CLIENT_EXTRAS)
+            if envs.env_ready(c, runtime)
+        ),
+        str(runtime.executable) if runtime else sys.executable,
+    )
     code = (
         "import json; from mqtt_client_bench.bench import harness_cost as h;"
         "print(json.dumps({'ns_per_msg': h.measure(), 'baseline_rss_kb': h.baseline_rss_kb(),"
@@ -121,7 +166,13 @@ def harness_floor(cpuset: Optional[str]) -> dict:
     )
     env = dict(os.environ, PYTHONPATH=str(PROJECT_ROOT / "src"))
     try:
-        out = subprocess.run(pinned(cpuset, [python, "-c", code]), capture_output=True, text=True, env=env, check=True)
+        out = subprocess.run(
+            pinned(cpuset, [python, "-c", code]),
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
+        )
         return json.loads(out.stdout.strip().splitlines()[-1])
     except (OSError, subprocess.CalledProcessError, ValueError) as exc:
         return {"error": str(exc)}

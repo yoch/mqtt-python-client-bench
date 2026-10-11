@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import sys
+import subprocess
 from pathlib import Path
 from typing import List, Optional
 
 from mqtt_client_bench import report
-from mqtt_client_bench.bench import campaign, catalog, envs, harness_cost
+from mqtt_client_bench.bench import campaign, catalog, envs
+from mqtt_client_bench.bench import runtime as runtimes
 from mqtt_client_bench.bench.runner import run_once
-from mqtt_client_bench.bench.session import open_session
+from mqtt_client_bench.bench.session import open_session, harness_floor
 
 
 def _split(value: Optional[str]) -> List[str]:
@@ -20,13 +23,29 @@ def _split(value: Optional[str]) -> List[str]:
 
 def cmd_envs(args) -> int:
     clients = _split(args.clients) or list(envs.CLIENT_EXTRAS)
+    runtime = runtimes.resolve(args.python)
+    print(f"Python: {runtime.key}")
+    failed = False
     if args.sync:
-        envs.sync_envs(clients, frozen=not args.unfrozen)
+        for client in clients:
+            try:
+                envs.sync_env(client, frozen=not args.unfrozen, runtime=runtime)
+            except (OSError, ValueError, RuntimeError) as exc:
+                print(f"{client}: installation failed: {exc}", file=sys.stderr)
+                failed = True
+            except subprocess.CalledProcessError as exc:
+                print(
+                    f"{client}: installation failed (exit {exc.returncode})",
+                    file=sys.stderr,
+                )
+                failed = True
     for client in clients:
-        ready = envs.env_ready(client)
-        version = envs.installed_version(client) if ready else None
+        ready = envs.env_ready(client, runtime)
+        version = envs.installed_version(client, runtime) if ready else None
         print(f"{client:10s} {'ready' if ready else 'missing':8s} {version or ''}")
-    return 0
+    return int(failed)
+
+
 
 
 def cmd_list(args) -> int:
@@ -45,9 +64,16 @@ def cmd_list(args) -> int:
 
 def cmd_campaign(args) -> int:
     if args.resume:
-        given = [f"--{k.replace('_', '-')}" for k in ("profile", "points", "suites", "clients", "runs") if getattr(args, k) is not None]
+        given = [
+            f"--{k.replace('_', '-')}"
+            for k in ("profile", "points", "suites", "clients", "runs")
+            if getattr(args, k) is not None
+        ]
         if given:
-            print(f"--resume reads its settings from the manifest; drop {', '.join(given)}", file=sys.stderr)
+            print(
+                f"--resume reads its settings from the manifest; drop {', '.join(given)}",
+                file=sys.stderr,
+            )
             return 2
         root = Path(args.resume)
         try:
@@ -57,18 +83,36 @@ def cmd_campaign(args) -> int:
             return 2
     else:
         profile = catalog.PROFILES[args.profile or "standard"]
-        points = catalog.resolve(_split(args.points), _split(args.suites) or ["core", "v5"])
+        points = catalog.resolve(
+            _split(args.points), _split(args.suites) or ["core", "v5"]
+        )
         clients = _split(args.clients) or list(envs.CLIENT_EXTRAS)
         runs = args.runs or profile.runs
         name = campaign.campaign_id() + ("" if profile.comparable else f"-{profile.name}")
         root = Path(args.output_dir) / name
-    missing = [c for c in clients if not envs.env_ready(c)]
+    recorded = campaign.Store(root).manifest() if args.resume else None
+    selector = args.python or ((recorded or {}).get("runtime") or {}).get("selector")
+    runtime = runtimes.resolve(selector)
+    missing = [c for c in clients if not envs.env_ready(c, runtime)]
     if missing:
-        print(f"no environment for {', '.join(missing)}; run: envs --sync --clients {','.join(missing)}", file=sys.stderr)
+        print(
+            f"no environment for {', '.join(missing)}; run: envs --sync --python {shlex.quote(str(runtime.executable))} --clients {','.join(missing)}",
+            file=sys.stderr,
+        )
         return 2
     order = campaign.plan(points, clients, runs)
-    print(f"{root}: {len(order)} runs, ~{campaign.estimate_s(order, profile) / 60:.0f} min")
-    store = campaign.run_campaign(points, clients, profile, root, runs=runs, describe=describe)
+    print(
+        f"{root}: {len(order)} runs, ~{campaign.estimate_s(order, profile) / 60:.0f} min"
+    )
+    store = campaign.run_campaign(
+        points,
+        clients,
+        profile,
+        root,
+        runs=runs,
+        describe=describe,
+        runtime=runtime,
+    )
     statuses: dict = {}
     for doc in store.docs.values():
         for r in doc["runs"]:
@@ -76,7 +120,8 @@ def cmd_campaign(args) -> int:
     print(f"done: {statuses}")
     for line in campaign.noise_summary(store.docs):
         print(line)
-    return 0
+    return int(any(store.attempts(key)[-1]["status"] == "invalid"
+                   for key in order if store.attempts(key)))
 
 
 def describe(record: dict) -> str:
@@ -114,15 +159,32 @@ def cmd_run(args) -> int:
     profile = catalog.PROFILES[args.profile]
     points = catalog.resolve(_split(args.points), _split(args.suites) or None)
     clients = _split(args.clients)
-    missing = [c for c in clients if not envs.env_ready(c)]
+    runtime = runtimes.resolve(args.python)
+    missing = [c for c in clients if not envs.env_ready(c, runtime)]
     if missing:
-        print(f"no environment for {', '.join(missing)}; run: envs --sync --clients {','.join(missing)}", file=sys.stderr)
+        print(
+            f"no environment for {', '.join(missing)}; run: envs --sync --python {shlex.quote(str(runtime.executable))} --clients {','.join(missing)}",
+            file=sys.stderr,
+        )
         return 2
     records = []
-    with open_session(profile, measure_ceiling=not args.no_ceiling) as (ctx, info):
+    environments = envs.snapshot(clients, runtime)
+    with open_session(
+        profile,
+        measure_ceiling=not args.no_ceiling,
+        runtime=runtime,
+        clients=clients,
+    ) as (ctx, info):
+        info.update(
+            runtime=runtime.as_dict(),
+            environments=environments,
+            lock_digest=runtimes.lock_digest(),
+        )
         if info.get("ceiling"):
             c = info["ceiling"]
-            print(f"broker ceiling (C->C): {c.get('msgs_per_s', 0):.0f} msg/s; receive offer {ctx.sub_offer}/s")
+            print(
+                f"broker ceiling (C->C): {c.get('msgs_per_s', 0):.0f} msg/s; receive offer {ctx.sub_offer}/s"
+            )
         for point in points:
             for client in clients:
                 for i in range(args.runs or profile.runs):
@@ -132,16 +194,23 @@ def cmd_run(args) -> int:
     if args.output:
         out = Path(args.output)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({"session": info, "runs": records}, indent=1), encoding="utf-8")
+        out.write_text(
+            json.dumps({"session": info, "runs": records}, indent=1), encoding="utf-8"
+        )
     return 0 if all(r["status"] != "invalid" for r in records) else 1
 
 
 def cmd_harness_cost(args) -> int:
-    costs = harness_cost.measure()
+    floor = harness_floor(None, runtime=runtimes.resolve(args.python))
+    if "error" in floor:
+        raise RuntimeError(floor["error"])
+    costs = floor["ns_per_msg"]
     for shape, ns in costs.items():
         print(f"{shape:16s} {ns:7.1f} ns/msg")
-    print(f"budget {harness_cost.BUDGET_NS} ns/msg; worker RSS floor {harness_cost.baseline_rss_kb()} KiB")
-    return 0 if all(ns <= harness_cost.BUDGET_NS for ns in costs.values()) else 1
+    print(
+        f"budget {floor['budget_ns']} ns/msg; worker RSS floor {floor['baseline_rss_kb']} KiB"
+    )
+    return 0 if all(ns <= floor["budget_ns"] for ns in costs.values()) else 1
 
 
 def cmd_report(args) -> int:
@@ -155,13 +224,20 @@ def cmd_report(args) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="mqtt-client-bench", description="MQTT client benchmark, v2 core.")
+    parser = argparse.ArgumentParser(
+        prog="mqtt-client-bench", description="MQTT client benchmark, v2 core."
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("envs", help="show or build the per-client uv environments")
     p.add_argument("--clients")
     p.add_argument("--sync", action="store_true")
-    p.add_argument("--unfrozen", action="store_true", help="allow uv to update the lock")
+    p.add_argument(
+        "--unfrozen", action="store_true", help="allow uv to update the lock"
+    )
+    p.add_argument(
+        "--python", help="Python version/build or executable (default: .python-version)"
+    )
     p.set_defaults(func=cmd_envs)
 
     p = sub.add_parser("list", help="list points and estimate a campaign's duration")
@@ -177,31 +253,58 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--suites")
     p.add_argument("--profile", default="smoke", choices=sorted(catalog.PROFILES))
     p.add_argument("--runs", type=int)
-    p.add_argument("--no-ceiling", action="store_true", help="skip the C->C ceiling measurement")
+    p.add_argument(
+        "--no-ceiling", action="store_true", help="skip the C->C ceiling measurement"
+    )
     p.add_argument("--output")
+    _runtime_options(p)
     p.set_defaults(func=cmd_run)
 
-    p = sub.add_parser("campaign", help="every point x client x run, interleaved and resumable")
+    p = sub.add_parser(
+        "campaign", help="every point x client x run, interleaved and resumable"
+    )
     p.add_argument("--clients", help="default: every client")
     p.add_argument("--points")
     p.add_argument("--suites", help="default: core,v5")
-    p.add_argument("--profile", choices=sorted(catalog.PROFILES), help="default: standard")
+    p.add_argument(
+        "--profile", choices=sorted(catalog.PROFILES), help="default: standard"
+    )
     p.add_argument("--runs", type=int)
     p.add_argument("--output-dir", default=str(campaign.RESULTS_DIR))
-    p.add_argument("--resume", help="campaign directory to continue, with the settings it was started with")
+    p.add_argument(
+        "--resume",
+        help="campaign directory to continue, with the settings it was started with",
+    )
+    _runtime_options(p)
     p.set_defaults(func=cmd_campaign)
 
     p = sub.add_parser("harness-cost", help="harness ns/message against a null client")
+    p.add_argument(
+        "--python", help="Python version/build or executable (default: .python-version)"
+    )
     p.set_defaults(func=cmd_harness_cost)
 
     p = sub.add_parser("report", help="build the static site from a campaign")
     p.add_argument("--input", default=str(campaign.RESULTS_DIR))
     p.add_argument("--output", default="site")
-    p.add_argument("--campaign", help="build this campaign, even a development one (default: newest comparable)")
+    p.add_argument(
+        "--campaign",
+        help="build this campaign, even a development one (default: newest comparable)",
+    )
     p.set_defaults(func=cmd_report)
     return parser
 
 
+def _runtime_options(parser) -> None:
+    parser.add_argument(
+        "--python", help="Python version/build or executable (default: .python-version)"
+    )
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+        print(exc, file=sys.stderr)
+        return 2

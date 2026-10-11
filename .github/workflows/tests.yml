@@ -8,12 +8,16 @@ on:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install every client but aiomqtt3
         # aiomqtt3 shares aiomqtt's import name; the adapter tests read its
@@ -24,3 +28,56 @@ jobs:
 
       - name: Run unit tests
         run: PYTHONPATH=src uv run --frozen --no-sync python -m unittest discover -s tests -v
+
+  isolated-python315:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [paho, gmqtt, aiomqtt, aiomqtt3, amqtt, awscrt, zmqtt, mqttium]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.15"
+      - name: Install this client's environment
+        env:
+          CLIENT: ${{ matrix.client }}
+        run: PYTHONPATH=src uv run --no-project python -m mqtt_client_bench.run envs --sync --python 3.15 --clients "$CLIENT"
+      - name: Verify interpreter and import the adapter
+        env:
+          CLIENT: ${{ matrix.client }}
+        run: |
+          PYTHONPATH=src uv run --no-project python - <<'PY'
+          import os, subprocess
+          from mqtt_client_bench.bench import envs, runtime
+          selected = runtime.resolve("3.15")
+          envs.snapshot([os.environ["CLIENT"]], selected)
+          subprocess.run([str(envs.env_python(os.environ["CLIENT"], selected)), "-c",
+                          "from mqtt_client_bench.adapters.registry import get_adapter_class; "
+                          f"get_adapter_class({os.environ['CLIENT']!r})"], check=True)
+          PY
+
+  mqtt-python315:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.15"
+      - name: Install all isolated client environments
+        run: PYTHONPATH=src uv run --no-project python -m mqtt_client_bench.run envs --sync --python 3.15
+      - name: Live MQTT 3.1.1, MQTT 5 and TLS smoke
+        run: >-
+          PYTHONPATH=src uv run --no-project python -m mqtt_client_bench.run run --python 3.15
+          --clients paho,gmqtt,aiomqtt,aiomqtt3,amqtt,awscrt,zmqtt,mqttium
+          --points pub_qos1_fixed,pub_qos1_fixed_v5,idle_connect_tls
+          --profile smoke --no-ceiling --output /tmp/python315-smoke.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: python315-validation
+          path: |
+            /tmp/python315-*.json
+          if-no-files-found: error
