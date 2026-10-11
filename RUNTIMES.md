@@ -27,6 +27,14 @@ package versions/provenance, lockfile digest and harness source/revision. A
 resume refuses changes before starting the broker or appending evidence.
 Older campaigns without those identities remain readable but cannot be resumed
 safely; start a new campaign. Reports refuse mixed Python versions/builds.
+They also refuse mixed actual GIL states within one client/scenario's runs;
+different native clients may legitimately activate the GIL differently.
+An unrelated historical or diagnostic campaign cannot block a selected report,
+but the selected campaign still undergoes all runtime checks.
+
+The manifest is saved atomically before any result, including an unsupported-only
+campaign. Existing results without a manifest are refused because their original
+runtime and settings cannot be verified; preserve them and start a new campaign.
 
 ## Interpreter experiments
 

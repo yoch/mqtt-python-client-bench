@@ -183,16 +183,25 @@ def load_campaign(path: Path) -> Campaign:
             docs[doc["client"]] = doc
     # A cell cannot combine different runtimes, even in an explicitly selected report.
     builds = set()
+    gil_states: dict = {}
     for doc in docs.values():
         for run in doc.get("runs", []):
             worker = run.get("worker") or {}
             identity = worker.get("runtime")
             if identity:
+                if "gil_enabled" in identity:
+                    cell = (doc["client"], (run.get("point") or {}).get("name"))
+                    gil_states.setdefault(cell, set()).add(identity["gil_enabled"])
                 # GIL state can differ legitimately across native clients; build identity cannot.
                 identity = {k: v for k, v in identity.items() if k != "gil_enabled"}
                 builds.add(json.dumps(identity, sort_keys=True))
             elif worker.get("python"):
                 builds.add(worker["python"])
+    for (client, point), states in gil_states.items():
+        if len(states) > 1:
+            raise ValueError(
+                f"{path}: {client}/{point} mixes enabled and disabled GIL states; split the runs into separate campaigns"
+            )
     if len(builds) > 1:
         raise ValueError(
             f"{path}: campaign mixes Python versions or builds; split the runs into separate campaigns"
@@ -252,12 +261,23 @@ def select_campaign(root: Path, name: Optional[str] = None) -> Tuple[Optional[Ca
     skipped: List[str] = []
     chosen: Optional[Campaign] = None
     for path in reversed(find_campaigns(root)):
-        c = load_campaign(path)
+        manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
+        campaign_name = manifest.get("campaign", path.name)
         if name is not None:
-            if c.name == name or path.name == name:
-                chosen = c
+            if campaign_name == name or path.name == name:
+                chosen = load_campaign(path)
             continue
-        if chosen is None and c.comparable:
+        # Validate only candidates for publication. Unrelated historical or
+        # diagnostic data must not prevent rendering a sound selected campaign.
+        if (
+            chosen is not None
+            or not (manifest.get("profile") or {}).get("comparable")
+            or manifest.get("sampling")
+        ):
+            skipped.append(campaign_name)
+            continue
+        c = load_campaign(path)
+        if c.comparable:
             chosen = c
         else:
             skipped.append(c.name)
