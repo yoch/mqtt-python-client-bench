@@ -27,6 +27,9 @@ package versions/provenance, lockfile digest and harness source/revision. A
 resume refuses changes before starting the broker or appending evidence.
 Older campaigns without those identities remain readable but cannot be resumed
 safely; start a new campaign. Reports refuse mixed Python versions/builds.
+Actual GIL state must also remain consistent within each client/scenario's
+repetitions. See [runtime provenance and resume rules](RUNTIMES.md) for handling
+incomplete manifests and unrelated historical campaigns.
 
 ## Capture the client worker
 

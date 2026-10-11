@@ -103,6 +103,45 @@ class RuntimeTests(unittest.TestCase):
 
 
 class ResumeTests(unittest.TestCase):
+    def test_orphan_results_are_refused_before_environment_or_broker_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "paho.json"
+            path.write_text(json.dumps({"client": "paho", "runs": []}))
+            before = path.read_bytes()
+            with patch.object(envs, "snapshot") as snapshot, patch.object(campaign, "open_session") as session:
+                with self.assertRaisesRegex(ValueError, "no manifest"):
+                    campaign.run_campaign(catalog.resolve(["pub_qos1_fixed"]), ["paho"], catalog.PROFILES["smoke"], root, runtime=build())
+                snapshot.assert_not_called()
+                session.assert_not_called()
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse((root / "manifest.json").exists())
+
+    def test_unsupported_only_campaign_keeps_a_resumable_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            selected = build()
+            points = catalog.resolve(["pub_qos1_fixed_v5"])
+            profile = catalog.PROFILES["smoke"]
+            with (
+                patch.object(envs, "snapshot", return_value={}),
+                patch.object(envs, "installed_version", return_value="1.0"),
+                patch.object(campaign, "harness_revision", return_value={}),
+                patch.object(campaign, "lock_digest", return_value="lock"),
+                patch.object(campaign, "open_session") as session,
+            ):
+                store = campaign.run_campaign(points, ["amqtt"], profile, root, runtime=selected)
+                manifest = store.manifest()
+                self.assertIsNotNone(manifest)
+                self.assertEqual(manifest["runtime"], selected.as_dict())
+                self.assertEqual(manifest["sessions"], [])
+                self.assertIn("finished_at", manifest)
+                self.assertEqual(campaign.resume_settings(root)[2], ["amqtt"])
+                before = (root / "manifest.json").read_bytes()
+                campaign.run_campaign(points, ["amqtt"], profile, root, runtime=selected)
+                self.assertEqual((root / "manifest.json").read_bytes(), before)
+                session.assert_not_called()
+
     def test_successful_retry_does_not_fail_the_campaign_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = campaign.Store(Path(tmp))
@@ -267,6 +306,51 @@ class SamplingTests(unittest.TestCase):
 
 
 class ReportRuntimeTests(unittest.TestCase):
+    def test_gil_changes_within_one_cell_are_rejected(self):
+        from tests.test_report import POINTS, _run, _write
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = [_run(POINTS[0], i) for i in range(2)]
+            for run, enabled in zip(runs, (False, True)):
+                run["worker"]["runtime"] = build(build_gil_disabled=True, gil_enabled=enabled).identity
+            root = _write(Path(tmp), "mixed", {"paho": (runs, [])})
+            with self.assertRaisesRegex(ValueError, "GIL states"):
+                data.load_campaign(root)
+
+    def test_different_native_clients_may_have_different_gil_states(self):
+        from tests.test_report import POINTS, _run, _write
+
+        with tempfile.TemporaryDirectory() as tmp:
+            docs = {}
+            for client, enabled in (("paho", False), ("awscrt", True)):
+                run = _run(POINTS[0], 0)
+                run["worker"]["runtime"] = build(build_gil_disabled=True, gil_enabled=enabled).identity
+                docs[client] = ([run], [])
+            root = _write(Path(tmp), "native", docs)
+            self.assertEqual(len(data.load_campaign(root).clients), 2)
+
+    def test_unrelated_mixed_campaign_does_not_block_selected_report(self):
+        from tests.test_report import POINTS, _campaign, _run, _write
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _campaign(root, "b-good")
+            runs = [_run(POINTS[0], i) for i in range(2)]
+            for run, version in zip(runs, ("3.14.8", "3.15.0")):
+                run["worker"]["python"] = version
+            _write(root, "a-bad-history", {"paho": (runs, [])})
+            _write(root, "c-bad-diagnostic", {"paho": (runs, [])}, comparable=False)
+            chosen, skipped = data.select_campaign(root)
+            self.assertEqual(chosen.name, "b-good")
+            self.assertEqual(skipped, ["c-bad-diagnostic", "a-bad-history"])
+            chosen, _ = data.select_campaign(root, "b-good")
+            self.assertEqual(chosen.name, "b-good")
+            with self.assertRaisesRegex(ValueError, "mixes Python"):
+                data.select_campaign(root, "c-bad-diagnostic")
+            _write(root, "d-bad-comparable", {"paho": (runs, [])})
+            with self.assertRaisesRegex(ValueError, "mixes Python"):
+                data.select_campaign(root)
+
     def test_mixed_python_versions_are_refused_before_aggregation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

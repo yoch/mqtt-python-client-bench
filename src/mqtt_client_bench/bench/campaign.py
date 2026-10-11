@@ -74,9 +74,12 @@ class Store:
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
     def write_manifest(self, manifest: dict) -> None:
-        (self.root / "manifest.json").write_text(
+        path = self.root / "manifest.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
             json.dumps(manifest, indent=1) + "\n", encoding="utf-8"
         )
+        tmp.replace(path)
 
     def doc(self, client: str) -> dict:
         if client not in self.docs:
@@ -212,6 +215,10 @@ def run_campaign(
     runs = runs or profile.runs
     store = Store(root, runtime)
     existing = store.manifest()
+    if existing is None and store.docs:
+        raise ValueError(
+            f"{root}: existing results have no manifest; cannot verify their runtime or settings"
+        )
     if existing is not None:
         mismatches = _mismatches(existing, profile, points, clients, runs)
         if mismatches:
@@ -235,6 +242,20 @@ def run_campaign(
             raise ValueError(
                 f"{root}: refusing to resume with changed or unrecorded {', '.join(changed)}; start a new campaign"
             )
+    manifest = existing or {
+        "schema": SCHEMA,
+        "campaign": root.name,
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "profile": profile.__dict__,
+        "points": [p.as_dict() for p in points],
+        "clients": {c: envs.installed_version(c, runtime) for c in clients},
+        "runs_per_point": runs,
+        "sessions": [],
+        **frozen,
+    }
+    if existing is None:
+        # Freeze provenance before writing even an unsupported-only result set.
+        store.write_manifest(manifest)
     by_name = {p.name: p for p in points}
     for point in points:
         for client in clients:
@@ -246,22 +267,14 @@ def run_campaign(
 
     order = plan(points, clients, runs)
     if all(store.done(k) for k in order):
+        if "finished_at" not in manifest:
+            manifest["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            store.write_manifest(manifest)
         return store
     with open_session(profile, runtime=runtime, sampling=sampling, clients=clients) as (
         ctx,
         info,
     ):
-        manifest = store.manifest() or {
-            "schema": SCHEMA,
-            "campaign": root.name,
-            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "profile": profile.__dict__,
-            "points": [p.as_dict() for p in points],
-            "clients": {c: envs.installed_version(c, runtime) for c in clients},
-            "runs_per_point": runs,
-            "sessions": [],
-            **frozen,
-        }
         manifest["sessions"].append(info)
         store.write_manifest(manifest)
         c = info.get("ceiling") or {}
