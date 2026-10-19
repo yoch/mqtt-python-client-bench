@@ -14,9 +14,11 @@ from mqtt_client_bench.bench.checks import (
     VALID,
     tolerance,
 )
+from mqtt_client_bench.bench.envs import CLIENT_DISTRIBUTIONS
 from mqtt_client_bench.report.chart import latency_chart
 from mqtt_client_bench.report.data import Campaign
 from mqtt_client_bench.report.html import (
+    SITE_NAME,
     STATE_TEXT,
     cell_html,
     client_link,
@@ -55,6 +57,22 @@ COLORS = {
     "mqttium": "#e377c2",
 }
 FALLBACK_COLORS = ("#7f7f7f", "#bcbd22", "#17becf", "#aec7e8")
+
+
+def libraries(clients: List[str]) -> List[str]:
+    """Distribution names of the measured clients, in campaign order, once each
+    (aiomqtt v2 and v3 are one distribution)."""
+    names: List[str] = []
+    for client in clients:
+        name = CLIENT_DISTRIBUTIONS.get(client, client)
+        if name not in names:
+            names.append(name)
+    return names
+
+
+def site_title(clients: List[str]) -> str:
+    libs = libraries(clients)
+    return f"{SITE_NAME}: {', '.join(libs)} – results" if libs else f"{SITE_NAME} – results"
 
 
 def client_colors(clients: List[str]) -> Dict[str, str]:
@@ -172,7 +190,16 @@ Tables sort best first; click a value to unfold the raw counts and checks of eac
 <nav class="toc"><ol>{"".join(toc)}</ol></nav>
 {"".join(sections)}
 {skipped_note}"""
-    return page("Results", body, depth=0, campaign=campaign, current="index.html")
+    libs = ", ".join(libraries(campaign.clients))
+    description = (
+        f"End-to-end benchmark of Python MQTT client libraries ({libs}) against a local "
+        "Mosquitto broker: message rates confirmed by the broker and a C peer, CPU and memory read from /proc, "
+        "and latency."
+    )
+    return page(
+        site_title(campaign.clients), body, path="index.html", campaign=campaign, description=description,
+        current="index.html",
+    )
 
 
 def point_page(campaign: Campaign, point: dict) -> str:
@@ -213,7 +240,8 @@ def point_page(campaign: Campaign, point: dict) -> str:
 {_limitations_html(point_limitations(point["name"], campaign.clients))}
 {table(head, rows, "results")}
 {chart}"""
-    return page(point["name"], body, depth=1, campaign=campaign)
+    description = f"{point['question']} Python MQTT clients compared: {', '.join(libraries(campaign.clients))}."
+    return page(point["name"], body, path=f"point/{point['name']}.html", campaign=campaign, description=description)
 
 
 def client_page(campaign: Campaign, client: str) -> str:
@@ -269,7 +297,11 @@ def client_page(campaign: Campaign, client: str) -> str:
 {limitations_html}
 <h2>Every point</h2>
 {table(["point", "headline", "value", "CPU / msg", "peak RSS", "flags"], point_rows, "results")}"""
-    return page(client, body, depth=1, campaign=campaign)
+    description = (
+        f"Benchmark results of the {CLIENT_DISTRIBUTIONS.get(client, client)} Python MQTT client at every point: "
+        "message rates, CPU per message, peak memory and flags."
+    )
+    return page(client, body, path=f"client/{client}.html", campaign=campaign, description=description)
 
 
 def coverage_page(campaign: Campaign) -> str:
@@ -302,7 +334,10 @@ attempts the campaign ran again; “—” is a point the client's adapter decla
 {table(head, rows, "coverage")}
 <h2>Runs that did not count</h2>
 {listing}"""
-    return page("Coverage", body, depth=0, campaign=campaign, current="coverage.html")
+    description = "Which runs of the Python MQTT client benchmark were valid, not sustained, invalid, unsupported or not run."
+    return page(
+        "Coverage", body, path="coverage.html", campaign=campaign, description=description, current="coverage.html"
+    )
 
 
 def _dl(items) -> str:
@@ -382,11 +417,19 @@ libraries. A client that cannot hold the offer is reported as not sustained rath
 <h2>Raw data</h2>
 <p>Every run of this campaign, with its counts, checks and histograms, as the harness wrote it.</p>
 <ul>{downloads}</ul>"""
-    return page("Methodology", body, depth=0, campaign=campaign, current="methodology.html")
+    description = (
+        "How the Python MQTT client benchmark wires every point, the checks that decide whether a run is valid, "
+        "and the raw campaign data."
+    )
+    return page(
+        "Methodology", body, path="methodology.html", campaign=campaign, description=description,
+        current="methodology.html",
+    )
 
 
 def empty_page(skipped: List[str]) -> str:
     note = f"<p>Campaigns present but not publishable: {e(', '.join(skipped))}.</p>" if skipped else ""
     body = f"""<h1>No comparable campaign yet</h1>
 <p class="lede">The report publishes the newest campaign run with the standard profile on a qualified host.</p>{note}"""
-    return page("Results", body, depth=0, campaign=None, current="index.html")
+    description = "Comparative end-to-end benchmark of Python MQTT client libraries against a local Mosquitto broker."
+    return page(site_title([]), body, path="index.html", campaign=None, description=description, current="index.html")

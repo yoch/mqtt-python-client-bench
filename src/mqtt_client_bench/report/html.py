@@ -21,6 +21,13 @@ STYLE = Path(__file__).with_name("style.css")
 # Versioned so a browser or the Pages CDN never pairs new markup with an old sheet.
 STYLE_HREF = "style.css?v=" + hashlib.sha256(STYLE.read_bytes()).hexdigest()[:10]
 
+# Where the Pages workflow publishes the site; canonical links and the sitemap
+# are absolute so search engines index one URL per page.
+SITE_URL = "https://yoch.github.io/mqtt-python-client-bench/"
+REPO_URL = "https://github.com/yoch/mqtt-python-client-bench"
+SITE_NAME = "Python MQTT client benchmark"
+BRAND = "MQTT Python client bench"
+
 NAV = (
     ("index.html", "Results"),
     ("coverage.html", "Coverage"),
@@ -39,15 +46,25 @@ def e(value: object) -> str:
     return escape(str(value), quote=True)
 
 
+def page_url(path: str) -> str:
+    """Canonical URL of a site-relative page; the index is the site root."""
+    return SITE_URL if path == "index.html" else SITE_URL + path
+
+
 def page(
     title: str,
     body: str,
     *,
-    depth: int,
+    path: str,
     campaign: Optional[Campaign],
+    description: str,
     current: str = "",
 ) -> str:
-    up = "../" * depth
+    """One page at site-relative ``path``. The index's ``title`` is the whole
+    document title; every other page's gets the site name appended."""
+    up = "../" * path.count("/")
+    full_title = title if path == "index.html" else f"{title} · {SITE_NAME}"
+    url = page_url(path)
     nav = "".join(
         f'<a href="{up}{href}"{" aria-current=page" if href == current else ""}>{e(text)}</a>'
         for href, text in (NAV if campaign is not None else NAV[:1])
@@ -80,15 +97,23 @@ def page(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{e(title)} · MQTT Python client bench</title>
+<title>{e(full_title)}</title>
+<meta name="description" content="{e(description)}">
+<link rel="canonical" href="{e(url)}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="{e(BRAND)}">
+<meta property="og:title" content="{e(full_title)}">
+<meta property="og:description" content="{e(description)}">
+<meta property="og:url" content="{e(url)}">
 <link rel="stylesheet" href="{up}{STYLE_HREF}">
 </head>
 <body>
-<header><a class="brand" href="{up}index.html">MQTT Python client bench</a><nav>{nav}</nav></header>
+<header><a class="brand" href="{up}index.html">{e(BRAND)}</a><nav>{nav}</nav></header>
 <main>
 {banner}{body}
 </main>
-<footer>{foot} · every figure is a count confirmed by the broker or the C peer, or a resource read from /proc.</footer>
+<footer>{foot} · every figure is a count confirmed by the broker or the C peer, or a resource read from /proc.
+· <a href="{REPO_URL}">Source on GitHub</a></footer>
 </body>
 </html>
 """
