@@ -15,6 +15,7 @@ from mqtt_client_bench.report.chart import latency_chart
 from mqtt_client_bench.adapters.registry import CLIENT_NAMES
 from mqtt_client_bench.bench.catalog import ALL_POINTS
 from mqtt_client_bench.report.data import load_campaign, select_campaign
+from mqtt_client_bench.report.html import REPO_URL, SITE_URL
 from mqtt_client_bench.report.views import LIMITATIONS, QUESTIONS, column_limitations, point_limitations
 
 POINTS = [
@@ -168,10 +169,40 @@ class ReportSiteTests(unittest.TestCase):
         self.assertTrue(pages)
         for page in pages:
             text = page.read_text(encoding="utf-8")
-            self.assertNotRegex(text, r"(src|href)=\"(https?:)?//", page.name)
+            self.assertNotRegex(text, r"src=\"(https?:)?//", page.name)
+            # The only absolute links are the page's own canonical URL and the source repository.
+            for href in re.findall(r'href="((?:https?:)?//[^"]*)"', text):
+                self.assertTrue(href.startswith(SITE_URL) or href == REPO_URL, f"{page.name} links to {href}")
             for href in re.findall(r'href="([^"#?]+)', text):
+                if href.startswith(("https://", "http://", "//")):
+                    continue
                 self.assertTrue((page.parent / href).resolve().exists(), f"{page.name} links to missing {href}")
         self.assertTrue((self.site / "data" / "manifest.json").exists())
+
+    def test_every_page_has_search_metadata_and_is_in_the_sitemap(self):
+        _campaign(self.results)
+        report.build(self.results, self.site)
+        sitemap = (self.site / "sitemap.xml").read_text(encoding="utf-8")
+        locs = re.findall(r"<loc>([^<]+)</loc>", sitemap)
+        pages = sorted(p.relative_to(self.site).as_posix() for p in self.site.rglob("*.html"))
+        self.assertEqual(sorted(locs), sorted(SITE_URL if p == "index.html" else SITE_URL + p for p in pages))
+        for rel in pages:
+            with self.subTest(page=rel):
+                text = self._html(rel)
+                url = SITE_URL if rel == "index.html" else SITE_URL + rel
+                self.assertIn(f'<link rel="canonical" href="{url}">', text)
+                self.assertIn(f'<meta property="og:url" content="{url}">', text)
+                title = re.search(r"<title>([^<]+)</title>", text).group(1)
+                self.assertIn(f'<meta property="og:title" content="{title}">', text)
+                description = re.search(r'<meta name="description" content="([^"]+)">', text).group(1)
+                self.assertIn(f'<meta property="og:description" content="{description}">', text)
+                self.assertIn(f'<a href="{REPO_URL}">Source on GitHub</a>', text)
+        self.assertIn("Python MQTT client benchmark: fast, slow", self._html("index.html"))
+
+    def test_placeholder_site_has_a_sitemap(self):
+        _campaign(self.results, "20260920T000000Z-smoke", comparable=False)
+        report.build(self.results, self.site)
+        self.assertEqual(re.findall(r"<loc>([^<]+)</loc>", (self.site / "sitemap.xml").read_text()), [SITE_URL])
 
     def test_tables_sort_best_first_in_the_metric_direction(self):
         _campaign(self.results)

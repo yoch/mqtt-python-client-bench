@@ -6,12 +6,12 @@ import json
 import shutil
 import re
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from mqtt_client_bench.paths import portable_path
 from mqtt_client_bench.report import pages
 from mqtt_client_bench.report.data import select_campaign
-from mqtt_client_bench.report.html import STYLE, e
+from mqtt_client_bench.report.html import STYLE, e, page_url
 
 # Written into every site; only a directory carrying it may be replaced.
 MARKER = ".mqtt-client-bench-site"
@@ -67,6 +67,16 @@ def _copy_profiles(chosen, site: Path) -> dict:
     return copied
 
 
+def write_sitemap(site: Path, pages_written: List[str]) -> None:
+    """``sitemap.xml`` for the generated pages, at their canonical URLs."""
+    urls = "".join(f"  <url><loc>{e(page_url(p))}</loc></url>\n" for p in pages_written)
+    (site / "sitemap.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' + urls + "</urlset>\n",
+        encoding="utf-8",
+    )
+
+
 def build(
     results: Path, site: Path, *, campaign: Optional[str] = None
 ) -> Optional[str]:
@@ -81,6 +91,7 @@ def build(
     shutil.copyfile(STYLE, site / "style.css")
     if chosen is None:
         (site / "index.html").write_text(pages.empty_page(skipped), encoding="utf-8")
+        write_sitemap(site, ["index.html"])
         return None
 
     data = site / "data"
@@ -105,6 +116,7 @@ def build(
     (site / "methodology.html").write_text(
         pages.methodology_page(chosen, files), encoding="utf-8"
     )
+    written = ["index.html", "coverage.html", "methodology.html"]
     if profiles:
         links = []
         labels = {r.get("run_id"): f"{r.get('client', '?')} · {r.get('point', {}).get('name', '?')} · {r.get('run_id', '?')}"
@@ -125,12 +137,16 @@ def build(
             '<p><a href="profiles.html">Tachyon profiles by run</a></p></main>',
         )
         index.write_text(content, encoding="utf-8")
+        written.append("profiles.html")
     for point in chosen.points:
         (site / "point" / f"{point['name']}.html").write_text(
             pages.point_page(chosen, point), encoding="utf-8"
         )
+        written.append(f"point/{point['name']}.html")
     for client in chosen.clients:
         (site / "client" / f"{client}.html").write_text(
             pages.client_page(chosen, client), encoding="utf-8"
         )
+        written.append(f"client/{client}.html")
+    write_sitemap(site, written)
     return chosen.name

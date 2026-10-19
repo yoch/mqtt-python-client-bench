@@ -6,6 +6,10 @@ how many arrived, how much CPU and memory it used to do it, and how late the
 messages were — each count confirmed by a party that does not share code with
 the client.
 
+Libraries compared: paho-mqtt, gmqtt, aiomqtt (v2 and the v3 alpha), amqtt,
+zMQTT, awscrt (AWS CRT) and MQTTium, on publish and receive capacity, CPU per
+message, memory and latency at fixed rates.
+
 **Live report:** [yoch.github.io/mqtt-python-client-bench](https://yoch.github.io/mqtt-python-client-bench/)
 (rebuilt from the committed campaigns under `results/v2/`).
 
